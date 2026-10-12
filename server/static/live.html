@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stintara Live</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:0 16px;background:#111;color:#eee}.muted{color:#999}.live{color:#57d68d;font-weight:700}.hero{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}.metrics{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin:16px 0}.metric{background:#1d1d1d;border:1px solid #333;border-radius:12px;padding:12px}.value{font-size:24px;font-weight:700}table{width:100%;border-collapse:collapse;background:#171717}th,td{text-align:left;padding:8px;border-bottom:1px solid #2b2b2b}tr.me{background:#242424}a{color:white}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}table{font-size:12px}}
+</style></head><body>
+<a href="/">← Stintara</a><div id="root" class="muted">Loading…</div>
+<script>
+
+const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = t => Number.isFinite(t) && t > 0 ? `${Math.floor(t/60)}:${(t%60).toFixed(3).padStart(6,'0')}` : '—';
+const num = (value, unit='', digits=1) => Number.isFinite(value) ? value.toFixed(digits) + unit : '—';
+const metric = (label, value) => `<div class="metric"><div class="muted">${esc(label)}</div><div>${esc(value)}</div></div>`;
+async function getJSON(url) {
+  const response = await fetch(url, {cache:'no-store'});
+  if (!response.ok) throw new Error(response.status === 404 ? 'Driver not found.' : 'Live data unavailable. Retrying…');
+  return response.json();
+}
+
+const slug = __DRIVER_SLUG__;
+function tyreTable(s) {
+  return `<h2>Tyres</h2><table><thead><tr><th>Corner</th><th>Remaining</th><th>Pressure</th>
+    <th>Inner / Mid / Outer</th><th>Brake</th></tr></thead><tbody>${['fl','fr','rl','rr'].map(c =>
+    `<tr><td>${c.toUpperCase()}</td><td>${num(s['tyre_remaining_'+c] == null ? null : s['tyre_remaining_'+c]*100, '%')}</td>
+    <td>${num(s['tyre_pressure_'+c+'_kpa'], ' kPa')}</td>
+    <td>${['inner','mid','outer'].map(p => num(s['tyre_temp_'+p+'_'+c+'_c'], ' °C')).join(' / ')}</td>
+    <td>${num(s['tyre_brake_temp_'+c+'_c'], ' °C')}</td></tr>`).join('')}</tbody></table>`;
+}
+async function refresh() {
+  const root = document.querySelector('#root');
+  try {
+    const d = await getJSON(`/api/drivers/${encodeURIComponent(slug)}/live`);
+    if (!d.live) {
+      root.innerHTML = `<h1>${esc(d.driver.display_name)}</h1><p class="muted">Offline</p>`;
+      return;
+    }
+    const me = d.participants.find(p => p.is_stintara_driver) || {};
+    const s = d.strategy || {};
+    root.className = '';
+    root.innerHTML = `<div class="live">● LIVE</div><h1>${esc(d.driver.display_name)}</h1>
+      <div>${esc(d.session.track_name)} · ${esc(d.session.session_type)} · ${esc(me.car_name || me.car_class)}</div>
+      <div class="metrics">${metric('Position', me.position)}${metric('Lap', me.total_laps)}
+      ${metric('Fuel', num(s.fuel_l, ' L'))}${metric('Fuel/lap', num(s.fuel_avg_consumption_lap, ' L', 2))}
+      ${metric('Fuel laps remaining', num(s.fuel_laps_remaining))}</div>
+      ${tyreTable(s)}<h2>Standings</h2><table><thead><tr><th>P</th><th>Driver</th><th>Car</th>
+      <th>Gap</th><th>Last</th><th>Best</th><th>Laps</th><th>Pit</th></tr></thead><tbody>
+      ${d.participants.map(p => `<tr class="${p.is_stintara_driver ? 'me' : ''}"><td>${esc(p.position)}</td>
+        <td>${esc(p.display_name)}</td><td>${esc(p.car_name || p.car_class)}</td>
+        <td>${p.laps_behind_leader > 0 ? esc(p.laps_behind_leader)+' L' : num(p.gap_to_leader, ' s')}</td>
+        <td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${esc(p.total_laps)}</td>
+        <td>${p.in_pits ? 'PIT' : ''}</td></tr>`).join('')}</tbody></table>`;
+  } catch (error) { root.textContent = error.message; }
+  finally { setTimeout(refresh, 500); }
+}
+refresh();
+</script></body></html>

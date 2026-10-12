@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: stintara-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stintara}
+      POSTGRES_USER: ${POSTGRES_USER:-stintara}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      TZ: ${TZ:-Europe/Berlin}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stintara} -d ${POSTGRES_DB:-stintara}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: ./server
+      args:
+        VERSION: dev
+        REVISION: local
+    container_name: stintara-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: stintara-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-stintara}
+      POSTGRES_USER: ${POSTGRES_USER:-stintara}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      DATABASE_URL: ${DATABASE_URL:-}
+      TZ: ${TZ:-Europe/Berlin}
+      BOOTSTRAP_DRIVER_NAME: ${BOOTSTRAP_DRIVER_NAME:-Stintara Driver}
+      BOOTSTRAP_DRIVER_SLUG: ${BOOTSTRAP_DRIVER_SLUG:-driver}
+      BOOTSTRAP_AGENT_NAME: ${BOOTSTRAP_AGENT_NAME:-gaming-pc}
+      BOOTSTRAP_AGENT_TOKEN: ${BOOTSTRAP_AGENT_TOKEN:?Set BOOTSTRAP_AGENT_TOKEN}
+    volumes:
+      - ./data/server:/data
+    ports:
+      - "${APP_PORT:-8080}:8080"
+
+networks:
+  default:
+    name: stintara

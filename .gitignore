@@ -1,0 +1,30 @@
+.env
+.env.*
+!.env.example
+!.env.*.example
+.venv/
+venv/
+node_modules/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+data/
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local output and per-user IDE state (shared project settings remain visible).
+/logs/
+/tmp/
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/shelf/
+
+# Optional private operator notes/overrides; never publish.
+deploy/local/
