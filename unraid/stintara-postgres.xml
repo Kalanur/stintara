@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>stintara-postgres</Name>
+  <Repository>postgres:17</Repository>
+  <Registry>https://hub.docker.com/_/postgres</Registry>
+  <Network>stintara</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/kalanur/stintara/issues</Support>
+  <Project>https://github.com/kalanur/stintara</Project>
+  <Overview>PostgreSQL 17 database for Stintara. This container is intentionally not exposed on port 5432 and communicates with the Stintara server only through the custom Docker network named stintara.</Overview>
+  <Category>Tools:Utilities</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams>--restart=unless-stopped --security-opt=no-new-privileges</ExtraParams>
+  <PostArgs/>
+  <Requires>Create the custom Docker network first: docker network create stintara</Requires>
+
+  <Config Name="PostgreSQL data" Target="/var/lib/postgresql/data" Default="/mnt/user/appdata/stintara/postgres" Mode="rw" Description="Persistent Stintara PostgreSQL data." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/stintara/postgres</Config>
+  <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="stintara" Mode="" Description="Database name. Use the same value in the Stintara server template." Type="Variable" Display="always" Required="true" Mask="false">stintara</Config>
+  <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="stintara" Mode="" Description="Database user. Use the same value in the Stintara server template." Type="Variable" Display="always" Required="true" Mask="false">stintara</Config>
+  <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="Set a long random database password. Enter the same password in the Stintara server template." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="TZ" Target="TZ" Default="Europe/Berlin" Mode="" Description="Container timezone." Type="Variable" Display="advanced" Required="true" Mask="false">Europe/Berlin</Config>
+</Container>

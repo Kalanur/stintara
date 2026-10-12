@@ -1,0 +1,259 @@
+# Stintara V0.1
+
+Simulator-independent live timing and strategy telemetry, starting with LMU:
+
+```text
+LMU -> unmodified LMU Pitwall -> local Stintara Agent
+    -> Stintara Server -> PostgreSQL 17 -> live website
+```
+
+Read [AGENTS.md](AGENTS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for binding development decisions. [docs/VALIDATION.md](docs/VALIDATION.md) records this baseline's checks and outstanding deployment validation.
+
+## Current scope
+
+- Outbound agent connection; no incoming gaming-PC port forwarding.
+- Pitwall JSON WebSocket at `ws://127.0.0.1:9000?format=json`.
+- Live scoring received at up to 5 Hz, with in-memory API updates and at most 1 Hz database checkpoints.
+- Strategy samples persisted at most once per second per participant, enforced by the server.
+- Completed-lap snapshots, fuel, tyre remaining, pressures, individual temperatures, brake temperatures and available lap damage.
+- UUIDv7 entity IDs; external driver identities use `UNIQUE(provider, external_id)`.
+- Display names never identify a driver. Unresolved field participants remain valid.
+- Short reconnects reuse the same agent's session; long inactivity closes observations. RaceControl matching is not implemented.
+
+## Local development and tests
+
+Python 3.11+ is required; the server image uses Python 3.13. Frontend tests require Node.js 22+.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+python -m compileall -q server/app agent tests
+ruff check server/app agent tests
+python -m pytest -q
+node --test tests/ui.test.cjs
+```
+
+Without `TEST_DATABASE_URL`, PostgreSQL-dependent tests are explicitly skipped. For the full suite, point it at a dedicated local PostgreSQL 17 test database:
+
+```powershell
+$env:TEST_DATABASE_URL = 'postgresql://TEST_USER:TEST_PASSWORD@127.0.0.1:5432/stintara_tests'
+python -m pytest -q
+```
+
+Replace the placeholders with local test credentials. Tests create and remove their own temporary schemas; never use a production database for tests. The suite includes an actual WebSocket agent/server test using a simulated Pitwall source, not a live LMU session. CI runs the database suite with a dedicated PostgreSQL service.
+
+## Local Docker Compose
+
+Copy `.env.example` to `.env` and set your own random `POSTGRES_PASSWORD` and `BOOTSTRAP_AGENT_TOKEN`. Empty values prevent startup; example/default tokens are rejected. Keep `.env` out of Git.
+
+```powershell
+Copy-Item .env.example .env
+# Fill in the password and token in .env.
+docker compose config --quiet
+docker compose up -d --build
+curl.exe http://localhost:8080/health
+```
+
+Compose creates/uses Docker network `stintara`, runs `stintara-server` and `stintara-postgres`, and stores data under `./data/`. PostgreSQL has no published port. Run one application worker; the V0.1 live cache and ingestion serialization are process-local.
+
+## Standard installation on Unraid
+
+The standard installation runs independently of a reverse proxy:
+
+```text
+stintara-server (Unraid template container name: stintara)
+      |
+   stintara (application network)
+      |
+stintara-postgres
+```
+
+Only the application server and PostgreSQL belong to the standard `stintara` network. PostgreSQL is accessed by the server at `stintara-postgres:5432`, with no published database host port. Here "internal" describes the application network's role; it does not require Docker's separate `--internal` network flag.
+
+
+These are operator steps; creating or validating the repository does not deploy anything. No GHCR image is assumed to exist yet.
+
+### 1. Make a server image available
+
+For the first test without publishing to a registry, copy this repository to the Unraid host and build from its root:
+
+```bash
+docker build --platform linux/amd64 -f server/Dockerfile -t ghcr.io/kalanur/stintara:latest server
+```
+
+This tags a local image on the Unraid host; it does not push it. The alternative is a separately authorized GitHub/GHCR publication followed by pulling that image. Do not select an Unraid image-update/pull operation for a local-only image.
+
+### 2. Create the network and install the templates
+
+```bash
+docker network inspect stintara >/dev/null 2>&1 || docker network create stintara
+cp unraid/stintara-postgres.xml /boot/config/plugins/dockerMan/templates-user/my-stintara-postgres.xml
+cp unraid/stintara.xml /boot/config/plugins/dockerMan/templates-user/my-stintara.xml
+```
+
+In Unraid, use **Docker -> Add Container** and choose the templates.
+
+### 3. Start PostgreSQL first
+
+| Setting | Value |
+| --- | --- |
+| Container | `stintara-postgres` |
+| Image | `postgres:17` |
+| Network | `stintara` |
+| Host appdata | `/mnt/user/appdata/stintara/postgres` |
+| Container data | `/var/lib/postgresql/data` |
+| Database / user | `stintara` / `stintara` |
+| Password | Your own random password |
+| Timezone | `Europe/Berlin` |
+| Published ports | None |
+
+```bash
+docker exec stintara-postgres pg_isready -U stintara -d stintara
+```
+
+### 4. Start the Stintara server
+
+| Setting | Value |
+| --- | --- |
+| Container (Unraid template) | `stintara` |
+| Image | `ghcr.io/kalanur/stintara:latest` |
+| Network | `stintara` |
+| Port | `8080:8080` |
+| Host appdata | `/mnt/user/appdata/stintara/server` |
+| Container data | `/data` |
+| `POSTGRES_HOST` / `POSTGRES_PORT` | `stintara-postgres` / `5432` |
+| `POSTGRES_DB` / `POSTGRES_USER` | `stintara` / `stintara` |
+| `POSTGRES_PASSWORD` | Same password as PostgreSQL |
+| `DATABASE_URL` | Leave empty unless explicitly overriding the connection fields |
+| `BOOTSTRAP_DRIVER_NAME` / `BOOTSTRAP_DRIVER_SLUG` | `Stintara Driver` / `driver` |
+| `BOOTSTRAP_AGENT_NAME` | `gaming-pc` |
+| `BOOTSTRAP_AGENT_TOKEN` | Your own random token, distinct from the database password |
+| `TZ` | `Europe/Berlin` |
+
+For an existing installation, retain your previously configured `BOOTSTRAP_DRIVER_NAME`, `BOOTSTRAP_DRIVER_SLUG` and `BOOTSTRAP_AGENT_NAME` in private configuration. The generic defaults are for new installations; changing the slug/name keys can create a different bootstrap driver/agent.
+
+The server retries database connection for up to about one minute. Slugs allow lowercase letters, digits and hyphens. `/data` remains reserved for later artifacts; structured telemetry is stored in PostgreSQL.
+
+```bash
+docker logs --tail 100 stintara
+curl http://localhost:8080/health
+```
+
+Expect `{"status":"ok","version":"0.1.0"}`. Open `http://<unraid-host>:8080/` and `http://<unraid-host>:8080/drivers/driver/live`. Initially the page should show no active drivers.
+
+### 5. Run the Windows agent
+
+With Python 3.11+ on the gaming PC:
+
+```powershell
+cd agent
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+$env:STINTARA_WS = 'ws://<unraid-host>:8080/ws/ingest'
+$env:STINTARA_AGENT_TOKEN = '<same random token configured on the server>'
+.\run-agent.ps1
+```
+
+Replace the address and token placeholders. No script edit is needed. `PITWALL_WS` may override the local source address; the default requests JSON from the unchanged Pitwall bridge. Use `wss://` through a TLS endpoint for an Internet uplink; plain `ws://` is intended for the local test network.
+
+### 6. Exercise the real LMU data path
+
+1. Start Pitwall and join an LMU session.
+2. After SessionInfo and ScoringUpdate arrive, the configured driver should appear under **LIVE NOW**.
+3. Check standings, vehicle, fuel and tyre data on the driver page.
+4. Complete a lap and verify the database checks below.
+5. Interrupt the agent uplink briefly, reconnect, and confirm the session ID is unchanged.
+6. A driver disappears from LIVE after 15 seconds without scoring from their observation. After 120 seconds, the observation expires and the session closes if no other observer is active. Cleanup runs every 5 seconds.
+7. A game-disconnect message closes the agent observation immediately; a track/type change or session-clock reset starts a separate session.
+
+`SESSION_TIMEOUT_SECONDS` may override the 120-second timeout (minimum 15). Explicit game disconnects intentionally finalize immediately; a transport-only interruption does not.
+
+### 7. Check persistence
+
+```bash
+docker exec -it stintara-postgres psql -U stintara -d stintara
+```
+
+```sql
+select id, session_type, track_name, status, started_at, ended_at
+from sessions order by started_at desc;
+select session_id, agent_id, last_seen_at, ended_at from session_observations;
+select display_name, driver_id, position, total_laps from session_participants;
+select lap_number, lap_time, sector1, sector2, sector3, damage from laps;
+select recorded_at, fuel_l, tyre_remaining_fl, tyre_pressure_fl_kpa,
+       tyre_temp_inner_fl_c, tyre_brake_temp_fl_c
+from strategy_samples order by recorded_at desc limit 20;
+```
+
+## Optional reverse proxy integration
+
+A reverse proxy is optional. It and the Stintara server must share an existing, operator-managed Docker network. Connect only the application server to that second network; keep PostgreSQL exclusively on `stintara`. Do not attach the reverse proxy to the database/application network.
+
+```text
+Reverse Proxy
+      |
+<reverse-proxy-network> (existing, operator-managed)
+      |
+stintara (application container; stintara-server in Compose)
+      |
+stintara (application network)
+      |
+stintara-postgres
+```
+
+The operator supplies and manages `<reverse-proxy-network>`; it is not a Stintara resource or a dependency of the standard templates or Compose file. Inspect the existing network and container memberships first:
+
+```bash
+docker network inspect '<reverse-proxy-network>'
+docker inspect --format '{{json .NetworkSettings.Networks}}' stintara
+```
+
+If the running Unraid application container is not yet attached, connect it:
+
+```bash
+docker network connect '<reverse-proxy-network>' stintara
+```
+
+Replace the quoted placeholder with the actual existing network name. For Compose, use container `stintara-server` instead of `stintara` in these commands. Stintara does not create or manage the proxy network; the operator command only attaches the application container. Never connect `stintara-postgres` to it.
+
+Example upstream for the Unraid template:
+
+```text
+Scheme: http
+Hostname: stintara
+Port: 8080
+```
+
+With Compose, use hostname `stintara-server`. TLS can terminate at any suitable reverse proxy. Enable WebSocket forwarding for `/ws/ingest`, and configure the remote agent with `wss://<your-domain>/ws/ingest`. No particular proxy product is required. See Docker's [network connect reference](https://docs.docker.com/reference/cli/docker/network/connect/) for connecting and inspecting container networks.
+
+Treat this as an operator step, not an Unraid Post Arguments hook: an unconditional repeated `docker network connect` can fail when the endpoint already exists. A normal container restart retains its network membership; a container recreation during an update can require reattaching it. Inspect membership after updates and reconnect only if missing. The public template keeps `PostArgs` empty and does not suppress connection errors with `|| true`.
+
+V0.1 keeps host port `8080:8080` for direct access, `/health` and troubleshooting. Once a proxy-only installation has been verified, the operator may remove the application host-port mapping from their local template/Compose configuration. The proxy continues to use container port 8080; PostgreSQL still has no host-port mapping.
+
+Keep installation-specific notes and overrides outside the public repository. If an operator chooses to keep temporary local files under `deploy/local/`, that directory is Git-ignored; no private files are supplied or generated there. Never force-add local configuration. A private Compose override must declare an existing proxy network as external and attach only the application service.
+
+Operator smoke test: verify the standard direct health endpoint first, then verify HTTPS and an agent WebSocket through the proxy. Inspect memberships to confirm that PostgreSQL belongs only to `stintara`, and repeat the membership check after recreating the application container. A real proxy integration has not been tested by this repository change.
+
+## Existing prototype databases
+
+Back up an existing database before starting this revision. Startup adds the missing observation, weather and tyre fields and converts legacy `strategy_samples.id` values from `bigserial` to newly generated UUIDv7 values inside a transaction. Sample contents and participant references are retained. Custom foreign keys to the old sample ID can block the conversion; failure rolls back rather than dropping dependent objects. This is a small V0.1 compatibility step, not a general migration framework.
+
+## GitHub Actions and GHCR
+
+The workflow runs Python checks, PostgreSQL tests, frontend tests and `docker compose config` before its Docker job. The image target is `ghcr.io/kalanur/stintara`; it builds for `linux/amd64` and uses `GITHUB_TOKEN` with `packages: write`.
+
+Default-branch pushes publish `latest` and a SHA tag; valid SemVer `v*` tags produce SemVer/SHA tags without moving `latest`. Pull requests build without pushing. Other branch pushes run tests. Manual workflow dispatch follows the same branch/tag job gate: a default-branch or tag dispatch can publish; a feature-branch dispatch only runs tests. Nothing is published just by editing these files. The first push to the default branch will trigger publication after successful checks and must be authorized accordingly. After the first publication, check package visibility or configure registry authentication on the Unraid host before pulling.
+
+## Known limits
+
+- No official RaceControl matching, automatic cross-agent race association or other simulator adapters yet. Multiple observations are supported through an internal trusted association function; there is no public endpoint to arbitrarily attach agents to sessions.
+- Reconnect matching is local to an authenticated agent. Same-track/type restarts with no observed clock reset or disconnect remain ambiguous without official session IDs. Driver swaps and per-observer vehicle-ID reconciliation are deferred.
+- A driver is associated through the authenticated agent and the simulator's player vehicle ID, never through a display name. No public account/login system is implemented.
+- Session end is inferred from source disconnect, transition or inactivity; no official results finalization yet.
+- The live pages poll REST. A single server worker is required for the current in-memory live cache.
+- No raw high-frequency storage, Parquet, historical UI, Results XML reconciliation, Redis or microservices.
+- Real LMU, Docker image execution and the Unraid host deployment still require the operator smoke test above; simulated tests cannot establish those results.
+
+LMU `mWear` is stored as `tyre_remaining_*`: `1.0 = new`, `0.0 = consumed`. Sector times in persisted lap snapshots are individual sectors, not cumulative S1+S2.

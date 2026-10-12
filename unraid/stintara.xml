@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>stintara</Name>
+  <Repository>ghcr.io/kalanur/stintara:latest</Repository>
+  <Registry>https://github.com/kalanur/stintara/pkgs/container/stintara</Registry>
+  <Network>stintara</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/kalanur/stintara/issues</Support>
+  <Project>https://github.com/kalanur/stintara</Project>
+  <Overview>Stintara is a simulator-independent live timing and race-intelligence platform. V0.1 ingests LMU Pitwall telemetry through the Stintara agent and stores live scoring, laps and strategy telemetry in PostgreSQL.</Overview>
+  <Category>Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams>--restart=unless-stopped --security-opt=no-new-privileges</ExtraParams>
+  <PostArgs/>
+  <Requires>Requires the stintara-postgres container and the custom Docker network: docker network create stintara</Requires>
+
+  <Config Name="Web UI" Target="8080" Default="8080" Mode="tcp" Description="Host port for the Stintara Web UI and agent API." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/stintara/server" Mode="rw" Description="Persistent application data reserved for imports and future local artifacts." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/stintara/server</Config>
+
+  <Config Name="POSTGRES_HOST" Target="POSTGRES_HOST" Default="stintara-postgres" Mode="" Description="Docker DNS name of the Stintara PostgreSQL container." Type="Variable" Display="always" Required="true" Mask="false">stintara-postgres</Config>
+  <Config Name="POSTGRES_PORT" Target="POSTGRES_PORT" Default="5432" Mode="" Description="Internal PostgreSQL port. Do not publish this port on Unraid." Type="Variable" Display="advanced" Required="true" Mask="false">5432</Config>
+  <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="stintara" Mode="" Description="Must match POSTGRES_DB in stintara-postgres." Type="Variable" Display="always" Required="true" Mask="false">stintara</Config>
+  <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="stintara" Mode="" Description="Must match POSTGRES_USER in stintara-postgres." Type="Variable" Display="always" Required="true" Mask="false">stintara</Config>
+  <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="Must match POSTGRES_PASSWORD in stintara-postgres." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="DATABASE_URL (optional)" Target="DATABASE_URL" Default="" Mode="" Description="Optional full PostgreSQL DSN. Leave blank to use the POSTGRES_* fields above. If set, it overrides them." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+
+  <Config Name="Driver name" Target="BOOTSTRAP_DRIVER_NAME" Default="Stintara Driver" Mode="" Description="Initial Stintara driver display name for this V0.1 agent." Type="Variable" Display="always" Required="true" Mask="false">Stintara Driver</Config>
+  <Config Name="Driver slug" Target="BOOTSTRAP_DRIVER_SLUG" Default="driver" Mode="" Description="Stable URL slug, e.g. /drivers/driver/live." Type="Variable" Display="always" Required="true" Mask="false">driver</Config>
+  <Config Name="Agent name" Target="BOOTSTRAP_AGENT_NAME" Default="gaming-pc" Mode="" Description="Friendly name of the first LMU telemetry agent." Type="Variable" Display="always" Required="true" Mask="false">gaming-pc</Config>
+  <Config Name="Agent token" Target="BOOTSTRAP_AGENT_TOKEN" Default="" Mode="" Description="Set a long random token. Configure exactly the same token on the Windows Stintara agent." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="TZ" Target="TZ" Default="Europe/Berlin" Mode="" Description="Container timezone." Type="Variable" Display="advanced" Required="true" Mask="false">Europe/Berlin</Config>
+</Container>
