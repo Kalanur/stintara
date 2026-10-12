@@ -1,6 +1,8 @@
 from pathlib import Path
+from types import SimpleNamespace
 from xml.etree import ElementTree
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,23 +50,94 @@ def test_compose_structure_and_required_secrets():
 def test_workflow_yaml_and_publish_contract():
     # BaseLoader preserves GitHub's `on` key rather than treating it as YAML 1.1 boolean.
     workflow = yaml.load((ROOT / ".github/workflows/docker.yml").read_text(), Loader=yaml.BaseLoader)
-    assert "push" in workflow["on"]
+    assert workflow["on"]["push"] == {"branches": ["**"], "tags": ["v*"]}
+    assert set(workflow["on"]) == {"push", "pull_request", "workflow_dispatch"}
+    assert not workflow["on"]["workflow_dispatch"]  # No channel override inputs.
+    assert workflow["concurrency"] == {
+        "group": "stintara-${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": "true",
+    }
+    test = workflow["jobs"]["test"]
+    assert "if" not in test
+    assert test["services"]["postgres"]["image"] == "postgres:17"
+    runs = [step.get("run", "") for step in test["steps"]]
+    for command in ("python -m compileall -q server/app agent tests", "ruff check server/app agent tests",
+                    "python -m pytest -q", "node --test tests/ui.test.cjs"):
+        assert command in runs
+    assert any("docker compose config --quiet" in command for command in runs)
     job = workflow["jobs"]["docker"]
     assert job["needs"] == "test"
     assert job["permissions"]["packages"] == "write"
     steps = job["steps"]
     build = next(step for step in steps if step.get("uses", "").startswith("docker/build-push-action"))
     assert build["with"]["platforms"] == "linux/amd64"
-    assert build["with"]["push"] == "${{ github.event_name != 'pull_request' }}"
     login = next(step for step in steps if step.get("uses", "").startswith("docker/login-action"))
-    assert login["if"] == "github.event_name != 'pull_request'"
-    assert job["if"] == ("github.event_name == 'pull_request' || "
-                         "github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || "
-                         "startsWith(github.ref, 'refs/tags/')")
+    assert build["with"]["push"] == "${{ " + login["if"] + " }}"
+    assert "github.event_name" in login["if"] and "github.ref" in login["if"]
     metadata = next(step for step in steps if step.get("uses", "").startswith("docker/metadata-action"))
     assert metadata["with"]["flavor"] == "latest=false"
-    tags = next(step["with"]["tags"] for step in steps if step.get("uses", "").startswith("docker/metadata-action"))
-    assert "is_default_branch" in tags and "type=semver" in tags and "type=sha" in tags
+    tags = metadata["with"]["tags"].splitlines()
+    assert len(tags) == 5
+    assert "type=sha,prefix=sha-" in tags
+    assert any("pattern={{version}}" in tag for tag in tags)
+    assert any("pattern={{major}}.{{minor}}" in tag for tag in tags)
+
+
+def workflow_condition(expression, event, ref, default="main"):
+    """Evaluate only the boolean expression subset used here, not the Actions runtime."""
+    expression = expression.removeprefix("${{").removesuffix("}}").strip()
+    github = SimpleNamespace(event_name=event, ref=ref,
+                             event=SimpleNamespace(repository=SimpleNamespace(default_branch=default)))
+    return bool(eval(expression.replace("&&", " and ").replace("||", " or "),
+                     {"__builtins__": {}},
+                     {"github": github, "startsWith": lambda value, prefix: value.startswith(prefix)}))
+
+
+@pytest.mark.parametrize("event,ref,default,builds,pushes,channels,semver", [
+    ("push", "refs/heads/feat/v0.1-baseline", "main", False, False, set(), False),
+    ("pull_request", "refs/pull/1/merge", "main", True, False, set(), False),
+    ("push", "refs/heads/dev", "main", True, True, {"dev"}, False),
+    ("push", "refs/heads/main", "main", True, True, {"latest"}, False),
+    ("push", "refs/tags/v1.2.3", "main", True, True, set(), True),
+    ("workflow_dispatch", "refs/heads/feature/test", "main", False, False, set(), False),
+    ("workflow_dispatch", "refs/heads/dev", "main", True, True, {"dev"}, False),
+    ("workflow_dispatch", "refs/heads/main", "main", True, True, {"latest"}, False),
+    ("workflow_dispatch", "refs/tags/v1.2.3", "main", True, True, set(), True),
+    ("workflow_dispatch", "refs/tags/other", "main", False, False, set(), False),
+    ("push", "refs/heads/dev-extra", "main", False, False, set(), False),
+    ("push", "refs/heads/main", "other", False, False, set(), False),
+    ("push", "refs/heads/other", "other", False, False, set(), False),
+    ("push", "refs/heads/dev", "dev", True, True, {"dev"}, False),
+    ("pull_request", "refs/heads/dev", "main", True, False, set(), False),
+    ("pull_request", "refs/heads/main", "main", True, False, set(), False),
+])
+def test_workflow_channel_matrix(event, ref, default, builds, pushes, channels, semver):
+    workflow = yaml.load((ROOT / ".github/workflows/docker.yml").read_text(), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["docker"]
+    steps = job["steps"]
+    build = next(step for step in steps if step.get("uses", "").startswith("docker/build-push-action"))
+    login = next(step for step in steps if step.get("uses", "").startswith("docker/login-action"))
+    metadata = next(step for step in steps if step.get("uses", "").startswith("docker/metadata-action"))
+
+    def enabled(expression):
+        return workflow_condition(expression, event, ref, default)
+
+    assert enabled(job["if"]) == builds
+    # Check the independent step gates even when the whole job is skipped.
+    assert enabled(login["if"]) == pushes
+    assert enabled(build["with"]["push"]) == pushes
+    raw_tags = set()
+    version_rules = []
+    for line in metadata["with"]["tags"].splitlines():
+        attributes, separator, condition = line.partition(",enable=")
+        rule = dict(item.split("=", 1) for item in attributes.split(","))
+        active = enabled(condition) if separator else True
+        if rule["type"] == "raw" and active:
+            raw_tags.add(rule["value"])
+        if rule["type"] == "semver":
+            version_rules.append(active)
+    assert raw_tags == channels
+    assert version_rules == [semver, semver]
 
 
 def test_generic_bootstrap_defaults_agree():

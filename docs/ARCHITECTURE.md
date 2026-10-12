@@ -90,7 +90,9 @@ Maintain `unraid/stintara.xml` and `unraid/stintara-postgres.xml`. Docker Compos
 
 Support `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD`, with an optional `DATABASE_URL` override. Agent authentication uses `BOOTSTRAP_AGENT_TOKEN`; the deployment timezone is `Europe/Berlin`. Never commit real passwords or tokens, and do not ship usable default secrets.
 
-The publishing target is `latest` on the default branch, semantic-version tags and a SHA tag, using `GITHUB_TOKEN` with `packages: write`.
+Container promotion follows feature branch -> PR to `dev` -> CI -> `:dev` -> operator integration test -> PR to `main` -> CI -> `:latest`. Publication uses `GITHUB_TOKEN` with `packages: write` after the complete test job succeeds. Only `dev` can publish `:dev`; only `main`, while it is the default branch, can publish `:latest`. Version tags publish SemVer/SHA references without moving either channel. Pull requests build without publication; feature pushes only test. Manual dispatch follows the same ref restrictions.
+
+Development and stable/production deployments must use separate persistent databases and application data. Test migrations in Dev before promotion. The standard Unraid template remains on `:latest`; an operator can duplicate it locally for `:dev` with isolated data. These are workflow/deployment rules, not confirmation that a Dev branch or deployed integration environment exists.
 
 ## V0.1 scope and current limits
 

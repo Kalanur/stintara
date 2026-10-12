@@ -244,7 +244,31 @@ Back up an existing database before starting this revision. Startup adds the mis
 
 The workflow runs Python checks, PostgreSQL tests, frontend tests and `docker compose config` before its Docker job. The image target is `ghcr.io/kalanur/stintara`; it builds for `linux/amd64` and uses `GITHUB_TOKEN` with `packages: write`.
 
-Default-branch pushes publish `latest` and a SHA tag; valid SemVer `v*` tags produce SemVer/SHA tags without moving `latest`. Pull requests build without pushing. Other branch pushes run tests. Manual workflow dispatch follows the same branch/tag job gate: a default-branch or tag dispatch can publish; a feature-branch dispatch only runs tests. Nothing is published just by editing these files. The first push to the default branch will trigger publication after successful checks and must be authorized accordingly. After the first publication, check package visibility or configure registry authentication on the Unraid host before pulling.
+### Image channels and promotion
+
+| Image tag | Source and purpose |
+| --- | --- |
+| `:dev` | Development/integration image built exclusively from branch `dev`. |
+| `:latest` | Stable image built exclusively from `main`, provided it is the repository default branch. |
+| `:<semver>` | Versioned release images from valid SemVer `v*` tags; `v1.2.3` produces `1.2.3` and `1.2`. |
+| `:sha-...` | Commit-specific build reference for traceability, emitted with each published image. |
+
+SHA tags identify source revisions rather than moving channels. Registry tags can still be overwritten by rebuilding a revision; pin the image digest when immutable image bytes are required.
+
+```text
+feature branch -> PR to dev -> CI -> merge -> :dev
+    -> operator/integration test -> PR dev to main -> CI -> merge -> :latest
+```
+
+The `dev` channel allows real container integration tests before promotion to `main`. Both branches run the complete CI suite; `main` never bypasses tests. Pull requests run tests and build without logging in or pushing. Feature-branch pushes run tests only. Publishing requires successful tests and explicit event/ref checks on both the Docker job and login/push steps.
+
+Manual dispatch on `dev` or default-branch `main` may republish its own channel. Dispatch on other branches runs tests only. `v*` tag runs publish SHA tags and, for valid SemVer versions, version tags; they never create `dev` or `latest`. Automatic metadata-action `latest` generation is disabled. There is no channel override input. Concurrent runs of the same workflow/ref cancel older runs; different version tags use separate groups.
+
+Development images must not use the same persistent database or application data as stable/production deployments. Use separate databases and appdata, and test migrations in Dev first. Never point `:dev` at the stable/production PostgreSQL database.
+
+The standard Unraid template continues to use `ghcr.io/kalanur/stintara:latest`. For integration testing, the operator may duplicate it locally, change the image tag to `:dev`, and configure separate database/appdata resources. No additional public Dev template is needed.
+
+This workflow change does not create `dev`, merge code or deploy an image. Publication begins only after an authorized push/dispatch on an eligible ref containing this workflow. After publication, check package visibility or configure registry authentication before pulling.
 
 ## Known limits
 

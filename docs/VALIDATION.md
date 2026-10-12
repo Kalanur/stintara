@@ -97,3 +97,19 @@ A CI discrepancy was corrected: automatic `latest` generation by the metadata ac
 Current precommit validation: **25 Python tests passed, 17 PostgreSQL-dependent cases skipped** (no configured test database); **2 frontend tests passed**; Ruff, `compileall`, Unraid XML parsing, Compose/workflow YAML checks and public-source hygiene checks passed. Skipped cases comprise all 15 cases in `test_database.py` plus database bootstrap/authentication and the database-backed end-to-end transport case in `test_transport.py`. Earlier PostgreSQL results above remain historical. Docker is unavailable, so Compose CLI validation and image building remain unexecuted locally.
 
 No real credentials or private infrastructure values were found in the planned files. Empty deployment secret fields, explicit README placeholders, localhost/bind addresses, public project URLs and clearly named test-only credentials were retained. No `git add`, commit, push, tag, release, registry publication or deployment was performed. The baseline is ready for an initial source commit, with the documented Docker/real-LMU/Unraid/proxy runtime checks still outstanding.
+
+
+## Dedicated development image channel (2026-10-12)
+
+The workflow now separates `dev` and default-branch `main` publication. Login and push have independent event/ref allowlists; feature pushes and feature dispatches only test, and PRs build without publishing. SemVer tags do not move either channel. The existing complete CI test job is unchanged. The standard Unraid template still uses `:latest`.
+
+Local checks for this change:
+
+- Python `compileall` and Ruff passed.
+- Python suite: **41 passed, 17 skipped**. No `TEST_DATABASE_URL` was configured; the PostgreSQL-dependent cases remain skipped, not newly verified.
+- Frontend Node test runner: **2 passed**.
+- Deployment checks parsed workflow/Compose YAML and both Unraid XML templates. Sixteen event/ref scenarios exercised the declared job, login, push and metadata enable expressions, including dispatch, PRs, tags, branch-name lookalikes and a changed default branch. These evaluate the boolean subset used by this workflow, not the full GitHub Actions runtime or Docker metadata-action implementation.
+- Public-source repository hygiene checks passed. No private deployment values were added.
+- Docker was unavailable; Docker builds and `docker compose config --quiet` could not be executed locally. CI retains Compose validation and the complete PostgreSQL test suite.
+
+The previous feature-commit CI succeeded according to the operator. This does not establish CI success for the new workflow revision. No development branch, release, image publication or deployment was created as part of local validation. Real Dev-container integration and migration tests remain operator steps after the development channel is established.
