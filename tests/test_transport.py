@@ -1,16 +1,246 @@
 import asyncio
 import json
 from contextlib import suppress
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 import uvicorn
 import websockets
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
 
 from agent import stintara_agent
 from server.app import main
 from tests.conftest import make_agent
+
+
+@pytest.fixture
+def ingest_client(monkeypatch):
+    main.active_agents.clear()
+    monkeypatch.setattr(main, "authenticate_agent", AsyncMock(
+        side_effect=lambda token: {"id": "test-agent", "slug": "driver"} if token == "test-secret" else None))
+    handler = AsyncMock()
+    monkeypatch.setattr(main, "handle_message", handler)
+    # No lifespan: transport contract tests isolate authentication/persistence.
+    yield TestClient(main.app), handler
+    main.active_agents.clear()
+
+
+def hello(ws, token="test-secret"):
+    ws.send_json({"type": "agent_hello", "protocol": "stintara-agent-v1", "token": token, "simulator": "lmu"})
+
+
+def frame(ws, kind="telemetry", payload=None, protocol="stintara-agent-v1"):
+    ws.send_json({"protocol": protocol, "message_type": kind, "payload": payload if payload is not None else {"fuel": 42}})
+
+
+@pytest.mark.parametrize("kind,payload", [
+    ("telemetry", {"tires": [{"remaining": "test-secret"}]}),
+    ("scoring", {"session_type": "Practice", "vehicles": [{"id": "test-secret"}]}),
+    ("lap_snapshots", {"session_type": "Practice", "drivers": [{"id": "test-secret"}]}),
+])
+def test_invalid_provider_payload_is_dropped_then_valid_frame_processed(ingest_client, caplog, kind, payload):
+    client, handler = ingest_client
+    with client.websocket_connect("/ws/ingest") as ws:
+        hello(ws)
+        assert ws.receive_json()["type"] == "agent_welcome"
+        frame(ws, kind, payload)
+        frame(ws)
+        frame(ws, protocol="bad-protocol-test-secret")
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1008
+    assert handler.await_count == 1
+    assert handler.call_args.args[2:] == ("telemetry", main.PAYLOADS["telemetry"](fuel=42).model_dump())
+    logs = [json.loads(r.message) for r in caplog.records if r.name == "stintara.ingest"]
+    assert logs[0]["agent_id"] == "test-agent" and logs[0]["message_type"] == kind
+    assert logs[0]["error_class"] == "ValidationError" and logs[0]["validation"]
+    assert logs[0]["close_code"] is None and logs[-1]["close_code"] == 1008
+    assert "test-secret" not in caplog.text
+
+
+def test_invalid_token_and_duplicate_connection_still_rejected(ingest_client, caplog):
+    client, _ = ingest_client
+    with client.websocket_connect("/ws/ingest") as ws:
+        hello(ws, "invalid-secret")
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1008
+    with client.websocket_connect("/ws/ingest") as first:
+        hello(first)
+        first.receive_json()
+        with client.websocket_connect("/ws/ingest") as duplicate:
+            hello(duplicate)
+            with pytest.raises(WebSocketDisconnect) as exc:
+                duplicate.receive_json()
+            assert exc.value.reason == "agent already connected"
+        assert "test-agent" in main.active_agents
+    assert "invalid-secret" not in caplog.text
+    assert not main.active_agents
+    with client.websocket_connect("/ws/ingest") as reconnected:
+        hello(reconnected)
+        assert reconnected.receive_json()["type"] == "agent_welcome"
+
+
+def test_invalid_payload_budget_cannot_be_reset_by_valid_frames(ingest_client):
+    client, handler = ingest_client
+    with client.websocket_connect("/ws/ingest") as ws:
+        hello(ws)
+        ws.receive_json()
+        for _ in range(main.MAX_INVALID_PAYLOADS):
+            frame(ws)
+            frame(ws, payload={"tires": [{"remaining": 9}]})
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1008 and exc.value.reason == "too many invalid payloads"
+    assert handler.await_count == main.MAX_INVALID_PAYLOADS
+
+
+@pytest.mark.parametrize("message", [
+    {"protocol": "stintara-agent-v1", "message_type": "unknown", "payload": {}},
+    {"protocol": "stintara-agent-v1", "message_type": "telemetry", "payload": []},
+    {"protocol": "stintara-agent-v1", "message_type": "connection", "payload": {}},
+    [],
+])
+def test_fundamental_protocol_errors_remain_fatal(ingest_client, message):
+    client, handler = ingest_client
+    with client.websocket_connect("/ws/ingest") as ws:
+        hello(ws)
+        ws.receive_json()
+        ws.send_json(message)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1008
+    handler.assert_not_awaited()
+
+
+def test_messages_before_hello_are_rejected(ingest_client):
+    client, handler = ingest_client
+    with client.websocket_connect("/ws/ingest") as ws:
+        frame(ws)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1008
+    handler.assert_not_awaited()
+
+
+def test_ctrl_c_is_clean_but_unexpected_errors_remain_visible(monkeypatch, capsys):
+    def interrupted(coro):
+        coro.close()
+        raise KeyboardInterrupt
+    monkeypatch.setattr(stintara_agent.asyncio, "run", interrupted)
+    stintara_agent.cli()
+    assert capsys.readouterr().out == "Stintara agent stopped.\n"
+
+    def broken(coro):
+        coro.close()
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(stintara_agent.asyncio, "run", broken)
+    with pytest.raises(RuntimeError):
+        stintara_agent.cli()
+
+
+@pytest.mark.parametrize("code,reason", [(1000, ""), (1008, "invalid Stintara message"), (1008, "test-secret")])
+async def test_agent_close_diagnostics(monkeypatch, capsys, code, reason):
+    async def uplink(socket):
+        await socket.recv()
+        await socket.send(json.dumps({"type": "agent_welcome", "driver_slug": "driver"}))
+        await socket.close(code=code, reason=reason)
+    async with websockets.serve(uplink, "127.0.0.1", 0) as server:
+        monkeypatch.setattr(stintara_agent, "STINTARA_WS", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
+        monkeypatch.setattr(stintara_agent, "PITWALL_WS", "ws://127.0.0.1:1")
+        await asyncio.wait_for(stintara_agent.run_once("test-secret"), 3)
+    output = capsys.readouterr().out
+    assert f"code={code}" in output and "outcome=" in output
+    assert "test-secret" not in output
+
+
+async def test_real_transport_abort_allows_same_agent_to_reconnect(monkeypatch, unused_tcp_port):
+    main.active_agents.clear()
+    monkeypatch.setattr(main, "authenticate_agent", AsyncMock(return_value={"id": "transport-agent", "slug": "driver"}))
+    handler = AsyncMock()
+    monkeypatch.setattr(main, "handle_message", handler)
+    server = uvicorn.Server(uvicorn.Config(main.app, host="127.0.0.1", port=unused_tcp_port,
+                                         lifespan="off", log_level="error"))
+    serving = asyncio.create_task(server.serve())
+    try:
+        async with asyncio.timeout(5):
+            while not server.started:
+                await asyncio.sleep(.01)
+        url = f"ws://127.0.0.1:{unused_tcp_port}/ws/ingest"
+        greeting = json.dumps({"type": "agent_hello", "protocol": "stintara-agent-v1",
+                               "token": "test-secret", "simulator": "lmu"})
+        async with websockets.connect(url, proxy=None) as socket:
+            await socket.send(greeting)
+            assert json.loads(await socket.recv())["type"] == "agent_welcome"
+            socket.transport.abort()
+        async with asyncio.timeout(5):
+            while main.active_agents:
+                await asyncio.sleep(.01)
+        async with websockets.connect(url, proxy=None) as socket:
+            await socket.send(greeting)
+            assert json.loads(await socket.recv())["type"] == "agent_welcome"
+            await socket.send(json.dumps({"protocol": "stintara-agent-v1", "message_type": "telemetry", "payload": {"fuel": 42}}))
+            async with asyncio.timeout(5):
+                while not handler.await_count:
+                    await asyncio.sleep(.01)
+            assert handler.call_args.args[3]["fuel"] == 42
+    finally:
+        server.should_exit = True
+        await serving
+        main.active_agents.clear()
+
+
+async def test_agent_announces_retry_and_does_not_retry_cancellation(monkeypatch, capsys):
+    monkeypatch.setenv("STINTARA_AGENT_TOKEN", "test-secret")
+    monkeypatch.setattr(stintara_agent, "run_once", AsyncMock(return_value=None))
+
+    async def cancel_sleep(delay):
+        assert delay == 3
+        raise asyncio.CancelledError
+    monkeypatch.setattr(stintara_agent.asyncio, "sleep", cancel_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await stintara_agent.main()
+    stintara_agent.run_once.assert_awaited_once()
+    assert "Retrying Stintara connection in 3s" in capsys.readouterr().out
+
+
+def test_bad_handshake_validation_never_logs_token(ingest_client, caplog):
+    client, _ = ingest_client
+    with client.websocket_connect("/ws/ingest") as ws:
+        ws.send_json({"type": "agent_hello", "protocol": "test-secret", "token": "test-secret", "simulator": "lmu"})
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+    assert "test-secret" not in caplog.text
+    assert '"ValidationError"' in caplog.text
+
+
+async def test_close_diagnostic_when_forwarder_finishes_before_close_waiter(monkeypatch, capsys):
+    class Uplink:
+        close_code = 1008
+        close_reason = "invalid Stintara message"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def send(self, raw):
+            pass
+
+        async def recv(self):
+            return json.dumps({"type": "agent_welcome", "driver_slug": "driver"})
+
+        async def wait_closed(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(stintara_agent.websockets, "connect", lambda *args, **kwargs: Uplink())
+    monkeypatch.setattr(stintara_agent, "bridge", AsyncMock(return_value=None))
+    await asyncio.wait_for(stintara_agent.run_once("test-secret"), 3)
+    assert "code=1008" in capsys.readouterr().out
 
 
 async def test_bootstrap_and_authentication(db, monkeypatch):

@@ -98,7 +98,7 @@ Development and stable/production deployments must use separate persistent datab
 
 V0.1 targets a small end-to-end LMU prototype: live-driver listing, a driver live page with standings and strategy data, persisted lap snapshots and strategy samples.
 
-The local prototype already contains server, agent, schema, live pages, Docker configuration, Unraid templates and a GHCR workflow. This records source availability, not a successful deployment or end-to-end validation.
+The local prototype already contains server, agent, schema, live pages, Docker configuration, Unraid templates and a GHCR workflow. The operator subsequently reported a successful baseline LMU-to-live-UI smoke test on a container host; see VALIDATION.md. That result does not validate later revisions automatically.
 
 Known limits of that implementation:
 
@@ -120,3 +120,16 @@ The bridge supports `?format=json`, sends an initial lap snapshot before regular
 ## Maintaining these decisions
 
 Update this document when an architectural decision changes. Keep intended behavior and verified implementation status distinct. For development rules, read [AGENTS.md](../AGENTS.md).
+
+
+## Real-world V0.1 hardening
+
+After authentication and envelope validation, invalid scoring/telemetry/lap snapshots are discarded before domain handling. A connection-local rolling budget closes a client after ten validation failures in 60 seconds. Protocol/authentication errors remain fatal. Validation logs contain only internal agent ID, known message type, error class and bounded field/type summaries; no input values, tokens or raw payloads. The root cause of the operator's individual disconnects still needs close/validation logs from a repeat test.
+
+Provider sentinel normalization belongs in the Pitwall adapter, before transport and persistence. Temperatures <= -200 Celsius become null; nonpositive wheel pressure becomes null only with unavailable surface temperatures and no explicit flat/detached flags. Real temperature or damage evidence preserves zero pressure. Tyre remaining semantics stay unchanged despite an inconsistent external wheel-snapshot comment.
+
+Vehicle identity currently uses an additive API projection: legacy persisted `car_name` maps to `entry_name`, `car_class` to `vehicle_class`, while `vehicle_model` and `manufacturer` remain null. Team and car-number fields stay separate. No database schema or stored history is rewritten; future trustworthy model/manufacturer data will require an explicit persistence change.
+
+Source investigation used [Pitwall a171b80](https://github.com/Swizzjack/lmu-pitwall/tree/a171b80a7c8c1e02a9d029e32fd717c834d26e71): `bridge/src/main.rs`, `bridge/src/protocol/messages.rs`, and `dashboard/src/components/widgets/Standings.tsx`. Scoring `car_name` comes from `mVehicleName`, team is empty, and `car_number` comes from the vehicle slot ID, not a proven race number. Lap snapshots expose `vehicle_name`/`class_name`; these must not be treated as evidence of a real model/manufacturer. The operator observed entry/livery strings, contradicting the protocol comment's model claim. Live TireData lacks flat/detached flags, while wheel snapshots have them.
+
+Scoring forwards `mPlace`, `mTimeBehindLeader` and `mLapsBehindLeader`. Pitwall's own UI derives class positions and uses best-lap differences for practice/qualifying, with configurable reference selection. This establishes a difference from Stintara's raw display, but does not explain repeated raw positions without captured scoring. This fix preserves position/gap values rather than choosing an unverified ranking/reference policy.

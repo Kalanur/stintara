@@ -42,3 +42,20 @@ test('driver page includes tyre readings, standings and offline/error states', a
   assert.match((await render('live.html', {live:false,driver:{display_name:'Driver'}})).innerHTML, /Offline/);
   assert.match((await render('live.html', null, false, 404)).textContent, /Driver not found/);
 });
+
+test('vehicle fallback identifies model, manufacturer, entry and class honestly', async () => {
+  const participants = [
+    {vehicle_model:'Model A', manufacturer:'Brand A', entry_name:'Entry A'},
+    {manufacturer:'Brand B', entry_name:'Entry B'},
+    {entry_name:'<Entry C>', vehicle_class:'GT3'},
+    {car_name:'Legacy Entry'}, {vehicle_class:'LMP2'}, {},
+  ];
+  const root = await render('live.html', {live:true, driver:{display_name:'Driver'},
+    session:{track_name:'Sebring International Raceway',session_type:'Practice'}, participants,
+    strategy:{tyre_remaining_fl:.987, tyre_pressure_fl_kpa:null, tyre_temp_inner_fl_c:null}});
+  for (const expected of ['Vehicle / entry', 'Model: Model A', 'Manufacturer: Brand B',
+                          'Entry: &lt;Entry C&gt;', 'Entry: Legacy Entry', 'Class: LMP2', '98.7%', '<td>—</td>']) {
+    assert.ok(root.innerHTML.includes(expected), expected);
+  }
+  assert.doesNotMatch(root.innerHTML, /<th>Car<\/th>|Entry A|Entry B|0\.0 kPa|-273\.1/);
+});
