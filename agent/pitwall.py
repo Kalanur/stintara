@@ -26,6 +26,16 @@ def wheel(value, snapshot=False):
         temps = result.pop("surface_temp", []) or []
         for key, temp in zip(("temp_inner", "temp_mid", "temp_outer"), temps):
             result[key] = temp
+    for key in ("temp_inner", "temp_mid", "temp_outer", "carcass_temp", "brake_temp"):
+        if isinstance(result.get(key), (int, float)) and result[key] <= -200:
+            result[key] = None
+    # Zero pressure with missing surface sensors is a pre-drive sentinel. Keep
+    # zero when there is a real temperature or an explicit damaged-wheel flag.
+    pressure = result.get("pressure")
+    if (isinstance(pressure, (int, float)) and pressure <= 0
+            and not result.get("flat") and not result.get("detached")
+            and all(result.get(key) is None for key in ("temp_inner", "temp_mid", "temp_outer"))):
+        result["pressure"] = None
     return result
 
 
@@ -38,6 +48,9 @@ def normalize(message):
     payload = clean({k: v for k, v in message.items() if k != "type"})
     if kind == "telemetry":
         payload["tires"] = [wheel(t) for t in payload.get("tires", [])]
+        for key in ("water_temp", "oil_temp"):
+            if isinstance(payload.get(key), (int, float)) and payload[key] <= -200:
+                payload[key] = None
     elif kind == "lap_snapshots":
         for driver in payload.get("drivers", []):
             has_telemetry = driver.get("has_telemetry", False)

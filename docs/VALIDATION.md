@@ -113,3 +113,26 @@ Local checks for this change:
 - Docker was unavailable; Docker builds and `docker compose config --quiet` could not be executed locally. CI retains Compose validation and the complete PostgreSQL test suite.
 
 The previous feature-commit CI succeeded according to the operator. This does not establish CI success for the new workflow revision. No development branch, release, image publication or deployment was created as part of local validation. Real Dev-container integration and migration tests remain operator steps after the development channel is established.
+
+
+## First real LMU integration and hardening (2026-10-15)
+
+The operator reported a successful real baseline smoke test:
+LMU -> unmodified Pitwall -> Stintara Agent -> WebSocket -> container-hosted Server -> PostgreSQL -> Live API -> Browser.
+Track/session, the driver field and player association, position, lap/last/best timing, fuel consumption/range, tyre remaining/pressure/temperatures, brake temperatures, offline detection and reconnect were observed. This is an operator-reported result for the baseline, not a new deployment performed by this change.
+
+Repeated reconnects were observed, but the original close reason and rejected frame were not captured. Code inspection identified a concrete amplification path: any provider-field validation error closed the authenticated socket, and the agent's clean-close path printed no reason before retrying. That path is addressed by dropping isolated invalid data frames, bounded validation diagnostics and explicit disconnect/retry reporting. Tests establish this behavior, not that every real disconnect has the same cause. Repeat the real smoke test with this revision and inspect close codes and validation fields if reconnects continue.
+
+Pre-drive temperatures at or below -200 Celsius now normalize to unknown. Nonpositive pressure with absent/sentinel surface temperatures and no flat/detached flags becomes unknown; real sensor/damage evidence preserves zero pressure. Valid fuel/tyre values and remaining semantics are preserved. Entry/model/manufacturer semantics are separated in the API/UI without rewriting legacy database columns. Vehicle models are not guessed. Position/gap raw values remain unchanged; source findings and limitations are recorded in ARCHITECTURE.md.
+
+Local validation on a source mirror, checked against the final repository before commit:
+
+- Python compileall and Ruff passed.
+- Python suite: **66 passed, 18 skipped**. No local TEST_DATABASE_URL was configured. The skipped cases are 16 database cases plus bootstrap/authentication and database-backed transport E2E. The new sentinel-persistence/API regression is among these skipped database cases; CI must exercise it with PostgreSQL 17.
+- Three frontend tests passed, including honest vehicle fallback labels, escaped values, unknown tyre values and existing live/offline/error behavior.
+- Transport tests without PostgreSQL cover isolated invalid scoring/telemetry/lap payloads followed by valid processing, fatal protocol/handshake errors, rejected tokens, duplicate connections, rolling rejection budget, real socket abort/reconnect, safe close diagnostics, retry messages and clean Ctrl+C.
+- Deployment YAML, both Unraid XML templates and public-source hygiene tests passed as part of the suite.
+- Starlette emitted a TestClient/httpx deprecation warning; tests passed. No dependency migration is included in this fix.
+- Docker was unavailable. No image build, deployment, new real LMU session or reverse-proxy test was performed locally.
+
+No schema migration is required. The baseline's prior CI/database and real-container results above are historical, not evidence that the new revision has already passed CI or a repeat real integration test.

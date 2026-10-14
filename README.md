@@ -278,6 +278,19 @@ This workflow change does not create `dev`, merge code or deploy an image. Publi
 - Session end is inferred from source disconnect, transition or inactivity; no official results finalization yet.
 - The live pages poll REST. A single server worker is required for the current in-memory live cache.
 - No raw high-frequency storage, Parquet, historical UI, Results XML reconciliation, Redis or microservices.
-- Real LMU, Docker image execution and the Unraid host deployment still require the operator smoke test above; simulated tests cannot establish those results.
+- The operator has completed an initial real LMU/container-host smoke test of the baseline. This hardening revision still requires a repeat real test; optional reverse-proxy integration remains unverified. See docs/VALIDATION.md for the distinction.
 
 LMU `mWear` is stored as `tyre_remaining_*`: `1.0 = new`, `0.0 = consumed`. Sector times in persisted lap snapshots are individual sectors, not cumulative S1+S2.
+
+
+## Real-world ingestion diagnostics
+
+The agent reports Stintara disconnect codes, safe known close reasons and clean/abnormal/exception outcomes, then announces its reconnect delay. Unknown peer reason text is deliberately omitted. Normal Ctrl+C prints `Stintara agent stopped.` without a traceback. Connection/handshake failures report their exception class without raw exception text or credentials.
+
+The server logs structured `invalid_ingest_message` events with internal agent ID, recognized message type, error class, up to five validation field/type summaries, and close code/reason when applicable. It never logs payloads, validation input/context or tokens. One invalid authenticated scoring, telemetry or lap-snapshot payload is discarded without closing the connection. Ten such failures within a rolling 60 seconds close it with code 1008; valid messages do not reset this budget. Invalid handshake/authentication, protocol, message type, JSON or payload envelope remains fatal. Investigate repeated warnings rather than treating ongoing rejected data as successful ingestion.
+
+The adapter maps wheel/engine temperatures at or below -200 degrees Celsius to unknown. Nonpositive pressure is unknown when all surface temperatures are absent/sentinel and no explicit flat/detached flag is present. Zero pressure with real surface temperatures or damage flags is preserved. Live Pitwall TireData does not carry these flags, so plausible temperature evidence also prevents hiding a potential puncture. Unknown values render as an em dash. Tyre remaining values are unchanged.
+
+Vehicle identity is exposed separately as `entry_name`, `vehicle_class`, `vehicle_model` and `manufacturer`, alongside existing `team_name` and `car_number`. Legacy `car_name`/`car_class` storage and API keys remain compatible; model and manufacturer are currently null. No schema migration is needed. The live standings use Model -> Manufacturer -> Entry -> Class -> unknown, with a semantic label beside each value. No team/livery-to-manufacturer guessing is performed.
+
+Position and gap values remain provider values. Repeated positions are not deduplicated or renumbered. Practice/qualifying gaps can still be zero because the API forwards provider race-gap fields; class-relative/best-lap gap calculations are not introduced in this fix.

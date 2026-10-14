@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from agent.pitwall import normalize
 from agent.stintara_agent import forward
 from server.app.domain import same_session, sample_due
-from server.app.main import decode_message, driver_live_page
+from server.app.main import decode_message, driver_live_page, vehicle_identity
 from server.app.protocol import Scoring, Telemetry
 from server.app.uuid7 import uuid7
 
@@ -96,3 +96,44 @@ async def test_driver_slug_cannot_break_out_of_script():
     response = await driver_live_page('</script><script>alert(1)</script>')
     assert b'const slug = "</script>' not in response.body
     assert b'\\u003c/script>' in response.body
+
+
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_predrive_wheel_sentinels_become_unknown(snapshot):
+    tire = {"wear": .987, "pressure": 0, "brake_temp": -273.15, "carcass_temp": -200}
+    if snapshot:
+        tire["surface_temp"] = [-273.15, -200, -250]
+        _, payload = normalize({"type": "AllDriversUpdate", "drivers": [{"has_telemetry": True, "wheels": [tire]}]})
+        wheel = payload["drivers"][0]["wheels"][0]
+    else:
+        tire.update(temp_inner=-273.15, temp_mid=-200, temp_outer=-250)
+        _, payload = normalize({"type": "TelemetryUpdate", "tires": [tire]})
+        wheel = payload["tires"][0]
+    for key in ("pressure", "temp_inner", "temp_mid", "temp_outer", "brake_temp", "carcass_temp"):
+        assert wheel[key] is None
+    assert wheel["remaining"] == .987
+
+
+@pytest.mark.parametrize("evidence", [{"flat": True}, {"detached": True}, {"temp_inner": 42}])
+def test_zero_pressure_with_damage_or_real_sensor_evidence_is_preserved(evidence):
+    _, payload = normalize({"type": "TelemetryUpdate", "tires": [{"pressure": 0, **evidence}]})
+    assert payload["tires"][0]["pressure"] == 0
+
+
+def test_real_lmu_values_and_provider_positions_are_preserved():
+    _, payload = normalize({"type": "TelemetryUpdate", "fuel": 42, "fuel_avg_consumption": 2.5,
+                            "fuel_laps_remaining": 16.8, "tires": [
+        {"wear": .987, "pressure": 168, "temp_inner": 42, "temp_mid": 50, "temp_outer": 57, "brake_temp": 486}]})
+    telemetry = Telemetry.model_validate(payload)
+    assert telemetry.fuel == 42 and telemetry.fuel_laps_remaining == 16.8
+    assert telemetry.tires[0].remaining == .987 and telemetry.tires[0].pressure == 168
+    assert telemetry.tires[0].temp_outer == 57 and telemetry.tires[0].brake_temp == 486
+    _, scoring = normalize({"type": "ScoringUpdate", "session_type": "Practice", "vehicles": [
+        {"id": 1, "position": 2, "time_behind_leader": 0}, {"id": 2, "position": 2, "time_behind_leader": 0}]})
+    assert [v["position"] for v in scoring["vehicles"]] == [2, 2]
+    assert scoring["vehicles"][0]["time_behind_leader"] == 0
+
+
+def test_entry_name_does_not_invent_vehicle_model_or_manufacturer():
+    assert vehicle_identity({"car_name": "Example Team #59", "car_class": "GT3"}) == {
+        "entry_name": "Example Team #59", "vehicle_class": "GT3", "vehicle_model": None, "manufacturer": None}

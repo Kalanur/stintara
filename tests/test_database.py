@@ -3,6 +3,7 @@ import json
 import asyncpg
 import pytest
 
+from agent.pitwall import normalize
 from server.app import main
 from server.app.lifecycle import attach_observation, end_observation, expire_observations
 from server.app.migrations import migrate_sample_ids
@@ -176,3 +177,21 @@ async def test_live_cache_updates_without_writing_every_scoring_packet(db):
     assert (await main.get_live_rows())[0]["position"] == 5
     live = await main.api_driver_live(agent["slug"])
     assert next(p for p in live["participants"] if p["is_stintara_driver"])["position"] == 5
+
+
+async def test_normalized_sentinels_are_null_in_storage_and_entry_api(db):
+    agent, session_id, scoring = await scoring_session(db)
+    scoring["vehicles"][0].update(car_name="Example Entry #7", vehicle_class="GT3", team_name="Example Team")
+    await main.upsert_participants(agent, session_id, scoring)
+    _, payload = normalize({"type": "TelemetryUpdate", "fuel": 42, "tires": [
+        {"wear": .987, "pressure": 0, "temp_inner": -273.15, "temp_mid": -273.15, "temp_outer": -273.15}]})
+    await main.store_strategy_sample(agent, session_id, payload)
+    async with db.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM strategy_samples")
+        assert row["tyre_pressure_fl_kpa"] is None and row["tyre_temp_inner_fl_c"] is None
+        assert row["tyre_remaining_fl"] == .987 and row["fuel_l"] == 42
+    data = await main.api_driver_live(agent["slug"])
+    participant = next(p for p in data["participants"] if p["is_stintara_driver"])
+    assert participant["entry_name"] == participant["car_name"] == "Example Entry #7"
+    assert participant["vehicle_class"] == "GT3" and participant["team_name"] == "Example Team"
+    assert participant["vehicle_model"] is None and participant["manufacturer"] is None

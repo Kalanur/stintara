@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import time
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,7 @@ from pydantic import ValidationError
 from .domain import sample_due
 from .lifecycle import end_observation, expire_observations, resolve_session
 from .migrations import migrate_sample_ids
-from .protocol import PAYLOADS, Hello
+from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
 from .uuid7 import uuid7
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -35,6 +37,28 @@ if SESSION_TIMEOUT_SECONDS < 15:
     raise ValueError("SESSION_TIMEOUT_SECONDS must be at least 15")
 active_agents: set[str] = set()
 ingest_lock = asyncio.Lock()
+logger = logging.getLogger("stintara.ingest")
+MAX_INVALID_PAYLOADS = 10
+INVALID_PAYLOAD_WINDOW_SECONDS = 60
+
+
+def log_invalid(agent_key, kind, exc, code=None, reason=None):
+    fields = {name for model in (*PAYLOADS.values(), Hello, Vehicle, Lap, Wheel) for name in model.model_fields}
+    errors = []
+    if isinstance(exc, ValidationError):
+        for error in exc.errors(include_input=False, include_context=False, include_url=False)[:5]:
+            errors.append({"field": [part if isinstance(part, int) or part in fields else "?"
+                                      for part in error["loc"][:6]], "type": error["type"]})
+    logger.warning(json.dumps({"event": "invalid_ingest_message", "agent_id": agent_key,
+                              "message_type": kind, "error_class": type(exc).__name__,
+                              "validation": errors, "close_code": code, "close_reason": reason}))
+
+
+def vehicle_identity(row):
+    # Legacy storage/API fields remain compatible. Pitwall mVehicleName is an
+    # entry/livery label, not a reliable vehicle model or manufacturer.
+    return {"entry_name": row.get("car_name"), "vehicle_class": row.get("car_class"),
+            "vehicle_model": None, "manufacturer": None}
 
 
 @asynccontextmanager
@@ -197,6 +221,8 @@ async def get_live_rows(slug: str | None = None) -> list[dict[str, Any]]:
                 if vehicle:
                     for key in ("position", "total_laps", "last_lap_time", "best_lap_time", "car_name", "in_pits"):
                         row[key] = vehicle.get(key)
+    for row in result:
+        row.update(vehicle_identity(row))
     return result
 
 
@@ -254,6 +280,8 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
                         participant[key] = vehicle.get(key)
                     participant["gap_to_leader"] = vehicle.get("time_behind_leader")
     participants.sort(key=lambda p: p["position"] if p["position"] is not None else 9999)
+    for participant in participants:
+        participant.update(vehicle_identity(participant))
     return {
         "driver": dict(driver),
         "live": True,
@@ -481,36 +509,63 @@ async def handle_message(agent, provider, kind, payload):
 async def ingest(ws: WebSocket):
     await ws.accept()
     agent_key = None
+    kind = None
+    invalid_payloads = deque()
     try:
         hello = Hello.model_validate(decode_message(await asyncio.wait_for(ws.receive_text(), timeout=10)))
         agent = await authenticate_agent(hello.token)
         if not agent:
+            log_invalid(None, None, ValueError(), 1008, "invalid token")
             await ws.close(code=1008, reason="invalid token")
             return
         key = str(agent["id"])
         if key in active_agents:
+            log_invalid(key, None, ValueError(), 1008, "agent already connected")
             await ws.close(code=1008, reason="agent already connected")
             return
         agent_key = key
         active_agents.add(key)
         await ws.send_json({"type": "agent_welcome", "driver_slug": agent["slug"], "version": "0.1.0"})
         while True:
+            kind = None
             raw = await ws.receive_text()
             if len(raw) > 2 * 1024 * 1024:
+                log_invalid(agent_key, None, ValueError(), 1009, "message too large")
                 await ws.close(code=1009, reason="message too large")
                 return
             message = decode_message(raw)
+            candidate = message.get("message_type") if isinstance(message, dict) else None
+            kind = candidate if isinstance(candidate, str) and candidate in PAYLOADS else None
             if not isinstance(message, dict) or message.get("protocol") != "stintara-agent-v1":
                 raise ValueError("invalid protocol")
-            kind = message.get("message_type")
-            if kind not in PAYLOADS:
+            if kind is None:
                 raise ValueError("unsupported message")
-            payload = PAYLOADS[kind].model_validate(message.get("payload")).model_dump()
+            if not isinstance(message.get("payload"), dict):
+                raise TypeError("payload must be an object")
+            try:
+                payload = PAYLOADS[kind].model_validate(message["payload"]).model_dump()
+            except ValidationError as exc:
+                # Only authenticated, recognized provider data can be dropped.
+                # A rolling budget cannot be reset by interleaving good messages.
+                if kind not in ("scoring", "telemetry", "lap_snapshots"):
+                    raise
+                now = time.monotonic()
+                while invalid_payloads and now - invalid_payloads[0] >= INVALID_PAYLOAD_WINDOW_SECONDS:
+                    invalid_payloads.popleft()
+                invalid_payloads.append(now)
+                fatal = len(invalid_payloads) >= MAX_INVALID_PAYLOADS
+                reason = "too many invalid payloads" if fatal else None
+                log_invalid(agent_key, kind, exc, 1008 if fatal else None, reason)
+                if fatal:
+                    await ws.close(code=1008, reason=reason)
+                    return
+                continue
             async with ingest_lock:
                 await handle_message(agent, hello.simulator, kind, payload)
     except WebSocketDisconnect:
         pass
-    except (asyncio.TimeoutError, json.JSONDecodeError, ValidationError, ValueError, TypeError, KeyError):
+    except (asyncio.TimeoutError, json.JSONDecodeError, ValidationError, ValueError, TypeError, KeyError) as exc:
+        log_invalid(agent_key, kind, exc, 1008, "invalid Stintara message")
         await ws.close(code=1008, reason="invalid Stintara message")
     finally:
         if agent_key:
