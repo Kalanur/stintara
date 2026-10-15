@@ -28,3 +28,7 @@ htmlcov/
 
 # Optional private operator notes/overrides; never publish.
 deploy/local/
+
+# Operator-managed secret files; keep application source visible.
+secrets/
+*.secret

@@ -21,6 +21,7 @@ from .domain import sample_due
 from .lifecycle import end_observation, expire_observations, resolve_session
 from .migrations import migrate_sample_ids
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
+from .secrets import read_secret
 from .uuid7 import uuid7
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -107,12 +108,16 @@ async def create_db_pool() -> asyncpg.Pool:
 
 
 async def bootstrap() -> None:
-    global pool
-    agent_token = os.environ.get("BOOTSTRAP_AGENT_TOKEN", "").strip()
-    if not agent_token or agent_token.startswith(("change-", "replace-")):
+    global pool, POSTGRES_PASSWORD
+    agent_token = read_secret("BOOTSTRAP_AGENT_TOKEN", "BOOTSTRAP_AGENT_TOKEN_FILE")
+    if "BOOTSTRAP_AGENT_TOKEN_FILE" not in os.environ:
+        agent_token = agent_token.strip()  # Preserve environment-only behavior.
+    if not agent_token.strip() or agent_token.strip().startswith(("change-", "replace-")):
         raise ValueError("Configure BOOTSTRAP_AGENT_TOKEN; default/placeholder tokens are rejected")
-    if not DATABASE_URL and (not POSTGRES_PASSWORD or POSTGRES_PASSWORD.startswith(("change-", "replace-"))):
-        raise ValueError("Configure POSTGRES_PASSWORD or DATABASE_URL")
+    if not DATABASE_URL:
+        POSTGRES_PASSWORD = read_secret("POSTGRES_PASSWORD", "POSTGRES_PASSWORD_FILE", POSTGRES_PASSWORD)
+        if not POSTGRES_PASSWORD or POSTGRES_PASSWORD.startswith(("change-", "replace-")):
+            raise ValueError("Configure POSTGRES_PASSWORD or DATABASE_URL")
     driver_slug = os.environ.get("BOOTSTRAP_DRIVER_SLUG", "driver").strip().lower()
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", driver_slug):
         raise ValueError("BOOTSTRAP_DRIVER_SLUG must contain lowercase letters, digits and hyphens")

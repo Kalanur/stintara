@@ -57,6 +57,29 @@ curl.exe http://localhost:8080/health
 
 Compose creates/uses Docker network `stintara`, runs `stintara-server` and `stintara-postgres`, and stores data under `./data/`. PostgreSQL has no published port. Run one application worker; the V0.1 live cache and ingestion serialization are process-local.
 
+## Secret files for persistent containers
+
+Environment-only configuration remains supported for simple development deployments: set `POSTGRES_PASSWORD` and `BOOTSTRAP_AGENT_TOKEN` to your own secrets. The supplied Compose file and standard Unraid template retain this existing mode.
+
+For persistent container deployments, prefer read-only secret files. Configure the Stintara server with container paths:
+
+```text
+POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+BOOTSTRAP_AGENT_TOKEN_FILE=/run/secrets/agent_token
+```
+
+Create the files privately on the host, restrict their permissions, and mount each existing file read-only at the corresponding container path. In Unraid, replace the direct password/token variable entries with the `_FILE` entries and add file-path mappings with read-only access. The container's application user must be able to read them. Do not put secret contents in variable values, build arguments or commands that print them. No Docker Swarm is required; ordinary read-only bind mounts suffice.
+
+For a private Compose configuration, replace the direct password/token environment entries with the `_FILE` entries and add read-only mounts. The supplied Compose file requires the direct variables through interpolation: simply adding `_FILE` in an override does not remove those requirements. Prepare a separate local configuration with those direct entries removed; do not satisfy them with dummy secrets.
+
+Stintara gives a configured `_FILE` variable priority over its direct environment value. A broken file configuration fails startup instead of falling back. Leave unused `_FILE` variables entirely unset. Files are decoded as UTF-8; only trailing CR/LF characters are removed. Other whitespace, embedded newlines and characters are preserved. Empty, missing, unreadable, non-UTF-8 files and directories fail with diagnostics that omit contents and paths. Empty agent tokens and `change-`/`replace-` placeholders remain rejected. Environment-only agent tokens retain their existing whitespace trimming.
+
+`DATABASE_URL` still overrides the separate PostgreSQL connection fields. When it is set, Stintara does not read or require `POSTGRES_PASSWORD_FILE`. Agent-token validation still applies. File secrets are read during startup; restart the application after an operator-managed secret change. File contents are not written back into the process environment.
+
+The unchanged official `postgres:17` image already supports `POSTGRES_PASSWORD_FILE`; use its own implementation, not Stintara's helper. Unlike Stintara's file-priority rule, the official PostgreSQL entrypoint rejects simultaneous nonempty `POSTGRES_PASSWORD` and `POSTGRES_PASSWORD_FILE`. Remove the direct variable in file mode. Its initialization setting does not rotate a password in an existing database; preserve the current database password when changing only the delivery method. See the [official PostgreSQL entrypoint](https://github.com/docker-library/postgres/blob/master/docker-entrypoint.sh).
+
+Never commit or log secret files. Local `secrets/` directories and `*.secret` files are ignored, but do not force-add them. Host administrators/root can still read mounted secrets; this reduces exposure in container environment configuration, not access by host root. Use matching database credentials for the server and PostgreSQL, and configure the agent with the matching token privately. No real secret files or host-specific paths are supplied by this repository.
+
 ## Standard installation on Unraid
 
 The standard installation runs independently of a reverse proxy:
