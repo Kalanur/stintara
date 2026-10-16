@@ -136,3 +136,28 @@ Local validation on a source mirror, checked against the final repository before
 - Docker was unavailable. No image build, deployment, new real LMU session or reverse-proxy test was performed locally.
 
 No schema migration is required. The baseline's prior CI/database and real-container results above are historical, not evidence that the new revision has already passed CI or a repeat real integration test.
+
+## Repeat real LMU online-race validation
+
+Date: **2026-10-16**. Operator-reported smoke test of development revision `a71e3224f968c0e9256e7dc662d2a4780542fab2`, before the vehicle-identity presentation changes. No new deployment was performed to write this record.
+
+The operator completed a full real LMU online race through LMU -> unmodified LMU Pitwall -> Stintara Agent -> WebSocket -> Stintara Server -> PostgreSQL -> Live API -> Browser.
+
+- Exactly one new `/ws/ingest` connection served the agent run; the agent remained connected throughout the race, with no reconnect storm.
+- No ValidationErrors, exceptions or tracebacks were observed during the test window.
+- Live timing, fuel, tyres and standings remained functional throughout.
+- Ctrl+C stopped the agent cleanly with `Stintara agent stopped.`, without a CancelledError or KeyboardInterrupt traceback.
+- The Unraid WebUI container deployment with PostgreSQL 17 and the development image was also verified using `POSTGRES_PASSWORD_FILE`, `BOOTSTRAP_AGENT_TOKEN_FILE` and read-only secret mounts.
+- The existing PostgreSQL database was reused, the Stintara healthcheck succeeded, and the agent authenticated successfully against the file-secret-configured server.
+
+This repeat test verifies the original reconnect symptom as fixed for the observed full race and confirms the file-secret deployment path. It is an operator smoke test, not a formal completeness proof or validation of every LMU session type, network failure, driver swap or future revision. Vehicle model/manufacturer accuracy is not established by working standings. Private infrastructure values and credentials are intentionally omitted.
+
+## Vehicle identity follow-up checks (2026-10-16)
+
+- Source investigation and its exact upstream revision are recorded in ARCHITECTURE.md, including the unexposed `mVehicleModel` candidate and the separate post-race `CarType` path.
+- Python `compileall` and Ruff passed on a source mirror checked against the repository before commit.
+- Python suite: **109 passed, 18 skipped** without `TEST_DATABASE_URL`. Skips comprise 16 database cases plus bootstrap/authentication and database-backed transport E2E. The extended legacy-car-number API/storage regression is among the skipped cases and still requires PostgreSQL in CI.
+- **4 frontend tests passed**: semantic fallback priority, blank values, HTML escaping, no entry-based model guesses, and existing live/offline/error behavior. These use a DOM/fetch stub, not a visual browser test.
+- Adapter/protocol tests confirm that Pitwall's slot stays in `id` while `car_number` becomes null. API projection tests keep manufacturer/model unknown even for recognizable entry keywords.
+- The existing Starlette TestClient/httpx deprecation warning remains; no dependency changes were made.
+- No schema changes or migration. No new Docker build, deployment or real LMU drive was performed for this follow-up.
