@@ -134,6 +134,16 @@ def test_real_lmu_values_and_provider_positions_are_preserved():
     assert scoring["vehicles"][0]["time_behind_leader"] == 0
 
 
-def test_entry_name_does_not_invent_vehicle_model_or_manufacturer():
-    assert vehicle_identity({"car_name": "Example Team #59", "car_class": "GT3"}) == {
-        "entry_name": "Example Team #59", "vehicle_class": "GT3", "vehicle_model": None, "manufacturer": None}
+@pytest.mark.parametrize("entry", ["Example Team #59", "BMW GT3 Custom Team", "911GT3R Custom Team", "United Autosports 2025"])
+def test_entry_name_does_not_invent_vehicle_model_or_manufacturer(entry):
+    assert vehicle_identity({"car_name": entry, "car_class": "GT3"}) == {
+        "entry_name": entry, "vehicle_class": "GT3", "vehicle_model": None, "manufacturer": None}
+
+
+def test_pitwall_slot_is_not_a_race_number():
+    _, payload = normalize({"type": "ScoringUpdate", "session_type": "Race", "vehicles": [
+        {"id": 7, "car_number": 7, "car_name": "BMW GT3 Custom Team", "team_name": "", "vehicle_class": "GT3"}]})
+    vehicle = Scoring.model_validate(payload).vehicles[0]
+    assert vehicle.id == 7 and vehicle.car_number is None
+    assert vehicle.car_name == "BMW GT3 Custom Team"
+    assert vehicle.vehicle_class == "GT3" and vehicle.team_name == ""

@@ -53,9 +53,27 @@ test('vehicle fallback identifies model, manufacturer, entry and class honestly'
   const root = await render('live.html', {live:true, driver:{display_name:'Driver'},
     session:{track_name:'Sebring International Raceway',session_type:'Practice'}, participants,
     strategy:{tyre_remaining_fl:.987, tyre_pressure_fl_kpa:null, tyre_temp_inner_fl_c:null}});
-  for (const expected of ['Vehicle / entry', 'Model: Model A', 'Manufacturer: Brand B',
-                          'Entry: &lt;Entry C&gt;', 'Entry: Legacy Entry', 'Class: LMP2', '98.7%', '<td>—</td>']) {
+  for (const expected of ['Vehicle / entry', 'Model</div><div>Model A', 'Manufacturer</div><div>Brand B',
+                          'Entry</div><div>&lt;Entry C&gt;', 'Entry</div><div>Legacy Entry', 'Class</div><div>LMP2', '98.7%', '<td>—</td>']) {
     assert.ok(root.innerHTML.includes(expected), expected);
   }
   assert.doesNotMatch(root.innerHTML, /<th>Car<\/th>|Entry A|Entry B|0\.0 kPa|-273\.1/);
+});
+
+test('each standings fallback is typed, escaped and independent of entry keywords', async () => {
+  const cases = [
+    [{vehicle_model:'<Model & "A">', manufacturer:'unused brand', entry_name:'unused entry'}, 'Model', '&lt;Model &amp; &quot;A&quot;&gt;'],
+    [{manufacturer:"<Brand 'B'>", entry_name:'unused entry'}, 'Manufacturer', '&lt;Brand &#39;B&#39;&gt;'],
+    [{entry_name:'BMW GT3 Custom Team', vehicle_class:'unused class'}, 'Entry', 'BMW GT3 Custom Team'],
+    [{vehicle_model:' ', manufacturer:'', entry_name:' ', vehicle_class:'<LMGT3>'}, 'Class', '&lt;LMGT3&gt;'],
+    [{car_class:'LMP2'}, 'Class', 'LMP2'],
+  ];
+  for (const [participant, label, value] of cases) {
+    const root = await render('live.html', {live:true, driver:{display_name:'Driver'},
+      session:{track_name:'Track', session_type:'Race'}, participants:[{...participant, is_stintara_driver:true}]});
+    assert.ok(root.innerHTML.includes(`<td><div class="muted">${label}</div><div>${value}</div></td>`));
+    assert.ok(root.innerHTML.includes(`${label}: ${value}`));
+    assert.doesNotMatch(root.innerHTML, /unused|<Model|<Brand|<LMGT3>|<th>Car<\/th>/);
+  }
+  assert.match((await render('live.html', null, false, 500)).textContent, /Live data unavailable/);
 });

@@ -46,7 +46,11 @@ def normalize(message):
     if kind is None:
         return None
     payload = clean({k: v for k, v in message.items() if k != "type"})
-    if kind == "telemetry":
+    if kind == "scoring":
+        for vehicle in payload.get("vehicles", []):
+            # Pitwall uses mID here: keep it as id, never as a race number.
+            vehicle["car_number"] = None
+    elif kind == "telemetry":
         payload["tires"] = [wheel(t) for t in payload.get("tires", [])]
         for key in ("water_temp", "oil_temp"):
             if isinstance(payload.get(key), (int, float)) and payload[key] <= -200:

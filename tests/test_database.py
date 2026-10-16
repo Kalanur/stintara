@@ -181,7 +181,7 @@ async def test_live_cache_updates_without_writing_every_scoring_packet(db):
 
 async def test_normalized_sentinels_are_null_in_storage_and_entry_api(db):
     agent, session_id, scoring = await scoring_session(db)
-    scoring["vehicles"][0].update(car_name="Example Entry #7", vehicle_class="GT3", team_name="Example Team")
+    scoring["vehicles"][0].update(car_name="Example Entry #7", vehicle_class="GT3", team_name="Example Team", car_number=7)
     await main.upsert_participants(agent, session_id, scoring)
     _, payload = normalize({"type": "TelemetryUpdate", "fuel": 42, "tires": [
         {"wear": .987, "pressure": 0, "temp_inner": -273.15, "temp_mid": -273.15, "temp_outer": -273.15}]})
@@ -195,3 +195,7 @@ async def test_normalized_sentinels_are_null_in_storage_and_entry_api(db):
     assert participant["entry_name"] == participant["car_name"] == "Example Entry #7"
     assert participant["vehicle_class"] == "GT3" and participant["team_name"] == "Example Team"
     assert participant["vehicle_model"] is None and participant["manufacturer"] is None
+    # Old agents/history may still contain the Pitwall slot in car_number.
+    assert participant["local_vehicle_id"] == 7 and participant["car_number"] is None
+    async with db.acquire() as conn:
+        assert await conn.fetchval("SELECT car_number FROM session_participants WHERE local_vehicle_id=7") == 7
