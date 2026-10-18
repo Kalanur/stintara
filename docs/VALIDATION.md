@@ -172,3 +172,20 @@ The local Pitwall adapter now drops a SessionInfo snapshot when its track name i
 This is **implementation ready for repeat real-session validation**, not a claim that the fix has already passed a real Championship/session-end test.
 
 Local checks on the source mirror: compileall and Ruff passed; 120 Python tests passed and 19 database-dependent cases skipped without TEST_DATABASE_URL (17 database cases, bootstrap/authentication and database-backed transport E2E). The new database preservation test is among the skipped cases and requires CI with PostgreSQL. Four frontend tests passed. The forwarding/ingestion regression processed valid metadata, 30 empty snapshots, continued scoring/telemetry/lap data and later valid metadata on one WebSocket; only an explicitly injected invalid protocol closed it. The existing Starlette TestClient/httpx deprecation warning remains. No new real-session validation or deployment was performed.
+
+
+## Windows packaging and provisioning (Issue #5)
+
+The operator reports that the pre-packaging Python agent already passed a real public WSS/TLS reverse-proxy smoke test, with one stable ingest connection and no validation/error/exception entries. This is historical single-observer evidence, not a test of the new EXE or cross-observer session matching.
+
+Local checks on the source mirror, compared with the repository before commit:
+
+- Compileall and Ruff passed; **156 Python tests passed, 20 skipped** without TEST_DATABASE_URL. Skips comprise 17 database cases, the new provisioning integration, bootstrap/authentication and database-backed transport E2E. The provisioning transaction/hash/UUID/driver-reuse regression still requires PostgreSQL CI validation.
+- **4 frontend tests passed**. Existing reconnect, duplicate-agent, safe diagnostics, transient SessionInfo filtering and clean Ctrl+C coverage remains passing after explicit config injection.
+- Config tests cover JSON, environment precedence, required values, safe parse errors, explicit paths, Python/frozen location and network-free help. Provisioning unit tests cover validation, file-secret/DSN precedence and one-time output with safe failure diagnostics.
+- Windows workflow YAML and its exact two-file artifact allowlist passed checks. The existing Linux/container workflow is unchanged.
+- A real local Windows Onefile console build passed with PyInstaller **6.22.3**, Python **3.12.10** (CI targets Python **3.13**). The unsigned EXE is **10,157,293 bytes**; both --help and --version returned exit code 0 without configuration or networking. The server module's --help also passed from the server working directory.
+- The distribution directory contains only StintaraAgent.exe and the public example JSON. The embedded archive contains no JSON, secret or environment files. No private config was used or bundled, and no binary is committed.
+- The existing Starlette TestClient/httpx deprecation warning remains. No new deployment, real EXE drive, same-split/different-split test or automatic session convergence was performed.
+
+Windows packaging/provisioning implementation ready for external multi-observer field testing. Database-backed provisioning and the Windows/Python 3.13 workflow must also pass CI; local build success is not a claim that the remote workflow has already run.

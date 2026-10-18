@@ -1,20 +1,19 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
-import os
 from time import monotonic
 
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 try:
+    from .config import load_config
     from .pitwall import normalize
 except ImportError:  # python agent/stintara_agent.py
+    from config import load_config
     from pitwall import normalize
-
-PITWALL_WS = os.environ.get("PITWALL_WS", "ws://127.0.0.1:9000?format=json")
-STINTARA_WS = os.environ.get("STINTARA_WS", "ws://127.0.0.1:8080/ws/ingest")
 
 
 async def forward(pitwall, uplink):
@@ -40,10 +39,10 @@ async def forward(pitwall, uplink):
         last_sent[kind] = now
 
 
-async def bridge(uplink):
+async def bridge(uplink, config):
     while True:
         try:
-            async with websockets.connect(PITWALL_WS, max_size=32 * 1024 * 1024, proxy=None) as pitwall:
+            async with websockets.connect(config.pitwall_ws, max_size=32 * 1024 * 1024, proxy=None) as pitwall:
                 print("Connected to LMU Pitwall")
                 await forward(pitwall, uplink)
         except (OSError, WebSocketException, TimeoutError):
@@ -62,25 +61,25 @@ def report_close(code, reason, outcome):
     print(f'Stintara connection closed: code={code} reason="{reason}" outcome={outcome}')
 
 
-async def run_once(token):
+async def run_once(config):
     try:
-        await connected_run(token)
+        await connected_run(config)
     except ConnectionClosed as exc:
         report_close(exc.rcvd.code if exc.rcvd else 1006, exc.rcvd.reason if exc.rcvd else "", "exception")
         raise
 
 
-async def connected_run(token):
-    async with websockets.connect(STINTARA_WS, max_size=1024 * 1024) as uplink:
+async def connected_run(config):
+    async with websockets.connect(config.server_ws, max_size=1024 * 1024) as uplink:
         await uplink.send(json.dumps({
             "type": "agent_hello", "protocol": "stintara-agent-v1",
-            "token": token, "simulator": "lmu",
+            "token": config.token, "simulator": "lmu",
         }))
         welcome = json.loads(await asyncio.wait_for(uplink.recv(), timeout=10))
         if not isinstance(welcome, dict) or welcome.get("type") != "agent_welcome":
             raise ValueError("Stintara handshake rejected")
         print(f"Connected to Stintara as {welcome.get('driver_slug')}")
-        forwarding = asyncio.create_task(bridge(uplink))
+        forwarding = asyncio.create_task(bridge(uplink, config))
         closed = asyncio.create_task(uplink.wait_closed())
         try:
             done, _ = await asyncio.wait((forwarding, closed), return_when=asyncio.FIRST_COMPLETED)
@@ -95,22 +94,32 @@ async def connected_run(token):
             await asyncio.gather(forwarding, closed, return_exceptions=True)
 
 
-async def main():
-    token = os.environ.get("STINTARA_AGENT_TOKEN", "").strip()
-    if not token or token.startswith(("change-", "replace-")):
-        raise SystemExit("Set STINTARA_AGENT_TOKEN to the server's configured agent token")
+async def main(config):
     while True:
         try:
-            await run_once(token)
+            await run_once(config)
         except (OSError, WebSocketException, TimeoutError, ValueError) as exc:
             print(f"Stintara connection failed: error_class={type(exc).__name__}")
         print("Retrying Stintara connection in 3s")
         await asyncio.sleep(3)
 
 
-def cli():
+class SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.exit(2, "Invalid arguments; use --help.\n")
+
+
+def cli(argv=None):
+    parser = SafeArgumentParser(description="Stintara test agent; keep your JSON configuration private.")
+    parser.add_argument("--config", metavar="PATH", help="JSON config (default: beside the executable or agent script)")
+    parser.add_argument("--version", action="version", version="Stintara Agent 0.1.0")
+    args = parser.parse_args(argv)
     try:
-        asyncio.run(main())
+        config = load_config(args.config)
+    except ValueError as exc:
+        parser.exit(2, f"Configuration error: {exc}\n")
+    try:
+        asyncio.run(main(config))
     except KeyboardInterrupt:
         print("Stintara agent stopped.")
 

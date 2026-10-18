@@ -32,3 +32,4 @@ deploy/local/
 # Operator-managed secret files; keep application source visible.
 secrets/
 *.secret
+stintara-agent.json

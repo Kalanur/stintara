@@ -117,6 +117,12 @@ The LMU adapter was checked against [Swizzjack/lmu-pitwall, commit a171b80](http
 
 The bridge supports `?format=json`, sends an initial lap snapshot before regular scoring, forwards native `mWear` unchanged and supplies cumulative S1+S2 for sector 2. The agent normalizes tyre naming, individual sector times, missing telemetry and non-finite values before forwarding. The server validates a provider-neutral transport contract. No Pitwall code is modified or imported into Stintara.
 
+## Agent distribution and operator provisioning
+
+V0.1 tester distribution uses the existing Python agent packaged as an unsigned Windows Onefile console executable. Startup resolves immutable config from environment overrides, then private JSON beside the executable, with a default only for local Pitwall. No secrets or production endpoints are embedded in the public artifact. Explicit config paths are supported; the PyInstaller extraction directory is never the operator-config location.
+
+Operator provisioning is an internal `python -m app.provision_agent` CLI, not an HTTP API. A transaction reuses an explicitly supplied driver slug or creates a UUIDv7 driver, and creates a uniquely named UUIDv7 agent with a fresh 32-byte random token. Only SHA-256 is persisted; plaintext is emitted once on successful CLI completion. Duplicate agent names reject the transaction without implicit rotation. Display names do not establish identity. Each tester receives a distinct agent/token; bootstrap credentials are not shared. Existing database settings and password-file semantics apply, without schema changes. Existing duplicate-connection protection, simulator boundaries and session association rules remain unchanged. Packaging and provisioning enable field-data collection, not automatic cross-agent matching or race/split convergence.
+
 ## Maintaining these decisions
 
 Update this document when an architectural decision changes. Keep intended behavior and verified implementation status distinct. For development rules, read [AGENTS.md](../AGENTS.md).

@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
 
 from agent import stintara_agent
+from agent.config import AgentConfig
 from server.app import main
 from tests.conftest import make_agent
 
@@ -163,11 +164,12 @@ def test_messages_before_hello_are_rejected(ingest_client):
 
 
 def test_ctrl_c_is_clean_but_unexpected_errors_remain_visible(monkeypatch, capsys):
+    monkeypatch.setattr(stintara_agent, "load_config", lambda path: AgentConfig("ws://localhost", "test-secret"))
     def interrupted(coro):
         coro.close()
         raise KeyboardInterrupt
     monkeypatch.setattr(stintara_agent.asyncio, "run", interrupted)
-    stintara_agent.cli()
+    stintara_agent.cli([])
     assert capsys.readouterr().out == "Stintara agent stopped.\n"
 
     def broken(coro):
@@ -175,7 +177,7 @@ def test_ctrl_c_is_clean_but_unexpected_errors_remain_visible(monkeypatch, capsy
         raise RuntimeError("unexpected")
     monkeypatch.setattr(stintara_agent.asyncio, "run", broken)
     with pytest.raises(RuntimeError):
-        stintara_agent.cli()
+        stintara_agent.cli([])
 
 
 @pytest.mark.parametrize("code,reason", [(1000, ""), (1008, "invalid Stintara message"), (1008, "test-secret")])
@@ -185,9 +187,8 @@ async def test_agent_close_diagnostics(monkeypatch, capsys, code, reason):
         await socket.send(json.dumps({"type": "agent_welcome", "driver_slug": "driver"}))
         await socket.close(code=code, reason=reason)
     async with websockets.serve(uplink, "127.0.0.1", 0) as server:
-        monkeypatch.setattr(stintara_agent, "STINTARA_WS", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
-        monkeypatch.setattr(stintara_agent, "PITWALL_WS", "ws://127.0.0.1:1")
-        await asyncio.wait_for(stintara_agent.run_once("test-secret"), 3)
+        config = AgentConfig(f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}", "test-secret", "ws://127.0.0.1:1")
+        await asyncio.wait_for(stintara_agent.run_once(config), 3)
     output = capsys.readouterr().out
     assert f"code={code}" in output and "outcome=" in output
     assert "test-secret" not in output
@@ -238,7 +239,7 @@ async def test_agent_announces_retry_and_does_not_retry_cancellation(monkeypatch
         raise asyncio.CancelledError
     monkeypatch.setattr(stintara_agent.asyncio, "sleep", cancel_sleep)
     with pytest.raises(asyncio.CancelledError):
-        await stintara_agent.main()
+        await stintara_agent.main(AgentConfig("ws://localhost", "test-secret"))
     stintara_agent.run_once.assert_awaited_once()
     assert "Retrying Stintara connection in 3s" in capsys.readouterr().out
 
@@ -275,7 +276,8 @@ async def test_close_diagnostic_when_forwarder_finishes_before_close_waiter(monk
 
     monkeypatch.setattr(stintara_agent.websockets, "connect", lambda *args, **kwargs: Uplink())
     monkeypatch.setattr(stintara_agent, "bridge", AsyncMock(return_value=None))
-    await asyncio.wait_for(stintara_agent.run_once("test-secret"), 3)
+    config = AgentConfig("ws://localhost", "test-secret")
+    await asyncio.wait_for(stintara_agent.run_once(config), 3)
     assert "code=1008" in capsys.readouterr().out
 
 
@@ -317,8 +319,8 @@ async def test_pitwall_agent_server_database_api(db, monkeypatch, unused_tcp_por
 
     async with websockets.serve(source, "127.0.0.1", 0) as pitwall:
         pitwall_port = pitwall.sockets[0].getsockname()[1]
-        monkeypatch.setattr(stintara_agent, "PITWALL_WS", f"ws://127.0.0.1:{pitwall_port}?format=json")
-        monkeypatch.setattr(stintara_agent, "STINTARA_WS", f"ws://127.0.0.1:{unused_tcp_port}/ws/ingest")
+        config = AgentConfig(f"ws://127.0.0.1:{unused_tcp_port}/ws/ingest", "test-token-one",
+                             f"ws://127.0.0.1:{pitwall_port}?format=json")
         server = uvicorn.Server(uvicorn.Config(main.app, host="127.0.0.1", port=unused_tcp_port, lifespan="off", log_level="error"))
         serving = asyncio.create_task(server.serve())
         forwarding = None
@@ -326,12 +328,12 @@ async def test_pitwall_agent_server_database_api(db, monkeypatch, unused_tcp_por
             async with asyncio.timeout(10):
                 while not server.started:
                     await asyncio.sleep(.01)
-            async with websockets.connect(stintara_agent.STINTARA_WS, proxy=None) as ws:
+            async with websockets.connect(config.server_ws, proxy=None) as ws:
                 await ws.send(json.dumps({"type": "agent_hello", "protocol": "stintara-agent-v1", "token": "wrong", "simulator": "lmu"}))
                 with pytest.raises(ConnectionClosed) as exc:
                     await ws.recv()
                 assert exc.value.rcvd.code == 1008
-            forwarding = asyncio.create_task(stintara_agent.run_once("test-token-one"))
+            forwarding = asyncio.create_task(stintara_agent.run_once(config))
             for frame in [
                 {"type": "AllDriversUpdate", "session_type": "Race", "session_time": 100,
                  "drivers": [{"id": 7, "total_laps": 1, "last_lap_time": 90., "has_telemetry": True,
@@ -385,9 +387,8 @@ async def test_uplink_close_is_detected_while_pitwall_is_unavailable(monkeypatch
         await socket.close()
 
     async with websockets.serve(uplink, "127.0.0.1", 0) as server:
-        monkeypatch.setattr(stintara_agent, "STINTARA_WS", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
-        monkeypatch.setattr(stintara_agent, "PITWALL_WS", "ws://127.0.0.1:1")
-        await asyncio.wait_for(stintara_agent.run_once("test-token"), timeout=3)
+        config = AgentConfig(f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}", "test-secret", "ws://127.0.0.1:1")
+        await asyncio.wait_for(stintara_agent.run_once(config), timeout=3)
 
 
 async def test_bridge_reconnects_after_clean_close(monkeypatch):
@@ -406,8 +407,8 @@ async def test_bridge_reconnects_after_clean_close(monkeypatch):
                 received.set()
 
     async with websockets.serve(source, "127.0.0.1", 0) as server:
-        monkeypatch.setattr(stintara_agent, "PITWALL_WS", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
-        task = asyncio.create_task(stintara_agent.bridge(Uplink()))
+        config = AgentConfig("ws://localhost", "test-secret", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
+        task = asyncio.create_task(stintara_agent.bridge(Uplink(), config))
         try:
             await asyncio.wait_for(received.wait(), timeout=5)
             assert connections >= 2
