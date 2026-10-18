@@ -161,3 +161,14 @@ This repeat test verifies the original reconnect symptom as fixed for the observ
 - Adapter/protocol tests confirm that Pitwall's slot stays in `id` while `car_number` becomes null. API projection tests keep manufacturer/model unknown even for recognizable entry keywords.
 - The existing Starlette TestClient/httpx deprecation warning remains; no dependency changes were made.
 - No schema changes or migration. No new Docker build, deployment or real LMU drive was performed for this follow-up.
+
+
+## Transient SessionInfo follow-up (2026-10-18, Issue #11)
+
+The operator reported a real LMU Championship test in which Practice -> Qualifying -> Race worked. After session end, repeated empty `SessionInfo.track_name` values caused a reconnect storm. Server diagnostics identified the reproducible failure path: `session_info` failed the required track-name validation and closed ingestion with code 1008; reconnecting delivered the same transient provider state again.
+
+The local Pitwall adapter now drops a SessionInfo snapshot when its track name is missing, not a string, empty or whitespace-only. Valid track names are preserved verbatim. Dropped snapshots cannot overwrite the last valid metadata or trigger a session change. Server validation, authentication, envelope handling and the existing invalid-payload budget remain unchanged; the fix requires the updated agent. No post-race status/UI, gap or multi-agent changes are included.
+
+This is **implementation ready for repeat real-session validation**, not a claim that the fix has already passed a real Championship/session-end test.
+
+Local checks on the source mirror: compileall and Ruff passed; 120 Python tests passed and 19 database-dependent cases skipped without TEST_DATABASE_URL (17 database cases, bootstrap/authentication and database-backed transport E2E). The new database preservation test is among the skipped cases and requires CI with PostgreSQL. Four frontend tests passed. The forwarding/ingestion regression processed valid metadata, 30 empty snapshots, continued scoring/telemetry/lap data and later valid metadata on one WebSocket; only an explicitly injected invalid protocol closed it. The existing Starlette TestClient/httpx deprecation warning remains. No new real-session validation or deployment was performed.

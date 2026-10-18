@@ -12,6 +12,19 @@ from server.app.protocol import Scoring, Telemetry
 from server.app.uuid7 import uuid7
 
 
+@pytest.mark.parametrize("metadata", [{}, {"track_name": ""}, {"track_name": "   "},
+                                      {"track_name": "\t\r\n"}, {"track_name": None},
+                                      {"track_name": 42}, {"track_name": []}, {"track_name": {}}])
+def test_transient_session_metadata_is_dropped(metadata):
+    assert normalize({"type": "SessionInfo", **metadata}) is None
+
+
+@pytest.mark.parametrize("track", ["Paul Ricard - ELMS", "  Paul Ricard - ELMS  "])
+def test_valid_session_metadata_is_preserved_verbatim(track):
+    payload = {"track_name": track, "track_length": 5771, "weather": {"rain": 0}}
+    assert normalize({"type": "SessionInfo", **payload}) == ("session_info", payload)
+
+
 def test_uuid7_version_timestamp_and_uniqueness():
     ids = [uuid7() for _ in range(1000)]
     assert len(set(ids)) == 1000
