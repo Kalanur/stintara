@@ -46,7 +46,13 @@ def normalize(message):
     if kind is None:
         return None
     payload = clean({k: v for k, v in message.items() if k != "type"})
-    if kind == "scoring":
+    if kind == "session_info":
+        # Pitwall can emit empty metadata during session teardown. Ignore the
+        # whole snapshot so the server retains its last valid session metadata.
+        track_name = payload.get("track_name")
+        if not isinstance(track_name, str) or not track_name.strip():
+            return None
+    elif kind == "scoring":
         for vehicle in payload.get("vehicles", []):
             # Pitwall uses mID here: keep it as id, never as a race number.
             vehicle["car_number"] = None

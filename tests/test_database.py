@@ -11,6 +11,40 @@ from server.app.uuid7 import uuid7
 from tests.conftest import make_agent, scoring_session
 
 
+async def test_transient_session_info_preserves_last_valid_session(db):
+    agent = await make_agent(db)
+
+    async def deliver(message):
+        normalized = normalize(message)
+        if normalized is not None:
+            kind, payload = normalized
+            await main.handle_message(agent, "lmu", kind, main.PAYLOADS[kind].model_validate(payload).model_dump())
+
+    info = {"type": "SessionInfo", "track_name": "Paul Ricard - ELMS", "track_length": 5771,
+            "session_laps": 10, "weather": {"rain": 0}}
+    scoring = {"type": "ScoringUpdate", "session_type": "Race", "session_time": 100,
+               "player_vehicle_id": 7, "vehicles": [{"id": 7, "position": 1}]}
+    await deliver(info)
+    await deliver(scoring)
+    state = main.runtime[str(agent["id"])]
+    session_id = state["session_id"]
+    for bad_track in ("", " \t", None):
+        await deliver({**info, "track_name": bad_track, "track_length": 0, "session_laps": 0})
+        await deliver({**scoring, "session_time": 101})
+        await deliver({"type": "TelemetryUpdate", "current_et": 101, "fuel": 42})
+        assert state["session_id"] == session_id
+        assert state["track_name"] == info["track_name"] and state["track_length_m"] == 5771
+        assert state["session_laps"] == 10
+    await deliver({**info, "session_laps": 12})
+    assert state["session_id"] == session_id and state["session_laps"] == 12
+    async with db.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM sessions") == 1
+        row = await conn.fetchrow("SELECT * FROM sessions WHERE id=$1", session_id)
+        assert row["track_name"] == info["track_name"] and row["track_length_m"] == 5771
+        assert row["session_laps"] == 12 and row["status"] == "live"
+        assert await conn.fetchval("SELECT fuel_l FROM strategy_samples LIMIT 1") == 42
+
+
 async def test_identity_constraints_and_unresolved_participant(db):
     one, two = await make_agent(db), await make_agent(db, "two")
     async with db.acquire() as conn:

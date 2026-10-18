@@ -36,6 +36,42 @@ def frame(ws, kind="telemetry", payload=None, protocol="stintara-agent-v1"):
     ws.send_json({"protocol": protocol, "message_type": kind, "payload": payload if payload is not None else {"fuel": 42}})
 
 
+def test_transient_session_info_is_not_forwarded_over_existing_connection(ingest_client, caplog):
+    client, handler = ingest_client
+    messages = [
+        {"type": "ConnectionStatus", "game_connected": True},
+        {"type": "SessionInfo", "track_name": "Paul Ricard - ELMS"},
+        *[{"type": "SessionInfo", "track_name": ""} for _ in range(30)],
+        {"type": "SessionInfo", "track_name": " \t"},
+        {"type": "ScoringUpdate", "session_type": "Race", "vehicles": [{"id": 7}]},
+        {"type": "TelemetryUpdate", "fuel": 42},
+        {"type": "AllDriversUpdate", "session_type": "Race", "drivers": []},
+        {"type": "SessionInfo", "track_name": "Paul Ricard - ELMS"},
+    ]
+    async def source():
+        for message in messages:
+            yield json.dumps(message)
+
+    with client.websocket_connect("/ws/ingest") as ws:
+        hello(ws)
+        assert ws.receive_json()["type"] == "agent_welcome"
+        uplink = AsyncMock()
+        uplink.send.side_effect = ws.send_text
+        asyncio.run(stintara_agent.forward(source(), uplink))
+        assert uplink.send.await_count == 6
+        # FIFO barrier: only this deliberately invalid protocol closes the socket.
+        frame(ws, protocol="invalid-test-protocol")
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1008
+    assert [call.args[2] for call in handler.await_args_list] == [
+        "connection", "session_info", "scoring", "telemetry", "lap_snapshots", "session_info"]
+    assert handler.await_args_list[1].args[3]["track_name"] == "Paul Ricard - ELMS"
+    assert handler.await_args_list[-1].args[3]["track_name"] == "Paul Ricard - ELMS"
+    logs = [json.loads(r.message) for r in caplog.records if r.name == "stintara.ingest"]
+    assert len(logs) == 1 and logs[0]["error_class"] == "ValueError"
+
+
 @pytest.mark.parametrize("kind,payload", [
     ("telemetry", {"tires": [{"remaining": "test-secret"}]}),
     ("scoring", {"session_type": "Practice", "vehicles": [{"id": "test-secret"}]}),
