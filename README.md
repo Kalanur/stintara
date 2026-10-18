@@ -20,6 +20,51 @@ Read [AGENTS.md](AGENTS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
 - Display names never identify a driver. Unresolved field participants remain valid.
 - Short reconnects reuse the same agent's session; long inactivity closes observations. RaceControl matching is not implemented.
 
+## Windows test agent
+
+Normal testers do not need Python, Git, a virtual environment or PowerShell:
+
+1. Start LMU Pitwall locally; it must run separately from Stintara.
+2. Download the `StintaraAgent-windows` artifact from the **Build Windows test agent** GitHub Actions run for the operator-approved revision and extract it.
+3. Place the private `stintara-agent.json` supplied by the operator next to `StintaraAgent.exe`. The included `stintara-agent.example.json` is only a template and cannot authenticate.
+4. Double-click `StintaraAgent.exe` or start it from a console. Expect `Connected to Stintara as ...` and `Connected to LMU Pitwall`. Ctrl+C stops the agent cleanly. If a window closes immediately, start it from a console to read the safe configuration error.
+5. Keep the token/config private. Each tester needs their own agent and token; never share the bootstrap token. The same agent cannot connect twice simultaneously (`agent already connected`).
+
+The tester folder needs only the EXE and their JSON config. The EXE is currently unsigned; Windows may show a SmartScreen warning. No installer, service, tray application or auto-updater is included.
+
+Configuration is resolved at startup: `STINTARA_WS`, `PITWALL_WS`, `STINTARA_AGENT_TOKEN` environment values override JSON `server_ws`, `pitwall_ws`, `token`. Only Pitwall has a default: `ws://127.0.0.1:9000?format=json`. Server URL and a non-placeholder token are required. Use WSS/TLS for external testing; plain WS is for local development. The example uses the deliberately non-routable `wss://stintara.example.invalid/ws/ingest`.
+
+The default config location is beside the EXE (not its temporary extraction directory), or beside the agent script for Python runs. `--config <path>` selects an explicit file, relative to the current directory if not absolute. An explicit missing file or any unreadable/malformed config fails safely; environment values do not bypass a broken config file. An absent default file is allowed for environment-only development, including `run-agent.ps1`. Empty environment overrides are rejected. `--help` and `--version` exit without reading configuration or connecting. Config files must be UTF-8 JSON objects. Never commit `stintara-agent.json`, which is Git-ignored.
+
+### Developer Windows build
+
+From a fresh Windows checkout with Python 3.13 available:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r agent/requirements-build.txt
+.\agent\build-windows.ps1 -Python (Resolve-Path .\.venv\Scripts\python.exe)
+.\dist\StintaraAgent.exe --help
+```
+
+The build script resolves source/output paths from its own location, so it also works from another working directory. It produces `dist/StintaraAgent.exe` using PyInstaller Onefile and copies only the public example config alongside it. Generated specifications and intermediate files stay under ignored `build/`; binaries stay under ignored `dist/`. No operator config is embedded. The bounded dependency versions describe a repeatable build procedure, not a guarantee of byte-identical binaries across dependency updates. CI uses Windows and Python 3.13, runs the help smoke test and uploads only these two distributable files as an Actions artifact; it does not create a release.
+
+### Operator provisioning
+
+After deploying this server revision and initializing its existing schema, run the internal CLI inside the server container. Example with generic values only:
+
+```bash
+docker exec stintara python -m app.provision_agent --driver-slug test-driver --driver-name "Test Driver" --agent-name tester-pc --server-ws wss://stintara.example.invalid/ws/ingest
+```
+
+Replace the URL privately with the operator's actual WSS ingress. On success stdout contains one complete JSON config with the new token exactly once; save it privately as `stintara-agent.json` and transfer it securely to that tester. Without `--server-ws`, stdout contains just the token and stderr explains where to put it. Do not run this command in CI, pipe its output into logs, or share terminal captures. There is no token retrieval or rotation command; a lost token requires a separate operator decision, not an automatic retry that overwrites an agent.
+
+The CLI uses `DATABASE_URL` first, otherwise the existing `POSTGRES_*` settings with `POSTGRES_PASSWORD_FILE` taking priority over `POSTGRES_PASSWORD`. It needs database access only inside the server's network; do not expose PostgreSQL. It does not require a bootstrap agent token and does not create tables or run migrations.
+
+Each successful transaction generates a fresh token from 32 cryptographically random bytes and stores only its SHA-256 hash. New driver/agent IDs are UUIDv7. An exact existing driver slug is reused and its display name can be updated explicitly; equal display names never merge different slugs. Another agent for that driver needs a distinct name. An existing agent name causes an error and rolls back the entire transaction without rotating its token or changing the driver. Avoid reusing the bootstrap agent name, whose credentials remain managed by bootstrap settings. The optional server URL is output only, never stored in PostgreSQL. No admin HTTP endpoint is added.
+
+**Windows packaging/provisioning implementation ready for external multi-observer field testing.** This does not implement session/split convergence or establish that same-split or different-split multi-observer tests have passed.
+
 ## Local development and tests
 
 Python 3.11+ is required; the server image uses Python 3.13. Frontend tests require Node.js 22+.

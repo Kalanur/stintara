@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_DIRECTORIES = ("agent", "server", "docs", "unraid", "tests", ".github")
 EXCLUDED = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
-PUBLIC_HOSTS = {"github.com", "ghcr.io", "hub.docker.com", "docs.docker.com", "localhost", "127.0.0.1"}
+PUBLIC_HOSTS = {"github.com", "ghcr.io", "hub.docker.com", "docs.docker.com", "localhost", "127.0.0.1",
+                "stintara.example.invalid"}
 
 
 def public_sources():

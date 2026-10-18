@@ -1,0 +1,5 @@
+{
+  "server_ws": "wss://stintara.example.invalid/ws/ingest",
+  "pitwall_ws": "ws://127.0.0.1:9000?format=json",
+  "token": "replace-with-provisioned-token"
+}
