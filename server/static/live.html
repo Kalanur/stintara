@@ -50,6 +50,9 @@ async function refresh() {
       return;
     }
     const me = d.participants.find(p => p.is_stintara_driver) || {};
+    const ownParticipants = d.participants.filter(p => p.is_stintara_driver);
+    const focusQuery = ownParticipants.length === 1 && ownParticipants[0].participant_id
+      ? `?focus=${encodeURIComponent(ownParticipants[0].participant_id)}` : '';
     const s = d.strategy || {};
     root.className = '';
     root.innerHTML = `<div class="live">● LIVE</div><h1>${esc(d.driver.display_name)}</h1>
@@ -57,7 +60,7 @@ async function refresh() {
       <div class="metrics">${metric('Position', me.position)}${metric('Lap', me.total_laps)}
       ${metric('Fuel', num(s.fuel_l, ' L'))}${metric('Fuel/lap', num(s.fuel_avg_consumption_lap, ' L', 2))}
       ${metric('Fuel laps remaining', num(s.fuel_laps_remaining))}</div>
-      <p><a href="/sessions/${esc(encodeURIComponent(d.session.id))}/live">Watch full field →</a></p>${tyreTable(s)}<h2>Standings</h2><table><thead><tr><th>P</th><th>Driver</th><th>Vehicle / entry</th>
+      <p><a href="/sessions/${esc(encodeURIComponent(d.session.id))}/live${esc(focusQuery)}">Watch full field →</a></p>${tyreTable(s)}<h2>Standings</h2><table><thead><tr><th>P</th><th>Driver</th><th>Vehicle / entry</th>
       <th>Gap</th><th>Last</th><th>Best</th><th>Laps</th><th>Pit</th></tr></thead><tbody>
       ${d.participants.map(p => `<tr class="${p.is_stintara_driver ? 'me' : ''}"><td>${esc(p.position)}</td>
         <td>${esc(p.display_name)}</td><td>${vehicleCell(p)}</td>

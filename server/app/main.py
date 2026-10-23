@@ -326,7 +326,7 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
             return {"driver": dict(driver), "live": False}
         participants = await conn.fetch(
             """
-            SELECT local_vehicle_id,display_name,team_name,car_name,car_class,
+            SELECT id AS participant_id,local_vehicle_id,display_name,team_name,car_name,car_class,
                    CASE WHEN provider='lmu' THEN NULL ELSE car_number END AS car_number,
                    position,total_laps,last_lap_time,best_lap_time,gap_to_leader,
                    laps_behind_leader,in_pits,pitstops,finish_status,has_telemetry,

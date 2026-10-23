@@ -4,7 +4,10 @@
 body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:0 16px;background:#111;color:#eee}.muted{color:#999}.live{color:#57d68d;font-weight:700}.hero{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}.metrics{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin:16px 0}.metric{background:#1d1d1d;border:1px solid #333;border-radius:12px;padding:12px}.value{font-size:24px;font-weight:700}table{width:100%;border-collapse:collapse;background:#171717}th,td{text-align:left;padding:8px;border-bottom:1px solid #2b2b2b}tr.me{background:#242424}a{color:white}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}table{font-size:12px}}
 
 .table-scroll{overflow-x:auto}th{white-space:nowrap}caption{text-align:left;padding:12px 0;color:#aaa}.status{padding:12px;border:1px solid #555;border-radius:8px}td{vertical-align:top}
-</style></head><body><a href="/">← Stintara</a><div id="root">Loading…</div>
+.focus{background:#193c30!important;box-shadow:inset 3px 0 #57d68d}.h2h{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.h2h article{padding:12px;border:1px solid #555;border-radius:8px;overflow-wrap:anywhere}.h2h dl{display:grid;grid-template-columns:1fr 1fr;gap:6px}.h2h dd{margin:0}.focus-control{margin:20px 0}select{max-width:100%;padding:8px;background:#222;color:#eee;border:1px solid #777;border-radius:6px}@media(max-width:700px){.h2h{grid-template-columns:1fr}}
+</style></head><body><a href="/">← Stintara</a>
+<div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div>
+<div id="root">Loading…</div>
 <script>
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = t => Number.isFinite(t) && t > 0 ? `${Math.floor(t/60)}:${(t%60).toFixed(3).padStart(6,'0')}` : '—';
@@ -22,26 +25,114 @@ function vehicleCell(p) {
   return label ? `<div class="muted">${esc(label)}</div><div>${esc(value)}</div>` : '—';
 }
 
+// Selection helpers operate on participant UUIDs and the existing API order only.
+function participantById(participants, id) {
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
+  return participants.find(p => p.id === id.toLowerCase()) || null;
+}
+function resolveFocus(participants, requested, allowDefault=false) {
+  if (requested !== null) return participantById(participants, requested)?.id || null;
+  const registered = participants.filter(p => p.driver_slug);
+  return allowDefault && registered.length === 1 ? participantById(participants, registered[0].id)?.id || null : null;
+}
+function relativeWindow(participants, focusId) {
+  const focus = participantById(participants, focusId);
+  const index = focus ? participants.indexOf(focus) : -1;
+  return index < 0 ? [] : participants.slice(Math.max(0, index - 3), index + 4);
+}
+function validPosition(position) {
+  return Number.isSafeInteger(position) && position > 0;
+}
+function uniquePositionNeighbor(participants, focus, offset) {
+  if (!focus || !validPosition(focus.position) || ![-1, 1].includes(offset)) return null;
+  const target = focus.position + offset;
+  if (!validPosition(target)) return null;
+  const matches = participants.filter(p => validPosition(p.position) && p.position === target);
+  return matches.length === 1 ? matches[0] : null;
+}
+function focusURL(href, focusId) {
+  const url = new URL(href);
+  if (focusId) url.searchParams.set('focus', focusId);
+  else url.searchParams.delete('focus');
+  return url.pathname + url.search + url.hash;
+}
+function timingCells(p) {
+  return `<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${p.in_pits === true ? 'PIT' : '—'}</td><td>—</td>`;
+}
+function relativeWidget(participants, focusId) {
+  const rows = relativeWindow(participants, focusId);
+  return `<section><h2>Relative</h2><p class="muted">Relative standings: surrounding entries in standings order, not physical order or time gaps.</p>
+    ${rows.length ? `<div id="relative-scroll" class="table-scroll"><table><thead><tr><th>P</th><th>Driver</th><th>Class</th><th>Laps</th><th>Last</th><th>Best</th><th>Pit</th><th>Interval</th></tr></thead>
+    <tbody>${rows.map(p => `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td>${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}</td><td>${esc(p.vehicle_class || '—')}</td>${timingCells(p)}</tr>`).join('')}</tbody></table></div>` : '<p>Choose a participant to see relative standings.</p>'}</section>`;
+}
+function comparisonCard(label, p) {
+  return `<article class="${label === 'Focus' ? 'focus' : ''}"><h3>${label}</h3>${p ? `<strong>${esc(p.display_name)}</strong><dl>
+    <dt>Position</dt><dd>${esc(p.position)}</dd><dt>Class</dt><dd>${esc(p.vehicle_class || '—')}</dd>
+    <dt>Laps</dt><dd>${esc(p.total_laps)}</dd><dt>Last</dt><dd>${fmt(p.last_lap_time)}</dd><dt>Best</dt><dd>${fmt(p.best_lap_time)}</dd>
+    <dt>Pit</dt><dd>${p.in_pits === true ? 'PIT' : '—'}</dd><dt>Interval to focus</dt><dd>—</dd></dl>` : '<p>—</p>'}</article>`;
+}
+function headToHeadWidget(participants, focusId) {
+  const focus = participantById(participants, focusId);
+  return `<section><h2>Head-to-Head</h2><p class="muted">Ahead / Behind refer only to unique adjacent provider positions, not physical order. Intervals are unavailable.</p><div class="h2h">
+    ${comparisonCard('Ahead', uniquePositionNeighbor(participants, focus, -1))}${comparisonCard('Focus', focus)}${comparisonCard('Behind', uniquePositionNeighbor(participants, focus, 1))}</div></section>`;
+}
+
 const sessionId = __SESSION_ID__;
-async function refresh() {
+const selector = document.querySelector('#focus');
+let focusId = null;
+let initialized = false;
+let latestData = null;
+let selectorOptions = '';
+function syncFocusURL() {
+  const next = focusURL(location.href, focusId);
+  const current = new URL(location.href);
+  if (next !== current.pathname + current.search + current.hash) history.replaceState(null, '', next);
+}
+function renderSession(d) {
   const root = document.querySelector('#root');
+  const scrolls = ['full-scroll', 'relative-scroll'].map(id => [id, document.querySelector('#'+id)?.scrollLeft || 0]);
+  const options = '<option value="">Choose a participant</option>' + d.participants.map(p =>
+    `<option value="${esc(p.id)}">${esc(p.position)} · ${esc(p.display_name)}</option>`).join('');
+  if (options !== selectorOptions) { selector.innerHTML = options; selectorOptions = options; }
+  selector.value = focusId || '';
+  root.innerHTML = `<h1>${esc(d.session.track_name)}</h1>
+      <p>${esc(d.session.simulator_provider)} · ${esc(d.session.session_type)} · ${d.participants.length} participants</p>
+      <p class="status">${d.live ? 'Receiving scoring' : 'No live scoring — showing last stored standings'} · Last checkpoint: ${esc(d.session.last_seen_at)}</p>
+      <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p>
+      ${relativeWidget(d.participants, focusId)}${headToHeadWidget(d.participants, focusId)}
+      <h2>Full field</h2><div id="full-scroll" class="table-scroll"><table>
+      <caption>Provider positions and lap times. Gap and interval are unavailable until verified. Feed freshness does not establish race completion.</caption>
+      <thead><tr><th scope="col">P</th><th scope="col">Driver</th><th scope="col">Class</th><th scope="col">Vehicle / entry</th><th scope="col">Team</th><th scope="col">Number</th><th scope="col">Laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col">Pit</th></tr></thead>
+      <tbody>${d.participants.map(p => `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td>${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? `<br><a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}</td>
+      <td>${esc(p.vehicle_class || '—')}</td><td>${vehicleCell(p)}</td><td>${esc(p.team_name || '—')}</td><td>${esc(p.car_number)}</td>
+      <td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>—</td><td>—</td><td>${p.in_pits === true ? 'PIT' : '—'}</td></tr>`).join('') || '<tr><td colspan="12">No participants received yet.</td></tr>'}</tbody></table></div>`;
+  for (const [id, left] of scrolls) {
+    const element = document.querySelector('#'+id);
+    if (element) element.scrollLeft = left;
+  }
+}
+selector.addEventListener('change', () => {
+  if (!latestData) return;
+  focusId = resolveFocus(latestData.participants, selector.value);
+  syncFocusURL();
+  renderSession(latestData);
+});
+async function refresh() {
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/live`, {cache:'no-store'});
     if (!response.ok) throw new Error(response.status === 404 ? 'Session not found.' : 'Session data unavailable. Retrying…');
     const d = await response.json();
-    const scrollLeft = document.querySelector('.table-scroll')?.scrollLeft || 0;
-    root.innerHTML = `<h1>${esc(d.session.track_name)}</h1>
-      <p>${esc(d.session.simulator_provider)} · ${esc(d.session.session_type)} · ${d.participants.length} participants</p>
-      <p class="status">${d.live ? 'Receiving scoring' : 'No live scoring — showing last stored standings'} · Last checkpoint: ${esc(d.session.last_seen_at)}</p>
-      <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p>
-      <h2>Full field</h2><div class="table-scroll"><table>
-      <caption>Provider positions and lap times. Gap and interval are unavailable until verified. Feed freshness does not establish race completion.</caption>
-      <thead><tr><th scope="col">P</th><th scope="col">Driver</th><th scope="col">Class</th><th scope="col">Vehicle / entry</th><th scope="col">Team</th><th scope="col">Number</th><th scope="col">Laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col">Pit</th></tr></thead>
-      <tbody>${d.participants.map(p => `<tr><td>${esc(p.position)}</td><td>${esc(p.display_name)}${p.driver_slug ? `<br><a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}</td>
-      <td>${esc(p.vehicle_class || '—')}</td><td>${vehicleCell(p)}</td><td>${esc(p.team_name || '—')}</td><td>${esc(p.car_number)}</td>
-      <td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>—</td><td>—</td><td>${p.in_pits === true ? 'PIT' : '—'}</td></tr>`).join('') || '<tr><td colspan="12">No participants received yet.</td></tr>'}</tbody></table></div>`;
-    document.querySelector('.table-scroll').scrollLeft = scrollLeft;
-  } catch (error) { root.textContent = error.message; }
+    if (!initialized) {
+      const params = new URL(location.href).searchParams;
+      focusId = resolveFocus(d.participants, params.get('focus'), !params.has('focus'));
+      initialized = true;
+    } else {
+      focusId = resolveFocus(d.participants, focusId);
+    }
+    latestData = d;
+    syncFocusURL();
+    renderSession(d);
+  } catch (error) { document.querySelector('#root').textContent = error.message; }
   finally { setTimeout(refresh, 500); }
 }
 refresh();
