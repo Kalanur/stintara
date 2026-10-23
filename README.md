@@ -372,6 +372,17 @@ The home page lists sessions with scoring received within the last 15 seconds. O
 - `GET /api/sessions/{session_id}/live`: session metadata, feed freshness (`live`) and every recorded participant, including unresolved drivers. Unknown UUID returns 404; malformed UUID returns 422.
 - Positions are provider positions, with no renumbering or derived class ranks. Gap and interval are null in this API and shown as an em dash; their LMU semantics remain unverified. Missing model, manufacturer, team and race number are not inferred.
 - A stopped feed retains the last stored field on its direct page, explicitly labelled as stale. Receiving scoring does not mean that the race is still running; FINISHED/DNF/DQ behavior remains Issue #9.
-- Existing driver endpoints remain compatible. Relative/head-to-head views, Fuel Calculator and Trackmap are deferred.
+- Existing driver endpoints remain compatible. Fuel Calculator and Trackmap are deferred.
 
 The table includes position, historical participant name, class, typed vehicle/entry label, team, verified number where available, laps, last/best lap and pit indication. It scrolls horizontally on narrow screens. No live LMU/MAPC validation of this iteration has been performed.
+
+
+### Participant focus, Relative and Head-to-Head
+
+Choose any participant in the spectator selector, including an unresolved participant, or share `/sessions/<session-id>/live?focus=<participant-id>`. Selection uses only the internal session participant UUID. Without the parameter, exactly one registered Stintara participant may be selected automatically; otherwise choose explicitly. Invalid or foreign UUIDs leave focus unset. Manual changes replace the URL without reloading. Polling preserves the UUID; a missing participant clears focus and removes the parameter without selecting a replacement. The existing Driver-Live link supplies focus only when its own participant association is unique.
+
+**Relative** is a relative standings window: focus plus up to three preceding and three following entries in the existing API order. Position ties stay tied. It does not show physical track order or verified time gaps.
+
+**Head-to-Head** shows Ahead / Focus / Behind by provider position only. For a positive integer focus position, each neighbor must be the unique participant at exactly one position lower/higher. Missing, invalid or duplicate neighbor positions produce an unknown slot. Duplicate focus positions do not trigger alternative ranking. All interval-to-focus, interval and gap values remain unknown (an em dash); no arithmetic substitutes for verified provider semantics.
+
+Real physical relative, real-time intervals/gap semantics (#10), finish semantics (#9), Fuel Calculator, Trackmap and cross-agent convergence remain unimplemented or unverified. These widgets have synthetic regression coverage, not LMU/MAPC validation.

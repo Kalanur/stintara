@@ -203,3 +203,18 @@ Local development used an additional Python 3.13.15 installation and an isolated
 - Docker CLI is unavailable; Docker build and real `docker compose config` were not run locally. Existing static deployment/Unraid checks pass within pytest. Deployment configuration is unchanged.
 
 Required real LMU/MAPC checks: full-field comparison with Pitwall across practice/qualifying/race, transient disconnect and reconnect, session transitions, stale-feed display, and post-finish behavior. Capture same-split and different-split observations before designing convergence; verify raw gap/interval and finish signals separately under Issues #9/#10. No real LMU/MAPC run, merge, deployment or image publication was performed for this iteration.
+
+
+## Spectator Relative / Head-to-Head (2026-10-23)
+
+Based on dev `7d01b1f4e63894d596c61c2012d3d341f28d9692`. Only synthetic participants and sessions were used. Existing local Python 3.13 environment and dependencies were reused; no Docker/PostgreSQL installation or agent change was needed.
+
+- Compileall, Ruff, `pip check` and `git diff --check`: passed.
+- Local pytest: **160 passed, 22 skipped** without `TEST_DATABASE_URL`. Skips are 17 core database cases, provisioning, two spectator database cases, bootstrap/authentication and database-backed simulated transport E2E. The existing Starlette/httpx deprecation warning remains.
+- Node frontend suite: **13 passed**. Direct pure-helper tests cover UUID-only focus resolution, unresolved/equal-name participants, default ambiguity, relative windows and boundaries/ties, and unique exact neighboring positions (including invalid, missing, duplicated and reordered positions).
+- Stateful rendering tests exercise query parameters, selector changes, URL replacement/removal, polling persistence through position/name/order changes, disappeared focus without replacement, highlighting, interval placeholders, preserved horizontal scroll, XSS escaping and unique own-participant driver links.
+- Added PostgreSQL regression checks actual participant primary keys and unchanged legacy API fields for same-name resolved/unresolved participants. Locally skipped, required in CI.
+- Browser checked with ten synthetic participants: focused P5 has P4/P6 comparison cards and a seven-entry relative window. Narrow viewport checked at 390 px: comparison cards stack in one column, table overflow stays inside its scroll container, and the document does not overflow horizontally. This is UI evidence only.
+- CI uses the existing PostgreSQL 17 test/Compose/container workflow and Windows agent build/smoke workflow. Their status and exact final commit are recorded on the Draft PR; green local non-database checks alone do not establish database/CI success. PR container builds must not publish images.
+
+Real LMU/MAPC validation is absent. Later compare the complete field with Pitwall; keep an unresolved and a registered focus through real polling, position changes, ties and pit phases; check exact-position Head-to-Head selection and relative ordering; exercise session transitions and verify focus cannot move to a similarly named participant in another session. These synthetic checks establish selection behavior, not real physical order, timing-gap semantics, finish status or cross-agent convergence. Issues #9/#10, Fuel Calculator and Trackmap remain out of scope.

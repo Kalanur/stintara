@@ -94,3 +94,28 @@ async def test_database_session_list_field_separation_and_staleness(db):
     async with db.acquire() as conn:
         await conn.execute("UPDATE sessions SET status='complete' WHERE id=$1", second)
     assert await main.api_live_sessions() == []
+
+
+async def test_driver_focus_id_is_actual_participant_not_equal_name(db):
+    agent, session_id, _ = await scoring_session(db, "synthetic")
+    data = await main.api_driver_live(agent["slug"])
+    assert data["live"] is True and data["session"]["id"] == session_id
+    assert data["driver"]["id"] == agent["driver_id"]
+    assert data["strategy"] is None
+    assert len(data["participants"]) == 2
+    assert len({p["display_name"] for p in data["participants"]}) == 1
+    async with db.acquire() as conn:
+        rows = await conn.fetch("SELECT id,driver_id,local_vehicle_id FROM session_participants WHERE session_id=$1", session_id)
+    by_local = {row["local_vehicle_id"]: row for row in rows}
+    legacy_fields = {"local_vehicle_id", "display_name", "team_name", "car_name", "car_class", "car_number",
+                     "position", "total_laps", "last_lap_time", "best_lap_time", "gap_to_leader",
+                     "laps_behind_leader", "in_pits", "pitstops", "finish_status", "has_telemetry",
+                     "is_stintara_driver", "entry_name", "vehicle_class", "vehicle_model", "manufacturer"}
+    for p in data["participants"]:
+        assert set(p) == legacy_fields | {"participant_id"}
+        row = by_local[p["local_vehicle_id"]]
+        assert p["participant_id"] == row["id"]
+        assert p["is_stintara_driver"] == (row["driver_id"] == agent["driver_id"])
+    assert by_local[8]["driver_id"] is None
+    assert by_local[7]["driver_id"] == agent["driver_id"]
+    assert len({p["participant_id"] for p in data["participants"]}) == 2
