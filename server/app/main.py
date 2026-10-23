@@ -11,6 +11,7 @@ from collections import deque
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -234,6 +235,74 @@ async def get_live_rows(slug: str | None = None) -> list[dict[str, Any]]:
 @app.get("/api/live")
 async def api_live() -> list[dict[str, Any]]:
     return await get_live_rows()
+
+
+@app.get("/sessions/{session_id}/live", response_class=HTMLResponse)
+async def session_live_page(session_id: UUID) -> HTMLResponse:
+    html = (STATIC_DIR / "session.html").read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("__SESSION_ID__", json.dumps(str(session_id))))
+
+
+# Freshness describes the observation feed, not whether a race is finished.
+SESSION_LIVE_SQL = """s.status='live' AND EXISTS (
+    SELECT 1 FROM session_observations o WHERE o.session_id=s.id
+    AND o.ended_at IS NULL AND o.last_seen_at > now() - interval '15 seconds')"""
+
+
+@app.get("/api/sessions/live")
+async def api_live_sessions() -> list[dict[str, Any]]:
+    assert pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT s.id, s.track_name, s.session_type, s.simulator_provider, s.started_at,
+                   (SELECT count(*) FROM session_participants p WHERE p.session_id=s.id) AS participant_count
+            FROM sessions s WHERE {SESSION_LIVE_SQL} ORDER BY s.started_at DESC, s.id
+        """)
+    return [dict(row) for row in rows]
+
+
+def spectator_participants(rows, session_id, live, states, now):
+    """Overlay one newest fresh observation; never combine different sessions by names."""
+    participants = [dict(row) for row in rows]
+    candidates = [state for state in states if live and state.get("session_id") == session_id
+                  and now - state.get("last_scoring_at", 0) < 15 and state.get("scoring")]
+    state = max(candidates, key=lambda s: s["last_scoring_at"], default={})
+    vehicles = {v["id"]: v for v in state.get("scoring", {}).get("vehicles", [])}
+    for p in participants:
+        vehicle = vehicles.get(p["local_vehicle_id"])
+        if vehicle:
+            for key in ("position", "total_laps", "last_lap_time", "best_lap_time", "in_pits"):
+                p[key] = vehicle.get(key)
+        p.update(vehicle_identity(p))
+        # Gap/interval interpretation is unverified. Keep raw ingestion unchanged.
+        p.update(gap_to_leader=None, interval=None)
+    return sorted(participants, key=lambda p: (p["position"] is None,
+                                              p["position"] or 0, str(p["id"])))
+
+
+@app.get("/api/sessions/{session_id}/live")
+async def api_session_live(session_id: UUID) -> dict[str, Any]:
+    assert pool
+    async with pool.acquire() as conn:
+        session = await conn.fetchrow(f"""SELECT s.id, s.track_name, s.session_type,
+            s.simulator_provider, s.started_at, s.last_seen_at, s.status,
+            s.session_laps, s.session_minutes, ({SESSION_LIVE_SQL}) AS live
+            FROM sessions s WHERE s.id=$1""", session_id)
+        if not session:
+            raise HTTPException(404, "session not found")
+        participants = await conn.fetch("""
+            SELECT p.id, p.driver_id, d.slug AS driver_slug, p.local_vehicle_id,
+                   p.display_name, p.team_name, p.car_name, p.car_class,
+                   CASE WHEN p.provider='lmu' THEN NULL ELSE p.car_number END AS car_number,
+                   p.position, p.total_laps, p.last_lap_time, p.best_lap_time, p.in_pits
+            FROM session_participants p LEFT JOIN drivers d ON d.id=p.driver_id
+            WHERE p.session_id=$1
+        """, session_id)
+    data = dict(session)
+    live = data.pop("live")
+    return {"session": data, "live": live,
+            "participants": spectator_participants(participants, session_id, live,
+                                                    runtime.values(), time.monotonic())}
 
 
 @app.get("/api/drivers/{slug}/live")

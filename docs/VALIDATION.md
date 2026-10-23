@@ -189,3 +189,17 @@ Local checks on the source mirror, compared with the repository before commit:
 - The existing Starlette TestClient/httpx deprecation warning remains. No new deployment, real EXE drive, same-split/different-split test or automatic session convergence was performed.
 
 Windows packaging/provisioning implementation ready for external multi-observer field testing. Database-backed provisioning and the Windows/Python 3.13 workflow must also pass CI; local build success is not a claim that the remote workflow has already run.
+
+
+## Session spectator iteration (2026-10-23)
+
+Local development used an additional Python 3.13.15 installation and an isolated `.venv`; existing Python installations were retained. Installed development and agent-build requirements. Windows application control rejected the asyncpg 0.32.0 wheel DLL; local tests use compatible asyncpg 0.31.0 within the existing requirement range. No security policy or repository dependency range was changed.
+
+- Python suite: **160 passed, 21 skipped**. All skips require `TEST_DATABASE_URL`: 17 database cases, provisioning, spectator database integration, bootstrap/authentication and database-backed simulated WebSocket E2E. No local PostgreSQL service was configured. Existing Starlette/httpx deprecation warning remains.
+- Compileall, Ruff and `pip check` passed. Node 24.22.1: **5 frontend tests passed**, including a synthetic 60-participant field, separate session links, escaping, null timing, unknown gaps, empty/stale/error states and existing driver/tyre rendering.
+- API/projection tests cover UUID validation, 404, offline retained participants, unresolved same-name participants, tied positions, newest fresh observation selection and exclusion of other/stale sessions. PostgreSQL integration coverage was added for session listing, field completeness, separation and stale/ended feeds; its local execution is explicitly skipped.
+- Windows Onefile build passed using Python 3.13.15 / PyInstaller 6.22.3. EXE `--help` and `--version` passed without config or network. Generated files remain ignored.
+- Browser visual inspection passed with a local synthetic 20-driver fixture. This exercises rendering, not the database-backed API or real ingestion.
+- Docker CLI is unavailable; Docker build and real `docker compose config` were not run locally. Existing static deployment/Unraid checks pass within pytest. Deployment configuration is unchanged.
+
+Required real LMU/MAPC checks: full-field comparison with Pitwall across practice/qualifying/race, transient disconnect and reconnect, session transitions, stale-feed display, and post-finish behavior. Capture same-split and different-split observations before designing convergence; verify raw gap/interval and finish signals separately under Issues #9/#10. No real LMU/MAPC run, merge, deployment or image publication was performed for this iteration.

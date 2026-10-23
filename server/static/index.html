@@ -7,30 +7,26 @@
 body{font-family:system-ui,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;background:#111;color:#eee}a{color:#fff}.muted{color:#999}.card{border:1px solid #333;border-radius:14px;padding:18px;margin:14px 0;background:#171717}.live{color:#57d68d;font-weight:700}.big{font-size:28px;font-weight:700}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:12px}.metric{background:#202020;padding:12px;border-radius:10px}
 </style>
 </head><body>
-<h1>Stintara</h1><p class="muted">LIVE NOW</p><div id="live">Loading…</div>
+<h1>Stintara</h1><p class="muted">LIVE SESSIONS</p><div id="live">Loading…</div>
 <script>
 
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = t => Number.isFinite(t) && t > 0 ? `${Math.floor(t/60)}:${(t%60).toFixed(3).padStart(6,'0')}` : '—';
-const num = (value, unit='', digits=1) => Number.isFinite(value) ? value.toFixed(digits) + unit : '—';
-const metric = (label, value) => `<div class="metric"><div class="muted">${esc(label)}</div><div>${esc(value)}</div></div>`;
 async function getJSON(url) {
   const response = await fetch(url, {cache:'no-store'});
-  if (!response.ok) throw new Error(response.status === 404 ? 'Driver not found.' : 'Live data unavailable. Retrying…');
+  if (!response.ok) throw new Error('Live sessions unavailable. Retrying…');
   return response.json();
 }
 
 async function refresh() {
   const root = document.querySelector('#live');
   try {
-    const data = await getJSON('/api/live');
+    const data = await getJSON('/api/sessions/live');
     root.innerHTML = data.length ? data.map(x => `<div class="card">
-      <div class="live">● LIVE</div><div class="big">${esc(x.display_name)}</div>
-      <div>${esc(x.track_name)} · ${esc(x.session_type)} · ${esc(x.car_name || x.car_class)}</div>
-      <div class="grid">${metric('Position', x.position)}${metric('Lap', x.total_laps)}
-      ${metric('Last', fmt(x.last_lap_time))}${metric('Best', fmt(x.best_lap_time))}</div>
-      <p><a href="/drivers/${esc(encodeURIComponent(x.slug))}/live">Watch live →</a></p></div>`).join('')
-      : '<div class="card muted">No Stintara drivers are currently racing.</div>';
+      <div class="live">Receiving scoring</div><h2>${esc(x.track_name)}</h2>
+      <div>${esc(x.simulator_provider)} · ${esc(x.session_type)} · ${esc(x.participant_count)} participants</div>
+      <p class="muted">Started ${esc(x.started_at)}<br>Session ${esc(x.id)}</p>
+      <p><a href="/sessions/${esc(encodeURIComponent(x.id))}/live">Watch full field →</a></p></div>`).join('')
+      : '<div class="card muted">No live sessions are currently receiving scoring.</div>';
   } catch (error) { root.textContent = error.message; }
   finally { setTimeout(refresh, 1000); }
 }

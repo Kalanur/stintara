@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 async function render(file, data, ok=true, status=200) {
   const html = readFileSync(path.join(__dirname, '../server/static', file), 'utf8');
-  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1].replace('__DRIVER_SLUG__', '"driver"');
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1].replace('__DRIVER_SLUG__', '"driver"').replace('__SESSION_ID__', '"session"');
   const root = {innerHTML: '', textContent: ''};
   let finish;
   const done = new Promise(resolve => { finish = resolve; });
@@ -19,14 +19,15 @@ async function render(file, data, ok=true, status=200) {
   return root;
 }
 
-test('frontpage shows empty state, vehicle, escaped names and safe link', async () => {
-  assert.match((await render('index.html', [])).innerHTML, /No Stintara drivers/);
-  const root = await render('index.html', [{display_name:'<img onerror=alert(1)>', track_name:'Spa',
-    car_name:'Porsche', session_type:'Race', slug:'driver', position:1}]);
+test('frontpage lists separate sessions with escaped metadata and links', async () => {
+  assert.match((await render('index.html', [])).innerHTML, /No live sessions/);
+  const root = await render('index.html', [{id:'one', track_name:'<img onerror=alert(1)>',
+    session_type:'Race', participant_count:50}, {id:'two',track_name:'Same track'}]);
   assert.match(root.innerHTML, /&lt;img/);
   assert.doesNotMatch(root.innerHTML, /<img/);
-  assert.match(root.innerHTML, /Porsche/);
-  assert.match(root.innerHTML, /\/drivers\/driver\/live/);
+  assert.match(root.innerHTML, /50 participants/);
+  assert.match(root.innerHTML, /\/sessions\/one\/live/);
+  assert.match(root.innerHTML, /\/sessions\/two\/live/);
 });
 
 test('driver page includes tyre readings, standings and offline/error states', async () => {
@@ -76,4 +77,22 @@ test('each standings fallback is typed, escaped and independent of entry keyword
     assert.doesNotMatch(root.innerHTML, /unused|<Model|<Brand|<LMGT3>|<th>Car<\/th>/);
   }
   assert.match((await render('live.html', null, false, 500)).textContent, /Live data unavailable/);
+});
+
+test('spectator renders full synthetic field, unknown gaps, escaping and offline state', async () => {
+  const participants = Array.from({length:60}, (_, i) => ({id:String(i), display_name:'<Driver>',
+    position:i+1, vehicle_class:'<GT3>', entry_name:'Entry', gap_to_leader:-2, interval:3,
+    total_laps:0, last_lap_time:null, in_pits:i===0, driver_slug:i===0 ? 'test' : null}));
+  const data = {live:true, session:{id:'session',track_name:'Synthetic track',session_type:'Race'},participants};
+  const root = await render('session.html', data);
+  assert.equal((root.innerHTML.match(/&lt;Driver&gt;/g)||[]).length, 60);
+  assert.match(root.innerHTML, /Receiving scoring/);
+  assert.match(root.innerHTML, /\/drivers\/test\/live/);
+  assert.match(root.innerHTML, /<td>60<\/td>/);
+  assert.match(root.innerHTML, /PIT/);
+  assert.doesNotMatch(root.innerHTML, /<Driver>|<GT3>|-2|3 s/);
+  assert.match((await render('session.html', {...data,live:false})).innerHTML, /No live scoring/);
+  assert.match((await render('session.html', {...data,participants:[]})).innerHTML, /No participants/);
+  assert.match((await render('session.html', null,false,404)).textContent, /Session not found/);
+  assert.match((await render('session.html', null,false,500)).textContent, /Retrying/);
 });
