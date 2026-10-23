@@ -41,8 +41,8 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m compileall -q server/app agent tests
-      - run: ruff check server/app agent tests
+      - run: python -m compileall -q server/app agent tools tests
+      - run: ruff check server/app agent tools tests
       - run: python -m pytest -q
       - run: node --test tests/ui.test.cjs
       - name: Validate Compose with ephemeral configuration

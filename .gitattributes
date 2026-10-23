@@ -1,0 +1,2 @@
+# Keep generated synthetic fixtures byte-stable on Windows and in CI.
+tests/fixtures/replay/*.jsonl text eol=lf

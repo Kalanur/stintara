@@ -61,7 +61,7 @@ def test_workflow_yaml_and_publish_contract():
     assert "if" not in test
     assert test["services"]["postgres"]["image"] == "postgres:17"
     runs = [step.get("run", "") for step in test["steps"]]
-    for command in ("python -m compileall -q server/app agent tests", "ruff check server/app agent tests",
+    for command in ("python -m compileall -q server/app agent tools tests", "ruff check server/app agent tools tests",
                     "python -m pytest -q", "node --test tests/ui.test.cjs"):
         assert command in runs
     assert any("docker compose config --quiet" in command for command in runs)

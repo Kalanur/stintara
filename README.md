@@ -73,8 +73,8 @@ Python 3.11+ is required; use Python 3.13 locally to match CI and the server ima
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
-python -m compileall -q server/app agent tests
-ruff check server/app agent tests
+python -m compileall -q server/app agent tools tests
+ruff check server/app agent tools tests
 python -m pytest -q
 node --test tests/ui.test.cjs
 ```
@@ -401,3 +401,8 @@ Current fuel/capacity/timestamp come exclusively from the participant's latest s
 The experimental widget shows collecting/ready/stale states, a separate **Provider comparison**, and expandable diagnostics. Provider average consumption, range, stint number/laps/consumption are comparison values from the same latest strategy sample, never calculator inputs or fallbacks. Focus changes immediately clear the previous fuel display; obsolete responses cannot replace the current focus. All estimates are rounded only for display.
 
 Unverified: exact LMU checkpoint timing, inlap/outlap timing, pitstop-counter timing and physically exact per-lap consumption. Not implemented: fuel to finish, remaining race distance, reserve, refuel recommendations, pit strategy, yellow-flag filtering, outlier filtering or adaptive weighting. Real LMU/MAPC validation remains required.
+
+
+## Replay and synthetic scenarios
+
+[Replay & Scenario Harness](docs/REPLAY.md) documents the separate private Pitwall recorder, file-local pseudonymizer/audit, loopback wire replay, logical-throttle compiler and compiled protocol replay. The committed demo is wholly synthetic. Raw and sanitized-real captures remain private under ignored `data/`; only synthetic fixtures may enter Git. No production agent or protocol changes are required. Use a dedicated synthetic agent against test/dev infrastructure: protocol replay creates real database rows, and accelerated replay still obeys server-side persistence limits.
