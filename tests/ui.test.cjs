@@ -9,10 +9,11 @@ async function render(file, data, ok=true, status=200) {
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1].replace('__DRIVER_SLUG__', '"driver"').replace('__SESSION_ID__', '"session"');
   const root = {innerHTML: '', textContent: ''};
   const selector = {innerHTML:'', value:'', addEventListener() {}};
+  const fuel = {innerHTML:'',textContent:''};
   let finish;
   const done = new Promise(resolve => { finish = resolve; });
   vm.runInNewContext(script, {
-    document: {querySelector: value => value === '#focus' ? selector : root},
+    document: {querySelector: value => value === '#focus' ? selector : value === '#fuel' ? fuel : root},
     URL, location:{href:'http://localhost/sessions/session/live'}, history:{replaceState() {}},
     fetch: async () => ({ok, status, json: async () => data}),
     setTimeout: finish,
@@ -114,23 +115,31 @@ function helpers() {
   vm.runInContext(spectatorScript().split('const sessionId =')[0], context);
   return context;
 }
-async function sessionHarness(data, query='') {
+async function sessionHarness(data, query='', fuelReply=null) {
   const root = {innerHTML:'',textContent:''};
   const selector = {innerHTML:'',value:'',addEventListener(name, listener) { this[name] = listener; }};
   const scrolls = {'#full-scroll':{scrollLeft:31},'#relative-scroll':{scrollLeft:17}};
   const location = {href:'http://localhost/sessions/session/live'+query};
-  const replacements = [];
+  const replacements = [], fuelRequests = [];
+  const fuel = {html:'',text:'', get innerHTML() { return this.html; }, set innerHTML(value) { this.html=value; this.text=''; },
+    get textContent() { return this.text; }, set textContent(value) { this.text=value; this.html=''; }};
+  const details = {open:false};
   let queued, finish, currentData=data;
   let done = new Promise(resolve => { finish=resolve; });
   const context = vm.createContext({URL,location,
     history:{replaceState(state,unused,url) { replacements.push(url); location.href=new URL(url,location.href).href; }},
-    document:{querySelector: name => name==='#root' ? root : name==='#focus' ? selector : scrolls[name]},
-    fetch:async () => ({ok:true,json:async () => currentData}),
+    document:{querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : scrolls[name]},
+    fetch:async url => {
+      if (!url.endsWith('/fuel')) return {ok:true,json:async () => currentData};
+      fuelRequests.push(url);
+      const id=url.split('/').at(-2);
+      return fuelReply ? fuelReply(id) : {ok:true,json:async () => fuelData(id)};
+    },
     setTimeout:callback => { queued=callback; finish(); },
   });
   vm.runInContext(spectatorScript(), context);
   await done;
-  return {root,selector,location,replacements,scrolls,
+  return {root,selector,location,replacements,scrolls,fuel,fuelRequests,details,
     change(id) { selector.value=id; selector.change(); },
     async poll(data) {
       currentData=data;
@@ -254,4 +263,95 @@ test('driver spectator link uses only the unique own participant ID', async () =
   for (const candidates of [[],participants.map(p=>({...p,is_stintara_driver:true})),[{is_stintara_driver:true}]]) {
     assert.doesNotMatch((await render('live.html',{...data,participants:candidates})).innerHTML,/\?focus=/);
   }
+});
+
+
+function fuelData(id, count=3) {
+  return {session_id:syntheticId(99),participant_id:id,
+    estimate:{status:count<3 ? 'collecting' : 'ready',sample_count:count<3 ? 0 : count,available_sample_count:count,minimum_samples:3,window_size:5,
+      consumption_l_per_lap:count<3 ? null : 2.8,estimated_range_laps:count<3 ? null : 15},
+    current:{fuel_l:42,capacity_l:100,recorded_at:'2026-01-01T00:00:00Z',fresh:true},
+    provider:{avg_consumption_l_per_lap:99,laps_remaining:88,stint_number:2,stint_laps:6,stint_consumption_l:18},
+    samples:[{from_lap:1,to_lap:2,consumption_l:2.8,included:true,used_for_estimate:count>=3,excluded_reason:null},
+      {from_lap:2,to_lap:3,consumption_l:-20,included:false,used_for_estimate:false,excluded_reason:'pitstop_transition'}]};
+}
+const settleFuel = () => new Promise(resolve => setImmediate(resolve));
+
+test('fuel follows UUID focus, clears on switch/disappearance and never loads without focus', async () => {
+  const field=syntheticField(3), page=await sessionHarness(sessionData(field));
+  assert.equal(page.fuelRequests.length,0);
+  assert.match(page.fuel.textContent,/Choose a participant/);
+  page.change(field[0].id); await settleFuel();
+  assert.ok(page.fuelRequests.at(-1).endsWith(`/participants/${field[0].id}/fuel`));
+  assert.match(page.fuel.innerHTML,/Stintara consumption: 2.80 L\/lap/);
+  page.change(field[1].id);
+  assert.equal(page.fuel.innerHTML,'');
+  assert.match(page.fuel.textContent,/Loading/);
+  await settleFuel();
+  assert.ok(page.fuelRequests.at(-1).endsWith(`/participants/${field[1].id}/fuel`));
+  await page.poll(sessionData(field.filter(p=>p.id!==field[1].id)));
+  assert.equal(page.fuel.innerHTML,'');
+  assert.match(page.fuel.textContent,/Choose a participant/);
+});
+
+test('fuel collecting, ready, stale and provider comparison remain distinct', () => {
+  const h=helpers();
+  for (const count of [0,1,2]) {
+    const html=h.fuelWidget(fuelData(syntheticId(1),count));
+    assert.ok(html.includes(`Collecting fuel data · ${count} / 3 valid samples`));
+    assert.match(html,/Stintara consumption: —/);
+    assert.match(html,/Estimated range: —/);
+    assert.match(html,/Provider consumption: 99.00 L\/lap/);
+  }
+  const data=fuelData(syntheticId(1)), html=h.fuelWidget(data);
+  assert.match(html,/Current fuel: 42.00 L/);
+  assert.match(html,/Stintara consumption: 2.80 L\/lap/);
+  assert.match(html,/Estimated range: 15.0 laps/);
+  assert.match(html,/Valid samples used: 3/);
+  assert.match(html,/Provider comparison/);
+  assert.match(html,/not part of the Stintara calculation/);
+  assert.match(html,/Fuel sample diagnostics/);
+  assert.match(html,/pitstop_transition/);
+  assert.doesNotMatch(html,/Fuel to finish|Refuel recommendation|Finish margin/i);
+  data.current.fresh=false;
+  const stale=h.fuelWidget(data);
+  assert.match(stale,/Estimated range: —/);
+  assert.match(stale,/Stintara consumption: 2.80 L\/lap/);
+  assert.match(stale,/unavailable or stale/);
+  data.current.fuel_l=null; data.provider={};
+  assert.doesNotMatch(h.fuelWidget(data),/Provider comparison/);
+});
+
+test('fuel rejects late responses across A-B-A focus switches and clears errors', async () => {
+  const field=syntheticField(2), pending=[];
+  const page=await sessionHarness(sessionData(field),'',id=>new Promise(resolve=>pending.push({id,resolve})));
+  page.change(field[0].id);
+  page.change(field[1].id);
+  page.change(field[0].id);
+  const answer=(index,fuel)=>pending[index].resolve({ok:true,json:async()=>{
+    const data=fuelData(pending[index].id); data.current.fuel_l=fuel; return data;
+  }});
+  answer(2,30); await settleFuel();
+  answer(0,10); answer(1,20); await settleFuel();
+  assert.match(page.fuel.innerHTML,/Current fuel: 30.00 L/);
+  assert.doesNotMatch(page.fuel.innerHTML,/Current fuel: (10|20).00 L/);
+  page.change(field[1].id); pending[3].resolve({ok:false}); await settleFuel();
+  assert.equal(page.fuel.innerHTML,'');
+  assert.match(page.fuel.textContent,/unavailable/);
+  page.change(field[0].id); page.change(''); answer(4,50); await settleFuel();
+  assert.match(page.fuel.textContent,/Choose a participant/);
+  assert.equal(page.fuel.innerHTML,'');
+});
+
+test('fuel diagnostics escape data and details stay open through polling', async () => {
+  const data=fuelData(syntheticId(1));
+  data.samples[0].excluded_reason='<img onerror="x">';
+  data.current.recorded_at='<script>';
+  const html=helpers().fuelWidget(data);
+  assert.doesNotMatch(html,/<img|<script>/);
+  assert.match(html,/&lt;img/);
+  const field=syntheticField(1), page=await sessionHarness(sessionData(field),`?focus=${field[0].id}`);
+  page.details.open=true;
+  await page.poll(sessionData(field));
+  assert.equal(page.details.open,true);
 });

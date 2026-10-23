@@ -372,7 +372,7 @@ The home page lists sessions with scoring received within the last 15 seconds. O
 - `GET /api/sessions/{session_id}/live`: session metadata, feed freshness (`live`) and every recorded participant, including unresolved drivers. Unknown UUID returns 404; malformed UUID returns 422.
 - Positions are provider positions, with no renumbering or derived class ranks. Gap and interval are null in this API and shown as an em dash; their LMU semantics remain unverified. Missing model, manufacturer, team and race number are not inferred.
 - A stopped feed retains the last stored field on its direct page, explicitly labelled as stale. Receiving scoring does not mean that the race is still running; FINISHED/DNF/DQ behavior remains Issue #9.
-- Existing driver endpoints remain compatible. Fuel Calculator and Trackmap are deferred.
+- Existing driver endpoints remain compatible. Full race Fuel Calculator and Trackmap are deferred; experimental fuel validation is described below.
 
 The table includes position, historical participant name, class, typed vehicle/entry label, team, verified number where available, laps, last/best lap and pit indication. It scrolls horizontally on narrow screens. No live LMU/MAPC validation of this iteration has been performed.
 
@@ -386,3 +386,18 @@ Choose any participant in the spectator selector, including an unresolved partic
 **Head-to-Head** shows Ahead / Focus / Behind by provider position only. For a positive integer focus position, each neighbor must be the unique participant at exactly one position lower/higher. Missing, invalid or duplicate neighbor positions produce an unknown slot. Duplicate focus positions do not trigger alternative ranking. All interval-to-focus, interval and gap values remain unknown (an em dash); no arithmetic substitutes for verified provider semantics.
 
 Real physical relative, real-time intervals/gap semantics (#10), finish semantics (#9), Fuel Calculator, Trackmap and cross-agent convergence remain unimplemented or unverified. These widgets have synthetic regression coverage, not LMU/MAPC validation.
+
+
+### Fuel estimate · Validation foundation
+
+The focused participant can be inspected through `GET /api/sessions/{session_id}/participants/{participant_id}/fuel`. Both keys are UUIDs; missing sessions/participants or a participant from another session return 404. Unresolved participants are supported without creating a global driver identity.
+
+Stintara forms **checkpoint consumption samples** from persisted **lap fuel checkpoints**, sorted by lap number: previous fuel minus current fuel. Only consecutive lap numbers, finite nonnegative fuel, unchanged pitstop counters, neither endpoint in pits and a strictly positive finite delta qualify. There is no outlier/MAD filtering or value cutoff. Exclusions never clear earlier valid history. The estimate is the median of the last up to five valid samples, requiring at least three. `sample_count` counts samples actually used in the median (zero while collecting); `available_sample_count` supplies the collecting progress (0–2). Diagnostics mark samples used only once an estimate exists.
+
+Exclusion priority and stable reasons: `non_consecutive_laps`, `missing_or_invalid_fuel`, `pitstop_transition`, `pit_context`, `fuel_not_decreasing`. The API sends only the last twelve examined transitions, with delta, included/used flags and reason. Samples used in the estimate can precede this diagnostic window after a long run of excluded transitions.
+
+Current fuel/capacity/timestamp come exclusively from the participant's latest strategy sample (timestamp, then UUID tie-breaker). There is no lap-fuel fallback. A sample age of 0–15 seconds is fresh; future timestamps are not fresh. Range is current fuel divided by the independent consumption estimate only with fresh, finite, nonnegative current fuel and sufficient consumption samples. Otherwise range is null. Consumption can still be displayed while current fuel is stale. Non-finite values are returned as null, not invalid JSON.
+
+The experimental widget shows collecting/ready/stale states, a separate **Provider comparison**, and expandable diagnostics. Provider average consumption, range, stint number/laps/consumption are comparison values from the same latest strategy sample, never calculator inputs or fallbacks. Focus changes immediately clear the previous fuel display; obsolete responses cannot replace the current focus. All estimates are rounded only for display.
+
+Unverified: exact LMU checkpoint timing, inlap/outlap timing, pitstop-counter timing and physically exact per-lap consumption. Not implemented: fuel to finish, remaining race distance, reserve, refuel recommendations, pit strategy, yellow-flag filtering, outlier filtering or adaptive weighting. Real LMU/MAPC validation remains required.
