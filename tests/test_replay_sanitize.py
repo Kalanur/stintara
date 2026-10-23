@@ -2,10 +2,38 @@ import json
 
 import pytest
 
+from agent.pitwall import normalize
 from tools.replay import common
+from tools.replay.compile import compile_capture
 from tools.replay.format import header, load, write
 from tools.replay.sanitize import sanitize, sanitize_file
 from tools.replay.scenarios import record
+
+
+@pytest.mark.parametrize("blank", ["", " ", "\t\r\n "])
+def test_blank_session_info_survives_sanitization_and_is_ignored_by_compiler(blank):
+    rows = [record(0, "SessionInfo", track_name="Private Circuit One"),
+            record(1, "SessionInfo", track_name=blank),
+            record(2, "SessionInfo", track_name="Private Circuit One")]
+    metadata, sanitized, _ = sanitize(header("real"), rows)
+    assert sanitized[1]["message"]["track_name"] == blank
+    assert normalize(sanitized[1]["message"]) is None
+    _, compiled, counts = compile_capture(metadata, sanitized)
+    assert [row["t"] for row in compiled] == [0, 2]
+    assert counts["ignored"] == 1
+    assert [row["message"]["payload"]["track_name"] for row in compiled] == ["Synthetic Circuit 001"] * 2
+
+
+@pytest.mark.parametrize("field,prefix", [("driver_name", "Driver"), ("team_name", "Synthetic Team"),
+                                         ("car_name", "Synthetic Entry"), ("track_name", "Synthetic Circuit")])
+def test_blank_identity_values_preserved_without_consuming_pseudonyms(field, prefix):
+    values = ["", " \t\r\n", "Private Label One", " ", "Private Label Two", "Private Label One"]
+    rows = [record(0, "ScoringUpdate", vehicles=[{field: value} for value in values])]
+    result = sanitize(header("real"), rows)
+    assert result == sanitize(header("real"), rows)
+    assert [v[field] for v in result[1][0]["message"]["vehicles"]] == [
+        "", " \t\r\n", f"{prefix} 001", " ", f"{prefix} 002", f"{prefix} 001"]
+    assert result[2] == {}
 
 
 def private_rows():

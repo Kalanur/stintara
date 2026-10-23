@@ -20,6 +20,8 @@ def sanitize(metadata, records):
     def visit(value, path, key=None):
         if isinstance(value, str):
             if key in IDENTITY:
+                if not value.strip():
+                    return value
                 mapping = mappings[key]
                 if value not in mapping:
                     mapping[value] = f"{IDENTITY[key]} {len(mapping)+1:03d}"
