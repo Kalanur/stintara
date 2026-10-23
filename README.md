@@ -41,7 +41,7 @@ The default config location is beside the EXE (not its temporary extraction dire
 From a fresh Windows checkout with Python 3.13 available:
 
 ```powershell
-python -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r agent/requirements-build.txt
 .\agent\build-windows.ps1 -Python (Resolve-Path .\.venv\Scripts\python.exe)
 .\dist\StintaraAgent.exe --help
@@ -67,10 +67,10 @@ Each successful transaction generates a fresh token from 32 cryptographically ra
 
 ## Local development and tests
 
-Python 3.11+ is required; the server image uses Python 3.13. Frontend tests require Node.js 22+.
+Python 3.11+ is required; use Python 3.13 locally to match CI and the server image. Frontend tests require Node.js 22+.
 
 ```powershell
-python -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
 python -m compileall -q server/app agent tests
@@ -362,3 +362,16 @@ The adapter maps wheel/engine temperatures at or below -200 degrees Celsius to u
 Vehicle identity is exposed separately as `entry_name`, `vehicle_class`, `vehicle_model` and `manufacturer`, alongside existing `team_name` and `car_number`. Legacy `car_name`/`car_class` storage and API keys remain compatible; model and manufacturer are currently null. No schema migration is needed. The live standings use Model -> Manufacturer -> Entry -> Class -> unknown, with a semantic label beside each value. No team/livery-to-manufacturer guessing is performed.
 
 Position and gap values remain provider values. Repeated positions are not deduplicated or renumbered. Practice/qualifying gaps can still be zero because the API forwards provider race-gap fields; class-relative/best-lap gap calculations are not introduced in this fix.
+
+
+## Session spectator
+
+The home page lists sessions with scoring received within the last 15 seconds. Open a session to watch its complete recorded participant field at `/sessions/{session_id}/live`; registered drivers also have links to their existing strategy pages. Separate session IDs remain separate cards, including sessions on the same track. Automatic multi-observer convergence is still deferred.
+
+- `GET /api/sessions/live`: session ID, provider, track, type, start time and recorded participant count; each session appears once.
+- `GET /api/sessions/{session_id}/live`: session metadata, feed freshness (`live`) and every recorded participant, including unresolved drivers. Unknown UUID returns 404; malformed UUID returns 422.
+- Positions are provider positions, with no renumbering or derived class ranks. Gap and interval are null in this API and shown as an em dash; their LMU semantics remain unverified. Missing model, manufacturer, team and race number are not inferred.
+- A stopped feed retains the last stored field on its direct page, explicitly labelled as stale. Receiving scoring does not mean that the race is still running; FINISHED/DNF/DQ behavior remains Issue #9.
+- Existing driver endpoints remain compatible. Relative/head-to-head views, Fuel Calculator and Trackmap are deferred.
+
+The table includes position, historical participant name, class, typed vehicle/entry label, team, verified number where available, laps, last/best lap and pit indication. It scrolls horizontally on narrow screens. No live LMU/MAPC validation of this iteration has been performed.

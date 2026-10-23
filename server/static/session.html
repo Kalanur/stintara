@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stintara Spectator</title><style>
+body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:0 16px;background:#111;color:#eee}.muted{color:#999}.live{color:#57d68d;font-weight:700}.hero{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}.metrics{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin:16px 0}.metric{background:#1d1d1d;border:1px solid #333;border-radius:12px;padding:12px}.value{font-size:24px;font-weight:700}table{width:100%;border-collapse:collapse;background:#171717}th,td{text-align:left;padding:8px;border-bottom:1px solid #2b2b2b}tr.me{background:#242424}a{color:white}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}table{font-size:12px}}
+
+.table-scroll{overflow-x:auto}th{white-space:nowrap}caption{text-align:left;padding:12px 0;color:#aaa}.status{padding:12px;border:1px solid #555;border-radius:8px}td{vertical-align:top}
+</style></head><body><a href="/">← Stintara</a><div id="root">Loading…</div>
+<script>
+const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = t => Number.isFinite(t) && t > 0 ? `${Math.floor(t/60)}:${(t%60).toFixed(3).padStart(6,'0')}` : '—';
+
+function vehicleLabel(p) {
+  for (const [key, label] of [['vehicle_model','Model'], ['manufacturer','Manufacturer'],
+                            ['entry_name','Entry'], ['car_name','Entry'],
+                            ['vehicle_class','Class'], ['car_class','Class']]) {
+    if (typeof p[key] === 'string' && p[key].trim()) return {label, value:p[key]};
+  }
+  return {label:null, value:'—'};
+}
+function vehicleCell(p) {
+  const {label, value} = vehicleLabel(p);
+  return label ? `<div class="muted">${esc(label)}</div><div>${esc(value)}</div>` : '—';
+}
+
+const sessionId = __SESSION_ID__;
+async function refresh() {
+  const root = document.querySelector('#root');
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/live`, {cache:'no-store'});
+    if (!response.ok) throw new Error(response.status === 404 ? 'Session not found.' : 'Session data unavailable. Retrying…');
+    const d = await response.json();
+    const scrollLeft = document.querySelector('.table-scroll')?.scrollLeft || 0;
+    root.innerHTML = `<h1>${esc(d.session.track_name)}</h1>
+      <p>${esc(d.session.simulator_provider)} · ${esc(d.session.session_type)} · ${d.participants.length} participants</p>
+      <p class="status">${d.live ? 'Receiving scoring' : 'No live scoring — showing last stored standings'} · Last checkpoint: ${esc(d.session.last_seen_at)}</p>
+      <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p>
+      <h2>Full field</h2><div class="table-scroll"><table>
+      <caption>Provider positions and lap times. Gap and interval are unavailable until verified. Feed freshness does not establish race completion.</caption>
+      <thead><tr><th scope="col">P</th><th scope="col">Driver</th><th scope="col">Class</th><th scope="col">Vehicle / entry</th><th scope="col">Team</th><th scope="col">Number</th><th scope="col">Laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col">Pit</th></tr></thead>
+      <tbody>${d.participants.map(p => `<tr><td>${esc(p.position)}</td><td>${esc(p.display_name)}${p.driver_slug ? `<br><a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}</td>
+      <td>${esc(p.vehicle_class || '—')}</td><td>${vehicleCell(p)}</td><td>${esc(p.team_name || '—')}</td><td>${esc(p.car_number)}</td>
+      <td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>—</td><td>—</td><td>${p.in_pits === true ? 'PIT' : '—'}</td></tr>`).join('') || '<tr><td colspan="12">No participants received yet.</td></tr>'}</tbody></table></div>`;
+    document.querySelector('.table-scroll').scrollLeft = scrollLeft;
+  } catch (error) { root.textContent = error.message; }
+  finally { setTimeout(refresh, 500); }
+}
+refresh();
+</script></body></html>
