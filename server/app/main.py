@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
 from .domain import sample_due
+from .fuel import fuel_report
 from .lifecycle import end_observation, expire_observations, resolve_session
 from .migrations import migrate_sample_ids
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
@@ -303,6 +304,25 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     return {"session": data, "live": live,
             "participants": spectator_participants(participants, session_id, live,
                                                     runtime.values(), time.monotonic())}
+
+
+@app.get("/api/sessions/{session_id}/participants/{participant_id}/fuel")
+async def api_participant_fuel(session_id: UUID, participant_id: UUID) -> dict[str, Any]:
+    assert pool
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        exists = await conn.fetchval("""SELECT p.id FROM session_participants p
+            JOIN sessions s ON s.id=p.session_id WHERE p.id=$1 AND s.id=$2""", participant_id, session_id)
+        if not exists:
+            raise HTTPException(404, "session participant not found")
+        checkpoints = await conn.fetch("""SELECT lap_number,fuel_remaining_l,pitstops,in_pits
+            FROM laps WHERE session_participant_id=$1 ORDER BY lap_number""", participant_id)
+        strategy = await conn.fetchrow("""SELECT fuel_l,fuel_capacity_l,recorded_at,
+            fuel_avg_consumption_lap,fuel_laps_remaining,fuel_stint_number,fuel_stint_laps,fuel_stint_consumption_l
+            FROM strategy_samples WHERE session_participant_id=$1 ORDER BY recorded_at DESC,id DESC LIMIT 1""",
+                                       participant_id)
+        now = await conn.fetchval("SELECT clock_timestamp()")
+    return {"session_id": session_id, "participant_id": participant_id,
+            **fuel_report(checkpoints, strategy, now)}
 
 
 @app.get("/api/drivers/{slug}/live")

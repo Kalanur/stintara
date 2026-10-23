@@ -7,6 +7,7 @@ body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:
 .focus{background:#193c30!important;box-shadow:inset 3px 0 #57d68d}.h2h{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.h2h article{padding:12px;border:1px solid #555;border-radius:8px;overflow-wrap:anywhere}.h2h dl{display:grid;grid-template-columns:1fr 1fr;gap:6px}.h2h dd{margin:0}.focus-control{margin:20px 0}select{max-width:100%;padding:8px;background:#222;color:#eee;border:1px solid #777;border-radius:6px}@media(max-width:700px){.h2h{grid-template-columns:1fr}}
 </style></head><body><a href="/">← Stintara</a>
 <div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div>
+<section aria-label="Fuel validation"><h2>Fuel · Experimental</h2><div id="fuel">Choose a participant to inspect fuel data.</div></section>
 <div id="root">Loading…</div>
 <script>
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -77,12 +78,61 @@ function headToHeadWidget(participants, focusId) {
     ${comparisonCard('Ahead', uniquePositionNeighbor(participants, focus, -1))}${comparisonCard('Focus', focus)}${comparisonCard('Behind', uniquePositionNeighbor(participants, focus, 1))}</div></section>`;
 }
 
+const fuelNumber = (value, unit='', digits=2) => Number.isFinite(value) ? value.toFixed(digits)+unit : '—';
+function fuelWidget(data) {
+  const e = data.estimate, c = data.current, provider = data.provider || {};
+  const available = c.fresh && Number.isFinite(c.fuel_l) && c.fuel_l >= 0;
+  const comparison = [
+    ['avg_consumption_l_per_lap','Provider consumption',' L/lap'], ['laps_remaining','Provider range',' laps'],
+    ['stint_number','Provider stint',''], ['stint_laps','Provider stint laps',''],
+    ['stint_consumption_l','Provider stint consumption',' L']
+  ];
+  return `<p>${e.status === 'collecting' ? `Collecting fuel data · ${esc(e.available_sample_count)} / ${esc(e.minimum_samples)} valid samples` : 'Checkpoint consumption estimate'}</p>
+    <p>Current fuel: ${fuelNumber(c.fuel_l,' L')} · Capacity: ${fuelNumber(c.capacity_l,' L')}</p>
+    <p>Stintara consumption: ${fuelNumber(e.consumption_l_per_lap,' L/lap')} · Valid samples used: ${esc(e.sample_count)}</p>
+    <p>Estimated range: ${available ? fuelNumber(e.estimated_range_laps,' laps',1) : '—'}</p>
+    ${available ? '' : '<p>Current fuel telemetry unavailable or stale.</p>'}
+    <p class="muted">Strategy checkpoint: ${esc(c.recorded_at)}. Lap fuel checkpoint timing is not yet verified.</p>
+    ${comparison.some(([key]) => Number.isFinite(provider[key])) ? `<h3>Provider comparison</h3><p class="muted">Provider/Pitwall values only; not part of the Stintara calculation. They share the strategy checkpoint timestamp above.</p>
+    <ul>${comparison.map(([key,label,unit]) => `<li>${label}: ${fuelNumber(provider[key],unit)}</li>`).join('')}</ul>` : ''}
+    <details id="fuel-diagnostics"><summary>Fuel sample diagnostics</summary><div class="table-scroll"><table>
+    <thead><tr><th>Transition</th><th>Delta</th><th>Included</th><th>Used</th><th>Reason</th></tr></thead>
+    <tbody>${data.samples.map(sample => `<tr><td>${esc(sample.from_lap)} → ${esc(sample.to_lap)}</td><td>${fuelNumber(sample.consumption_l,' L')}</td><td>${sample.included ? 'yes' : 'no'}</td><td>${sample.used_for_estimate ? 'yes' : 'no'}</td><td>${esc(sample.excluded_reason)}</td></tr>`).join('') || '<tr><td colspan="5">No checkpoint transitions yet.</td></tr>'}</tbody></table></div></details>`;
+}
+
 const sessionId = __SESSION_ID__;
 const selector = document.querySelector('#focus');
 let focusId = null;
 let initialized = false;
 let latestData = null;
 let selectorOptions = '';
+let fuelRequest = 0;
+let fuelParticipant = null;
+async function refreshFuel() {
+  const request = ++fuelRequest;
+  const participant = focusId;
+  const root = document.querySelector('#fuel');
+  if (!participant) {
+    fuelParticipant = null;
+    root.textContent = 'Choose a participant to inspect fuel data.';
+    return;
+  }
+  if (fuelParticipant !== participant) root.textContent = 'Loading fuel data…';
+  fuelParticipant = participant;
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(participant)}/fuel`, {cache:'no-store'});
+    if (!response.ok) throw new Error('Fuel data unavailable. Retrying…');
+    const data = await response.json();
+    if (request !== fuelRequest || focusId !== participant) return;
+    if (data.participant_id !== participant || data.session_id !== sessionId) throw new Error('Fuel data unavailable. Retrying…');
+    const open = document.querySelector('#fuel-diagnostics')?.open || false;
+    root.innerHTML = fuelWidget(data);
+    const details = document.querySelector('#fuel-diagnostics');
+    if (details) details.open = open;
+  } catch (error) {
+    if (request === fuelRequest && focusId === participant) root.textContent = 'Fuel data unavailable. Retrying…';
+  }
+}
 function syncFocusURL() {
   const next = focusURL(location.href, focusId);
   const current = new URL(location.href);
@@ -116,6 +166,7 @@ selector.addEventListener('change', () => {
   focusId = resolveFocus(latestData.participants, selector.value);
   syncFocusURL();
   renderSession(latestData);
+  void refreshFuel();
 });
 async function refresh() {
   try {
@@ -132,7 +183,12 @@ async function refresh() {
     latestData = d;
     syncFocusURL();
     renderSession(d);
-  } catch (error) { document.querySelector('#root').textContent = error.message; }
+    await refreshFuel();
+  } catch (error) {
+    document.querySelector('#root').textContent = error.message;
+    ++fuelRequest;
+    document.querySelector('#fuel').textContent = 'Fuel data unavailable while session data cannot be refreshed.';
+  }
   finally { setTimeout(refresh, 500); }
 }
 refresh();
