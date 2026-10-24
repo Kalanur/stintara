@@ -419,6 +419,8 @@ async def current_or_create_session(agent, payload):
     state = runtime.setdefault(str(agent["id"]), {})
     async with pool.acquire() as conn, conn.transaction():
         session_id = await resolve_session(conn, agent, state, payload, SESSION_TIMEOUT_SECONDS)
+        if session_id:
+            await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
     if session_id != state.get("session_id"):
         for key in ("last_sample_at", "last_persisted_scoring", "scoring"):
             state.pop(key, None)
@@ -429,32 +431,36 @@ async def current_or_create_session(agent, payload):
 
 async def upsert_participants(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any]) -> None:
     assert pool
+    async with pool.acquire() as conn, conn.transaction():
+        await upsert_participants_on_connection(conn, agent, session_id, payload, runtime[str(agent["id"])]["provider"])
+
+
+async def upsert_participants_on_connection(conn, agent, session_id, payload, provider):
     player_vehicle_id = payload.get("player_vehicle_id")
     vehicles = payload.get("vehicles") or []
-    async with pool.acquire() as conn:
-        for v in vehicles:
-            local_id = int(v.get("id", -1))
-            driver_id = agent["driver_id"] if local_id == player_vehicle_id else None
-            await conn.execute(
-                """
-                INSERT INTO session_participants(
-                    id,session_id,driver_id,provider,local_vehicle_id,display_name,team_name,car_name,car_class,car_number,
-                    position,total_laps,last_lap_time,best_lap_time,gap_to_leader,laps_behind_leader,in_pits,last_seen_at)
-                VALUES($1,$2,$3,$17,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
-                ON CONFLICT(session_id,local_vehicle_id) DO UPDATE SET
-                    driver_id=COALESCE(session_participants.driver_id,EXCLUDED.driver_id),
-                    team_name=EXCLUDED.team_name,car_name=EXCLUDED.car_name,
-                    car_class=EXCLUDED.car_class,car_number=EXCLUDED.car_number,position=EXCLUDED.position,
-                    total_laps=EXCLUDED.total_laps,last_lap_time=EXCLUDED.last_lap_time,best_lap_time=EXCLUDED.best_lap_time,
-                    gap_to_leader=EXCLUDED.gap_to_leader,laps_behind_leader=EXCLUDED.laps_behind_leader,
-                    in_pits=EXCLUDED.in_pits,last_seen_at=now()
-                """,
-                uuid7(), session_id, driver_id, local_id, v.get("driver_name") or f"Vehicle {local_id}",
-                v.get("team_name"), v.get("car_name"), v.get("vehicle_class"), v.get("car_number"),
-                v.get("position"), v.get("total_laps", 0), v.get("last_lap_time"), v.get("best_lap_time"),
-                v.get("time_behind_leader"), v.get("laps_behind_leader"), bool(v.get("in_pits", False)), runtime[str(agent["id"])]["provider"],
-            )
-        await conn.execute("UPDATE sessions SET last_seen_at=now() WHERE id=$1", session_id)
+    for v in vehicles:
+        local_id = int(v.get("id", -1))
+        driver_id = agent["driver_id"] if local_id == player_vehicle_id else None
+        await conn.execute(
+            """
+            INSERT INTO session_participants(
+                id,session_id,driver_id,provider,local_vehicle_id,display_name,team_name,car_name,car_class,car_number,
+                position,total_laps,last_lap_time,best_lap_time,gap_to_leader,laps_behind_leader,in_pits,last_seen_at)
+            VALUES($1,$2,$3,$17,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
+            ON CONFLICT(session_id,local_vehicle_id) DO UPDATE SET
+                driver_id=COALESCE(session_participants.driver_id,EXCLUDED.driver_id),
+                team_name=EXCLUDED.team_name,car_name=EXCLUDED.car_name,
+                car_class=EXCLUDED.car_class,car_number=EXCLUDED.car_number,position=EXCLUDED.position,
+                total_laps=EXCLUDED.total_laps,last_lap_time=EXCLUDED.last_lap_time,best_lap_time=EXCLUDED.best_lap_time,
+                gap_to_leader=EXCLUDED.gap_to_leader,laps_behind_leader=EXCLUDED.laps_behind_leader,
+                in_pits=EXCLUDED.in_pits,last_seen_at=now()
+            """,
+            uuid7(), session_id, driver_id, local_id, v.get("driver_name") or f"Vehicle {local_id}",
+            v.get("team_name"), v.get("car_name"), v.get("vehicle_class"), v.get("car_number"),
+            v.get("position"), v.get("total_laps", 0), v.get("last_lap_time"), v.get("best_lap_time"),
+            v.get("time_behind_leader"), v.get("laps_behind_leader"), bool(v.get("in_pits", False)), provider,
+        )
+    await conn.execute("UPDATE sessions SET last_seen_at=now() WHERE id=$1", session_id)
 
 
 async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any]) -> None:
@@ -584,7 +590,6 @@ async def handle_message(agent, provider, kind, payload):
             session_id = await current_or_create_session(agent, payload)
             if not session_id:
                 return
-            await upsert_participants(agent, session_id, payload)
             state["last_persisted_scoring"] = now
             state["persisted_track"] = state.get("track_name")
             async with pool.acquire() as conn:

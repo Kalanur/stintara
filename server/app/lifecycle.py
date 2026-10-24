@@ -1,4 +1,12 @@
 """Provider-neutral session/observation persistence; no RaceControl inference."""
+from .convergence import (
+    OBSERVATION_FRESH_SECONDS,
+    clock_consistent,
+    clock_reset,
+    finite,
+    matching_rosters,
+    namespace_key,
+)
 from .domain import same_session
 from .uuid7 import uuid7
 
@@ -12,6 +20,8 @@ async def complete_if_unobserved(conn, session_id):
 
 
 async def end_observation(conn, session_id, agent_id):
+    # Serialize attach/end decisions on a shared session, including simultaneous stops.
+    await conn.fetchval("SELECT id FROM sessions WHERE id=$1 FOR UPDATE", session_id)
     await conn.execute("""UPDATE session_observations SET ended_at=now()
         WHERE session_id=$1 AND agent_id=$2 AND ended_at IS NULL""", session_id, agent_id)
     await complete_if_unobserved(conn, session_id)
@@ -31,12 +41,45 @@ async def attach_observation(conn, session_id, agent_id):
 
 async def expire_observations(conn, timeout_seconds):
     rows = await conn.fetch("""
-        UPDATE session_observations SET ended_at=now()
+        SELECT DISTINCT session_id FROM session_observations
         WHERE ended_at IS NULL AND last_seen_at < now() - $1 * interval '1 second'
-        RETURNING session_id
+        ORDER BY session_id
     """, float(timeout_seconds))
     for row in rows:
+        await conn.fetchval("SELECT id FROM sessions WHERE id=$1 FOR UPDATE", row["session_id"])
+        await conn.execute("""UPDATE session_observations SET ended_at=now()
+            WHERE session_id=$1 AND ended_at IS NULL
+            AND last_seen_at < now() - $2 * interval '1 second'""", row["session_id"], float(timeout_seconds))
         await complete_if_unobserved(conn, row["session_id"])
+
+
+async def cross_agent_session(conn, agent, provider, track, scoring):
+    if provider != "lmu" or not finite(scoring.get("session_time")):
+        return None
+    candidates = await conn.fetch("""
+        SELECT s.id FROM sessions s
+        WHERE s.simulator_provider=$1 AND s.track_name=$2 AND s.session_type=$3 AND s.status='live'
+        AND EXISTS (SELECT 1 FROM session_observations o WHERE o.session_id=s.id
+            AND o.agent_id<>$4 AND o.ended_at IS NULL AND o.last_session_time IS NOT NULL
+            AND o.last_seen_at > clock_timestamp() - $5 * interval '1 second')
+        ORDER BY s.id FOR UPDATE OF s
+    """, provider, track, scoring["session_type"], agent["id"], OBSERVATION_FRESH_SECONDS)
+    matches = []
+    for candidate in candidates:
+        observations = await conn.fetch("""SELECT last_session_time,last_seen_at
+            FROM session_observations WHERE session_id=$1 AND agent_id<>$2 AND ended_at IS NULL
+            AND last_session_time IS NOT NULL ORDER BY last_seen_at DESC,id""", candidate["id"], agent["id"])
+        now = await conn.fetchval("SELECT clock_timestamp()")
+        observation = next((o for o in observations if finite(o["last_session_time"])
+                            and 0 <= (now - o["last_seen_at"]).total_seconds() < OBSERVATION_FRESH_SECONDS), None)
+        if observation is None or not clock_consistent(scoring["session_time"], observation["last_session_time"],
+                                                       (now - observation["last_seen_at"]).total_seconds()):
+            continue
+        roster = await conn.fetch("""SELECT local_vehicle_id,display_name,team_name,car_name,car_class
+            FROM session_participants WHERE session_id=$1""", candidate["id"])
+        if matching_rosters(provider, scoring.get("vehicles", []), roster):
+            matches.append(candidate["id"])
+    return matches[0] if len(matches) == 1 else None
 
 
 async def resolve_session(conn, agent, state, scoring, timeout_seconds):
@@ -44,6 +87,8 @@ async def resolve_session(conn, agent, state, scoring, timeout_seconds):
     track = state.get("track_name")
     if not track:
         return None  # wait for source context; don't create an Unknown-track session
+    # Held until the caller commits the initial participant roster as well as resolution.
+    await conn.execute("SELECT pg_advisory_xact_lock($1)", namespace_key(provider, track, scoring["session_type"]))
     # Serializes session creation for this agent, including after a server restart.
     await conn.fetchval("SELECT id FROM agents WHERE id=$1 FOR UPDATE", agent["id"])
     rows = await conn.fetch("""
@@ -53,16 +98,26 @@ async def resolve_session(conn, agent, state, scoring, timeout_seconds):
         ORDER BY s.started_at DESC FOR UPDATE OF s,o
     """, agent["id"])
     session_id = None
-    now = await conn.fetchval("SELECT now()")
+    now = await conn.fetchval("SELECT clock_timestamp()")
+    reset = (state.get("persisted_track") == track and state.get("session_type") == scoring["session_type"]
+             and clock_reset(scoring.get("session_time"), state.get("scoring", {}).get("session_time")))
+    reset = reset or any(previous["simulator_provider"] == provider and previous["track_name"] == track
+                         and previous["session_type"] == scoring["session_type"]
+                         and clock_reset(scoring.get("session_time"), previous["last_session_time"])
+                         for previous in rows)
     for previous in rows:
         fresh = (now - previous["observation_seen"]).total_seconds() < timeout_seconds
-        if session_id is None and fresh and same_session(
+        if session_id is None and not reset and fresh and same_session(
             previous, provider=provider, session_type=scoring["session_type"],
             track_name=track, session_time=scoring.get("session_time"),
         ):
             session_id = previous["id"]
         else:
             await end_observation(conn, previous["id"], agent["id"])
+    if session_id is None and not reset:
+        session_id = await cross_agent_session(conn, agent, provider, track, scoring)
+        if session_id is not None:
+            await attach_observation(conn, session_id, agent["id"])
     if session_id is None:
         session_id = uuid7()
         await conn.execute("""
@@ -74,7 +129,7 @@ async def resolve_session(conn, agent, state, scoring, timeout_seconds):
             state.get("session_laps"), state.get("session_minutes"), state.get("weather_json", "{}"))
         await attach_observation(conn, session_id, agent["id"])
     await conn.execute("""
-        UPDATE session_observations SET last_seen_at=now(),last_session_time=$3
+        UPDATE session_observations SET last_seen_at=clock_timestamp(),last_session_time=$3
         WHERE session_id=$1 AND agent_id=$2
     """, session_id, agent["id"], scoring.get("session_time"))
     await conn.execute("UPDATE sessions SET last_seen_at=now() WHERE id=$1", session_id)
