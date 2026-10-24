@@ -63,7 +63,7 @@ The CLI uses `DATABASE_URL` first, otherwise the existing `POSTGRES_*` settings 
 
 Each successful transaction generates a fresh token from 32 cryptographically random bytes and stores only its SHA-256 hash. New driver/agent IDs are UUIDv7. An exact existing driver slug is reused and its display name can be updated explicitly; equal display names never merge different slugs. Another agent for that driver needs a distinct name. An existing agent name causes an error and rolls back the entire transaction without rotating its token or changing the driver. Avoid reusing the bootstrap agent name, whose credentials remain managed by bootstrap settings. The optional server URL is output only, never stored in PostgreSQL. No admin HTTP endpoint is added.
 
-**Windows packaging/provisioning implementation ready for external multi-observer field testing.** This does not implement session/split convergence or establish that same-split or different-split multi-observer tests have passed.
+**Windows packaging/provisioning implementation ready for external multi-observer field testing.** Packaging itself does not establish session identity. Conservative LMU convergence is described below and still requires implementation-specific field validation.
 
 ## Local development and tests
 
@@ -340,7 +340,7 @@ This workflow change does not create `dev`, merge code or deploy an image. Publi
 
 ## Known limits
 
-- No official RaceControl matching, automatic cross-agent race association or other simulator adapters yet. Multiple observations are supported through an internal trusted association function; there is no public endpoint to arbitrarily attach agents to sessions.
+- No official RaceControl matching, automatic cross-agent race association or other simulator adapters yet. Conservative LMU session convergence uses clock and roster/slot evidence as described below; there is no public endpoint to arbitrarily attach agents to sessions.
 - Reconnect matching is local to an authenticated agent. Same-track/type restarts with no observed clock reset or disconnect remain ambiguous without official session IDs. Driver swaps and per-observer vehicle-ID reconciliation are deferred.
 - A driver is associated through the authenticated agent and the simulator's player vehicle ID, never through a display name. No public account/login system is implemented.
 - Session end is inferred from source disconnect, transition or inactivity; no official results finalization yet.
@@ -366,7 +366,7 @@ Position and gap values remain provider values. Repeated positions are not dedup
 
 ## Session spectator
 
-The home page lists sessions with scoring received within the last 15 seconds. Open a session to watch its complete recorded participant field at `/sessions/{session_id}/live`; registered drivers also have links to their existing strategy pages. Separate session IDs remain separate cards, including sessions on the same track. Automatic multi-observer convergence is still deferred.
+The home page lists sessions with scoring received within the last 15 seconds. Open a session to watch its complete recorded participant field at `/sessions/{session_id}/live`; registered drivers also have links to their existing strategy pages. Separate session IDs remain separate cards, including sessions on the same track. Conservative LMU multi-observer convergence is implemented as described below; ambiguous or insufficient evidence retains separate sessions.
 
 - `GET /api/sessions/live`: session ID, provider, track, type, start time and recorded participant count; each session appears once.
 - `GET /api/sessions/{session_id}/live`: session metadata, feed freshness (`live`) and every recorded participant, including unresolved drivers. Unknown UUID returns 404; malformed UUID returns 422.
@@ -431,3 +431,14 @@ Pitwall omits forecast node identities and can omit nodes. Only a source array o
 A nonempty field whose every participant has the same nonempty trimmed class shows that class once in the session header. Full Field, Relative and H2H omit repeated class fields, including the redundant vehicle-cell class fallback. Missing/blank/different classes retain class presentation. Comparison is case-sensitive; no class aliases or missing classes are inferred. Stored and API class values remain unchanged.
 
 This pass addresses #19 and #21 within the broader #22 milestone; it does not establish complete spectator parity. LMU weather units, forecast availability and changing conditions still require real-session validation. Other providers need an explicit weather mapping before their values can be displayed.
+
+
+### Conservative LMU multi-observer convergence (Pass 1)
+
+Multiple agents can contribute to one canonical session through separate observations when live LMU evidence strongly agrees. Same-agent reconnect resolution remains first. Cross-agent candidates require identical provider, track and session type, a live session, a different agent's active observation less than 15 seconds old, and a finite persisted session clock. The freshest suitable clock, advanced by elapsed wall time, must agree within 5 seconds. Clock alignment is only a gate, never proof of split identity.
+
+At least 5 slots must match exactly on slot ID plus trimmed driver/team/entry/class evidence, with at least 80% overlap of the smaller comparable roster and zero conflicting comparable slots. Driver names alone, generic fallback names and duplicate slots are insufficient. A comparable entry needs a nonempty driver string plus some team, entry or class context. Missing optional strings normalize to empty; no fuzzy matching or case folding occurs. Exactly one matching candidate is required. Different counts/subsets are allowed; ambiguous or insufficient evidence creates separate sessions. Meaningful backwards clock resets cannot rejoin another running session during that resolution.
+
+These provisional thresholds favor false negatives and derive from limited aggregate same-split/different-split evidence in #24. They do not establish official race or driver identities. Participant UUIDs and resolved drivers are preserved; another observer can add vehicles and fill its previously unresolved player participant. No driver identity is fabricated from a name or local slot. Sessions close only after their last active observation ends or expires.
+
+No historical duplicate repair, transient same-agent fragment repair, RaceControl integration, split-number discovery, Results XML ingestion, protocol or schema change is included. Real same-split/different-split tests, reconnects, phase transitions and slot stability still need validation against this implementation; #24 remains open.
