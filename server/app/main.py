@@ -26,6 +26,7 @@ from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
 from .secrets import read_secret
 from .timing import newest_scoring, project_timing, session_timing
 from .uuid7 import uuid7
+from .weather import normalize_weather
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
@@ -196,6 +197,7 @@ async def frontpage() -> HTMLResponse:
 @app.get("/drivers/{slug}/live", response_class=HTMLResponse)
 async def driver_live_page(slug: str) -> HTMLResponse:
     html = (STATIC_DIR / "live.html").read_text(encoding="utf-8")
+    html = html.replace("__WEATHER_UI__", (STATIC_DIR / "weather.js").read_text(encoding="utf-8"))
     return HTMLResponse(html.replace("__DRIVER_SLUG__", json.dumps(slug).replace("<", "\\u003c")))
 
 
@@ -242,6 +244,7 @@ async def api_live() -> list[dict[str, Any]]:
 @app.get("/sessions/{session_id}/live", response_class=HTMLResponse)
 async def session_live_page(session_id: UUID) -> HTMLResponse:
     html = (STATIC_DIR / "session.html").read_text(encoding="utf-8")
+    html = html.replace("__WEATHER_UI__", (STATIC_DIR / "weather.js").read_text(encoding="utf-8"))
     return HTMLResponse(html.replace("__SESSION_ID__", json.dumps(str(session_id))))
 
 
@@ -290,7 +293,7 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     async with pool.acquire() as conn:
         session = await conn.fetchrow(f"""SELECT s.id, s.track_name, s.session_type,
             s.simulator_provider, s.started_at, s.last_seen_at, s.status,
-            s.session_laps, s.session_minutes, ({SESSION_LIVE_SQL}) AS live
+            s.session_laps, s.session_minutes, s.weather, ({SESSION_LIVE_SQL}) AS live
             FROM sessions s WHERE s.id=$1""", session_id)
         if not session:
             raise HTTPException(404, "session not found")
@@ -310,6 +313,7 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
             WHERE p.session_id=$1
         """, session_id)
     data = dict(session)
+    data["weather"] = normalize_weather(data.get("weather"), data.get("simulator_provider"))
     live = data.pop("live")
     now = time.monotonic()
     states = list(runtime.values())
@@ -393,7 +397,7 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
     return {
         "driver": dict(driver),
         "live": True,
-        "session": dict(session),
+        "session": {**dict(session), "weather": normalize_weather(session["weather"], session["simulator_provider"])},
         "participants": participants,
         "strategy": dict(strategy) if strategy else None,
     }

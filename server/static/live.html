@@ -5,6 +5,7 @@ body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:
 </style></head><body>
 <a href="/">← Stintara</a><div id="root" class="muted">Loading…</div>
 <script>
+__WEATHER_UI__
 
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = t => Number.isFinite(t) && t > 0 ? `${Math.floor(t/60)}:${(t%60).toFixed(3).padStart(6,'0')}` : '—';
@@ -54,19 +55,22 @@ async function refresh() {
     const focusQuery = ownParticipants.length === 1 && ownParticipants[0].participant_id
       ? `?focus=${encodeURIComponent(ownParticipants[0].participant_id)}` : '';
     const s = d.strategy || {};
+    const forecastOpen = document.querySelector('#weather-forecast')?.open || false;
     root.className = '';
     root.innerHTML = `<div class="live">● LIVE</div><h1>${esc(d.driver.display_name)}</h1>
       <div>${esc(d.session.track_name)} · ${esc(d.session.session_type)} · ${esc(vehicleText(me))}</div>
       <div class="metrics">${metric('Position', me.position)}${metric('Lap', me.total_laps)}
       ${metric('Fuel', num(s.fuel_l, ' L'))}${metric('Fuel/lap', num(s.fuel_avg_consumption_lap, ' L', 2))}
       ${metric('Fuel laps remaining', num(s.fuel_laps_remaining))}</div>
-      <p><a href="/sessions/${esc(encodeURIComponent(d.session.id))}/live${esc(focusQuery)}">Watch full field →</a></p>${tyreTable(s)}<h2>Standings</h2><table><thead><tr><th>P</th><th>Driver</th><th>Vehicle / entry</th>
+      <p><a href="/sessions/${esc(encodeURIComponent(d.session.id))}/live${esc(focusQuery)}">Watch full field →</a></p>${weatherWidget(d.session.weather, d.live, true)}${tyreTable(s)}<h2>Standings</h2><table><thead><tr><th>P</th><th>Driver</th><th>Vehicle / entry</th>
       <th>Gap</th><th>Last</th><th>Best</th><th>Laps</th><th>Pit</th></tr></thead><tbody>
       ${d.participants.map(p => `<tr class="${p.is_stintara_driver ? 'me' : ''}"><td>${esc(p.position)}</td>
         <td>${esc(p.display_name)}</td><td>${vehicleCell(p)}</td>
         <td>${p.laps_behind_leader > 0 ? esc(p.laps_behind_leader)+' L' : num(p.gap_to_leader, ' s')}</td>
         <td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${esc(p.total_laps)}</td>
         <td>${p.in_pits ? 'PIT' : ''}</td></tr>`).join('')}</tbody></table>`;
+    const forecast = document.querySelector('#weather-forecast');
+    if (forecast) forecast.open = forecastOpen;
   } catch (error) { root.textContent = error.message; }
   finally { setTimeout(refresh, 500); }
 }
