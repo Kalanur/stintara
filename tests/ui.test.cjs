@@ -4,9 +4,13 @@ const {readFileSync} = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+function weatherScript() {
+  return readFileSync(path.join(__dirname, '../server/static/weather.js'), 'utf8');
+}
+
 async function render(file, data, ok=true, status=200) {
   const html = readFileSync(path.join(__dirname, '../server/static', file), 'utf8');
-  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1].replace('__DRIVER_SLUG__', '"driver"').replace('__SESSION_ID__', '"session"');
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1].replace('__WEATHER_UI__', weatherScript()).replace('__DRIVER_SLUG__', '"driver"').replace('__SESSION_ID__', '"session"');
   const root = {innerHTML: '', textContent: ''};
   const selector = {innerHTML:'', value:'', addEventListener() {}};
   const fuel = {innerHTML:'',textContent:''};
@@ -108,7 +112,7 @@ const syntheticField = count => Array.from({length:count}, (_, i) => ({id:synthe
 const sessionData = participants => ({live:true,session:{id:syntheticId(99),track_name:'Synthetic Track'},participants});
 function spectatorScript() {
   return readFileSync(path.join(__dirname, '../server/static/session.html'), 'utf8')
-    .match(/<script>([\s\S]*?)<\/script>/)[1].replace('__SESSION_ID__', JSON.stringify(syntheticId(99)));
+    .match(/<script>([\s\S]*?)<\/script>/)[1].replace('__WEATHER_UI__', weatherScript()).replace('__SESSION_ID__', JSON.stringify(syntheticId(99)));
 }
 function helpers() {
   const context = vm.createContext({URL});
@@ -391,4 +395,88 @@ test('session clock and focused persisted sectors label completed laps without p
   const h=helpers();
   for (const value of [null,-1,Infinity]) assert.equal(h.clockText(value),'—');
   assert.match(h.focusTiming([{...field[0],sector1:-1,sector2:Infinity}],field[0].id),/S1<div class="value">—/);
+});
+
+test('single-class detection requires the entire nonempty field and preserves source strings', () => {
+  const h=helpers();
+  for (const classes of [[], ['GT3',null], ['GT3',undefined], ['GT3',''], ['GT3','  '], ['GT3','Hypercar'], ['GT3','gt3']]) {
+    assert.equal(h.singleClass(classes.map(vehicle_class => ({vehicle_class}))),null);
+  }
+  const field=[{vehicle_class:' GT3 '},{vehicle_class:'GT3'}];
+  assert.equal(h.singleClass(field),'GT3');
+  assert.equal(field[0].vehicle_class,' GT3 ');
+});
+
+test('single class appears once; full field, relative and H2H keep class for mixed or unknown fields', async () => {
+  const field=syntheticField(3).map(p => ({...p,vehicle_class:'GT3'}));
+  const h=await sessionHarness(sessionData(field),`?focus=${field[1].id}`);
+  assert.equal((h.root.innerHTML.match(/GT3/g)||[]).length,1);
+  assert.doesNotMatch(h.root.innerHTML,/<th[^>]*>Class<\/th>|<dt>Class<\/dt>/);
+  const full=h.root.innerHTML.split('<h2>Full field</h2>')[1];
+  assert.equal((full.match(/<th scope=/g)||[]).length,11);
+  for (const value of ['Hypercar', null, '', '  ']) {
+    const mixed=field.map(p => ({...p})); mixed[2].vehicle_class=value;
+    await h.poll(sessionData(mixed));
+    assert.match(h.root.innerHTML,/<th scope="col">Class<\/th>/);
+    assert.match(h.root.innerHTML,/<th>Class<\/th>/);
+    assert.match(h.root.innerHTML,/<dt>Class<\/dt>/);
+    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,12);
+  }
+  await h.poll(sessionData([]));
+  assert.match(h.root.innerHTML,/colspan="12"/);
+  const escaped=await render('session.html',sessionData([{vehicle_class:'<GT3>',display_name:'<Driver>'}]));
+  assert.match(escaped.innerHTML,/&lt;GT3&gt;/);
+  assert.doesNotMatch(escaped.innerHTML,/<GT3>|<Driver>/);
+});
+
+function syntheticWeather() {
+  return {current:{air_temp_c:24,track_temp_c:41,rain_intensity:0,wetness_avg:.1,
+    wetness_min:0,wetness_max:.2,cloudiness:.25,wind_speed_mps:3},
+    forecast:{timeline_complete:true,nodes:Array.from({length:5},(_,i) => ({position_percent:i*25,
+      temperature_c:24+i,rain_chance:0,humidity_percent:50,wind_direction:'NE',wind_speed_mps:2}))}};
+}
+
+test('both weather views format current and forecast units; stale session labels last stored', async () => {
+  const weather=syntheticWeather();
+  for (const file of ['session.html','live.html']) {
+    const data={...sessionData([]),driver:{display_name:'Synthetic Driver'}}; data.session.weather=weather;
+    const html=(await render(file,data)).innerHTML;
+    for (const text of ['Current conditions','Air: 24.0 °C','Track: 41.0 °C','Rain: 0 %',
+      'Track wetness: 10 %','Cloudiness: 25 %','Wind: 3.0 m/s','Start','25 %','50 %','75 %','Finish','Humidity: 50.0 %','NE 2.0 m/s']) assert.ok(html.includes(text),text);
+    assert.equal((html.match(/<li>/g)||[]).length,5);
+  }
+  const data=sessionData([]); data.live=false; data.session.weather=weather;
+  const html=(await render('session.html',data)).innerHTML;
+  assert.match(html,/Last stored conditions/); assert.doesNotMatch(html,/Current conditions/);
+});
+
+test('partial weather has no invented timeline; missing and hostile fields render safely', () => {
+  const h=helpers(), weather=syntheticWeather();
+  weather.forecast={timeline_complete:false,nodes:[{temperature_c:24},{rain_chance:.2,wind_direction:'<img onerror=alert(1)>'}]};
+  let html=h.weatherWidget(weather,true);
+  assert.match(html,/<strong>Forecast 1<\/strong>/); assert.match(html,/<strong>Forecast 2<\/strong>/);
+  assert.doesNotMatch(html,/<strong>(Start|Finish|25 %|50 %|75 %)<\/strong>|<img/);
+  assert.equal((html.match(/<li>/g)||[]).length,2);
+  for (const value of [undefined,null,{}, {current:{air_temp_c:NaN,track_temp_c:Infinity,rain_intensity:true,cloudiness:'<script>'}}]) {
+    html=h.weatherWidget(value,false);
+    assert.match(html,/Forecast unavailable/); assert.match(html,/Air: —/);
+    assert.doesNotMatch(html,/NaN|Infinity|undefined|<script>|\[object Object\]/);
+  }
+});
+
+test('driver forecast expansion survives the existing refresh loop', async () => {
+  const root={innerHTML:'',textContent:''}, details={open:true};
+  let next, done;
+  const data={live:true,driver:{display_name:'Synthetic'},session:{weather:syntheticWeather()},participants:[]};
+  const script=readFileSync(path.join(__dirname,'../server/static/live.html'),'utf8')
+    .match(/<script>([\s\S]*?)<\/script>/)[1].replace('__WEATHER_UI__',weatherScript()).replace('__DRIVER_SLUG__','"synthetic"');
+  const wait=new Promise(resolve => { done=resolve; });
+  vm.runInNewContext(script,{document:{querySelector: id => id==='#root' ? root : details},
+    fetch:async () => ({ok:true,json:async () => data}),setTimeout:fn => {next=fn;done();}});
+  await wait;
+  assert.equal(details.open,true);
+  assert.match(root.innerHTML,/<details id="weather-forecast">/);
+  details.open=false;
+  await next();
+  assert.equal(details.open,false);
 });

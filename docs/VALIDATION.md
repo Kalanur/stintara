@@ -260,3 +260,12 @@ Coverage includes zero/positive/negative/non-finite gaps, lap-deficit precedence
 The added PostgreSQL integration test checks latest persisted sectors despite reversed insertion order, missing components/participants, fresh interval/clock projection and unchanged stored lap rows. It is skipped locally and must execute in CI. A query-count regression enforces two API database round trips with a lateral sector lookup; real load benchmarking is not claimed.
 
 Real LMU validation remains required for positive/zero gaps during green-flag and finish transitions, lap deficits and crossing-line lap-counter differences, configured duration/lap sentinel behavior, session clock reset/staleness and latest-sector checkpoints. No official countdown, remaining-lap forecast, current/best sector extension, finish semantics or Fuel-to-Finish is implemented. #10, #20 and #22 remain open.
+
+
+## 2026-10-24 Weather and single-class spectator pass
+
+Exact base: `d52e215d5d8fab0633651c8cf38602d2c9d0f8e9`; branch: `codex/spectator-weather-class-ui`.
+
+Local Python 3.13 validation: compileall, Ruff, pip check and git diff whitespace checks passed. Full pytest: **325 passed, 26 skipped**, with the existing Starlette/httpx deprecation warning. All 26 skips are database-dependent tests because `TEST_DATABASE_URL` is absent. Frontend: **24 passed**. Tests use synthetic values only, covering normalization, conservative forecast positioning, API snapshot preservation, class presentation, escaping and refresh-state retention.
+
+Docker is unavailable locally; Compose/container checks and the PostgreSQL 17 suite must run in PR CI. The unchanged Windows agent build/smoke check also remains a CI requirement. This record does not claim real LMU/MAPC verification. Remaining field tests: compare current units and fractions with Pitwall, changing weather, complete/partial/unavailable forecasts, stale-session labels, and single/mixed/unknown classes on desktop/mobile. Forecast node identities and independent weather freshness timestamps remain unavailable; no history is implemented. See #19, #21 and #22.
