@@ -57,25 +57,60 @@ function focusURL(href, focusId) {
   else url.searchParams.delete('focus');
   return url.pathname + url.search + url.hash;
 }
+function seconds(value, signed=false) {
+  return Number.isFinite(value) ? `${signed && value > 0 ? '+' : ''}${value.toFixed(1)} s` : '—';
+}
+function gapText(p, race) {
+  if (!race) return '—';
+  if (Number.isSafeInteger(p.gap_laps) && p.gap_laps > 0) return `${p.gap_laps} L`;
+  return Number.isFinite(p.gap_to_leader) && p.gap_to_leader >= 0 ? seconds(p.gap_to_leader) : '—';
+}
+function intervalText(p, race) {
+  return race && Number.isFinite(p.gap_to_leader) && p.gap_to_leader >= 0 && !p.gap_laps &&
+    Number.isFinite(p.interval) && p.interval >= 0 ? seconds(p.interval) : '—';
+}
+function intervalToFocus(p, focus, race) {
+  if (!race || !p || !focus || p.id === focus.id) return null;
+  if (p.interval_preceding_id === focus.id && intervalText(p, race) !== '—') return p.interval;
+  if (focus.interval_preceding_id === p.id && intervalText(focus, race) !== '—') return -focus.interval;
+  return null;
+}
+function clockText(value) {
+  if (!Number.isFinite(value) || value < 0) return '—';
+  const whole = Math.floor(value);
+  return `${Math.floor(whole/3600)}:${String(Math.floor(whole/60)%60).padStart(2,'0')}:${String(whole%60).padStart(2,'0')}`;
+}
+function sessionContext(d) {
+  const t = d.timing || {};
+  const configured = Number.isFinite(t.configured_minutes) && t.configured_minutes > 0 ? `${t.configured_minutes} min` :
+    Number.isSafeInteger(t.configured_laps) && t.configured_laps > 0 ? `${t.configured_laps} laps` : '—';
+  return `<p>Configured distance / duration: ${configured} · Elapsed session time: ${d.live ? clockText(t.elapsed_seconds) : '—'}</p>`;
+}
+function focusTiming(participants, focusId) {
+  const p = participantById(participants, focusId);
+  return p ? `<section><h2>Focused timing</h2><p>Completed laps: ${esc(p.total_laps)}</p>
+    <p>Last completed lap sectors · checkpoint lap ${esc(p.sector_lap_number)}</p>
+    <div class="metrics">${['sector1','sector2','sector3'].map((key,i) => `<div class="metric">S${i+1}<div class="value">${fmt(p[key])}</div></div>`).join('')}</div></section>` : '';
+}
 function timingCells(p) {
   return `<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${p.in_pits === true ? 'PIT' : '—'}</td><td>—</td>`;
 }
 function relativeWidget(participants, focusId) {
   const rows = relativeWindow(participants, focusId);
   return `<section><h2>Relative</h2><p class="muted">Relative standings: surrounding entries in standings order, not physical order or time gaps.</p>
-    ${rows.length ? `<div id="relative-scroll" class="table-scroll"><table><thead><tr><th>P</th><th>Driver</th><th>Class</th><th>Laps</th><th>Last</th><th>Best</th><th>Pit</th><th>Interval</th></tr></thead>
+    ${rows.length ? `<div id="relative-scroll" class="table-scroll"><table><thead><tr><th>P</th><th>Driver</th><th>Class</th><th>Completed laps</th><th>Last</th><th>Best</th><th>Pit</th><th>Interval</th></tr></thead>
     <tbody>${rows.map(p => `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td>${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}</td><td>${esc(p.vehicle_class || '—')}</td>${timingCells(p)}</tr>`).join('')}</tbody></table></div>` : '<p>Choose a participant to see relative standings.</p>'}</section>`;
 }
-function comparisonCard(label, p) {
+function comparisonCard(label, p, focus, race) {
   return `<article class="${label === 'Focus' ? 'focus' : ''}"><h3>${label}</h3>${p ? `<strong>${esc(p.display_name)}</strong><dl>
     <dt>Position</dt><dd>${esc(p.position)}</dd><dt>Class</dt><dd>${esc(p.vehicle_class || '—')}</dd>
-    <dt>Laps</dt><dd>${esc(p.total_laps)}</dd><dt>Last</dt><dd>${fmt(p.last_lap_time)}</dd><dt>Best</dt><dd>${fmt(p.best_lap_time)}</dd>
-    <dt>Pit</dt><dd>${p.in_pits === true ? 'PIT' : '—'}</dd><dt>Interval to focus</dt><dd>—</dd></dl>` : '<p>—</p>'}</article>`;
+    <dt>Completed laps</dt><dd>${esc(p.total_laps)}</dd><dt>Last</dt><dd>${fmt(p.last_lap_time)}</dd><dt>Best</dt><dd>${fmt(p.best_lap_time)}</dd>
+    <dt>Pit</dt><dd>${p.in_pits === true ? 'PIT' : '—'}</dd><dt>Interval to focus</dt><dd>${seconds(intervalToFocus(p, focus, race), true)}</dd></dl>` : '<p>—</p>'}</article>`;
 }
-function headToHeadWidget(participants, focusId) {
+function headToHeadWidget(participants, focusId, race=false) {
   const focus = participantById(participants, focusId);
-  return `<section><h2>Head-to-Head</h2><p class="muted">Ahead / Behind refer only to unique adjacent provider positions, not physical order. Intervals are unavailable.</p><div class="h2h">
-    ${comparisonCard('Ahead', uniquePositionNeighbor(participants, focus, -1))}${comparisonCard('Focus', focus)}${comparisonCard('Behind', uniquePositionNeighbor(participants, focus, 1))}</div></section>`;
+  return `<section><h2>Head-to-Head</h2><p class="muted">Ahead / Behind refer only to unique adjacent provider positions, not physical order. Intervals are signed relative to focus where comparable; ambiguous values remain unknown.</p><div class="h2h">
+    ${comparisonCard('Ahead', uniquePositionNeighbor(participants, focus, -1), focus, race)}${comparisonCard('Focus', focus, focus, race)}${comparisonCard('Behind', uniquePositionNeighbor(participants, focus, 1), focus, race)}</div></section>`;
 }
 
 const fuelNumber = (value, unit='', digits=2) => Number.isFinite(value) ? value.toFixed(digits)+unit : '—';
@@ -140,6 +175,7 @@ function syncFocusURL() {
 }
 function renderSession(d) {
   const root = document.querySelector('#root');
+  const race = d.session.session_type === 'Race';
   const scrolls = ['full-scroll', 'relative-scroll'].map(id => [id, document.querySelector('#'+id)?.scrollLeft || 0]);
   const options = '<option value="">Choose a participant</option>' + d.participants.map(p =>
     `<option value="${esc(p.id)}">${esc(p.position)} · ${esc(p.display_name)}</option>`).join('');
@@ -147,15 +183,16 @@ function renderSession(d) {
   selector.value = focusId || '';
   root.innerHTML = `<h1>${esc(d.session.track_name)}</h1>
       <p>${esc(d.session.simulator_provider)} · ${esc(d.session.session_type)} · ${d.participants.length} participants</p>
+      ${sessionContext(d)}
       <p class="status">${d.live ? 'Receiving scoring' : 'No live scoring — showing last stored standings'} · Last checkpoint: ${esc(d.session.last_seen_at)}</p>
       <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p>
-      ${relativeWidget(d.participants, focusId)}${headToHeadWidget(d.participants, focusId)}
+      ${focusTiming(d.participants, focusId)}${relativeWidget(d.participants, focusId)}${headToHeadWidget(d.participants, focusId, race)}
       <h2>Full field</h2><div id="full-scroll" class="table-scroll"><table>
-      <caption>Provider positions and lap times. Gap and interval are unavailable until verified. Feed freshness does not establish race completion.</caption>
-      <thead><tr><th scope="col">P</th><th scope="col">Driver</th><th scope="col">Class</th><th scope="col">Vehicle / entry</th><th scope="col">Team</th><th scope="col">Number</th><th scope="col">Laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col">Pit</th></tr></thead>
+      <caption>Provider positions and lap times. Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
+      <thead><tr><th scope="col">P</th><th scope="col">Driver</th><th scope="col">Class</th><th scope="col">Vehicle / entry</th><th scope="col">Team</th><th scope="col">Number</th><th scope="col">Completed laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col">Pit</th></tr></thead>
       <tbody>${d.participants.map(p => `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td>${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? `<br><a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}</td>
       <td>${esc(p.vehicle_class || '—')}</td><td>${vehicleCell(p)}</td><td>${esc(p.team_name || '—')}</td><td>${esc(p.car_number)}</td>
-      <td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>—</td><td>—</td><td>${p.in_pits === true ? 'PIT' : '—'}</td></tr>`).join('') || '<tr><td colspan="12">No participants received yet.</td></tr>'}</tbody></table></div>`;
+      <td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${p.in_pits === true ? 'PIT' : '—'}</td></tr>`).join('') || '<tr><td colspan="12">No participants received yet.</td></tr>'}</tbody></table></div>`;
   for (const [id, left] of scrolls) {
     const element = document.querySelector('#'+id);
     if (element) element.scrollLeft = left;

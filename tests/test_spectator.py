@@ -44,15 +44,18 @@ def test_projection_uses_newest_fresh_same_session_only(live):
 class FakePool:
     def __init__(self, session):
         self.session = session
+        self.queries = []
 
     @asynccontextmanager
     async def acquire(self):
         yield self
 
     async def fetchrow(self, query, session_id):
+        self.queries.append(query)
         return self.session
 
     async def fetch(self, query, *args):
+        self.queries.append(query)
         return [participant()]
 
 
@@ -62,6 +65,8 @@ async def test_http_routes_validation_not_found_and_offline_field(monkeypatch):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://localhost") as client:
         response = await client.get(f"/api/sessions/{sid}/live")
         assert response.status_code == 200
+        assert len(main.pool.queries) == 2
+        assert "LEFT JOIN LATERAL" in main.pool.queries[1]
         assert response.json()["live"] is False
         assert response.json()["participants"][0]["driver_id"] is None
         assert (await client.get("/api/sessions/not-a-uuid/live")).status_code == 422

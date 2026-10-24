@@ -370,7 +370,7 @@ The home page lists sessions with scoring received within the last 15 seconds. O
 
 - `GET /api/sessions/live`: session ID, provider, track, type, start time and recorded participant count; each session appears once.
 - `GET /api/sessions/{session_id}/live`: session metadata, feed freshness (`live`) and every recorded participant, including unresolved drivers. Unknown UUID returns 404; malformed UUID returns 422.
-- Positions are provider positions, with no renumbering or derived class ranks. Gap and interval are null in this API and shown as an em dash; their LMU semantics remain unverified. Missing model, manufacturer, team and race number are not inferred.
+- Positions are provider positions, with no renumbering or derived class ranks. Race gaps and intervals use the conservative Timing Pass 1 rules below; unsupported cases remain an em dash. Missing model, manufacturer, team and race number are not inferred.
 - A stopped feed retains the last stored field on its direct page, explicitly labelled as stale. Receiving scoring does not mean that the race is still running; FINISHED/DNF/DQ behavior remains Issue #9.
 - Existing driver endpoints remain compatible. Full race Fuel Calculator and Trackmap are deferred; experimental fuel validation is described below.
 
@@ -383,9 +383,9 @@ Choose any participant in the spectator selector, including an unresolved partic
 
 **Relative** is a relative standings window: focus plus up to three preceding and three following entries in the existing API order. Position ties stay tied. It does not show physical track order or verified time gaps.
 
-**Head-to-Head** shows Ahead / Focus / Behind by provider position only. For a positive integer focus position, each neighbor must be the unique participant at exactly one position lower/higher. Missing, invalid or duplicate neighbor positions produce an unknown slot. Duplicate focus positions do not trigger alternative ranking. All interval-to-focus, interval and gap values remain unknown (an em dash); no arithmetic substitutes for verified provider semantics.
+**Head-to-Head** shows Ahead / Focus / Behind by provider position only. For a positive integer focus position, each neighbor must be the unique participant at exactly one position lower/higher. Missing, invalid or duplicate neighbor positions produce an unknown slot. Duplicate focus positions do not trigger alternative ranking. Signed H2H intervals use only the validated adjacent-position relationship described below; other cases remain unknown.
 
-Real physical relative, real-time intervals/gap semantics (#10), finish semantics (#9), Fuel Calculator, Trackmap and cross-agent convergence remain unimplemented or unverified. These widgets have synthetic regression coverage, not LMU/MAPC validation.
+Real physical relative, unresolved gap edge cases (#10), finish semantics (#9), full race Fuel Calculator, Trackmap and cross-agent convergence remain unimplemented or unverified. These widgets have synthetic regression coverage, not LMU/MAPC validation.
 
 
 ### Fuel estimate · Validation foundation
@@ -406,3 +406,16 @@ Unverified: exact LMU checkpoint timing, inlap/outlap timing, pitstop-counter ti
 ## Replay and synthetic scenarios
 
 [Replay & Scenario Harness](docs/REPLAY.md) documents the separate private Pitwall recorder, file-local pseudonymizer/audit, loopback wire replay, logical-throttle compiler and compiled protocol replay. The committed demo is wholly synthetic. Raw and sanitized-real captures remain private under ignored `data/`; only synthetic fixtures may enter Git. No production agent or protocol changes are required. Use a dedicated synthetic agent against test/dev infrastructure: protocol replay creates real database rows, and accelerated replay still obeys server-side persistence limits.
+
+
+### Spectator Timing Pass 1
+
+For `Race` only, Gap is leader-relative: a positive integer provider lap deficit displays as `1 L`, `2 L`, etc.; otherwise a finite nonnegative provider time gap can display in seconds. Invalid positions/deficits, negative/non-finite/missing time values and contradictory leader values remain unknown. Leader zero is accepted only when supplied; raw provider storage is never rewritten or converted with absolute value. Non-Race gaps remain unknown. Zero gaps for nonleaders are accepted in this bounded pass; their real-world edge cases still need validation under #10.
+
+Full Field Interval is current gap minus the immediately preceding position's gap, only for unique consecutive positive positions, equal known completed-lap counts, explicit zero lap deficits and finite nonnegative nondecreasing gaps. Missing lap-deficit metadata is insufficient evidence for an interval. H2H uses that exact UUID-linked relationship: Ahead negative, Behind positive; the redundant Focus value is omitted. These are provider-position-based relationships, not physical track order. Relative remains a standings window without physical timing inference.
+
+The header shows configured duration, or positive configured Race laps when no positive duration is present. When both are positive, duration takes precedence: the lap value may be projected or a sentinel. No remaining-lap or remaining-time estimate is calculated. Elapsed session time comes exclusively from the newest fresh scoring observation of the exact session, without client extrapolation; stale/no-runtime clocks show `—`. One observation supplies the overlay; recorded cars missing from it retain their row but cannot contribute old gaps to live intervals.
+
+Provider `total_laps` is labelled **Completed laps**, without adding one or changing persisted values. Focused S1/S2/S3 are finite positive values from the latest persisted completed-lap checkpoint, with its lap number shown. Missing/invalid sectors stay unknown; older laps are not used to fill holes. S2 is already individual sector time after adapter normalization. Numeric validity does not establish official lap validity (#6).
+
+This is a partial implementation of #10, #20 and #22; all remain open. Native remaining time, current/best live sectors, finish-state behavior and ambiguous provider timing still need later work and real LMU validation. No schema, protocol, agent or dependency changes are required.

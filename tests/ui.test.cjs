@@ -355,3 +355,40 @@ test('fuel diagnostics escape data and details stay open through polling', async
   await page.poll(sessionData(field));
   assert.equal(page.details.open,true);
 });
+
+
+test('race full-field gaps, lap deficits and signed H2H use validated adjacency', async () => {
+  const field=syntheticField(3).map((p,i)=>({...p,position:11+i,gap_to_leader:[14.3,14.8,16.1][i],
+    gap_laps:null,laps_behind_leader:0,interval:i ? [null,.5,1.3][i] : null,
+    interval_preceding_id:i ? syntheticId(i) : null}));
+  const data={...sessionData(field),session:{session_type:'Race',track_name:'Synthetic Circuit'},
+    timing:{configured_laps:20,configured_minutes:null,elapsed_seconds:3661.9}};
+  const page=await sessionHarness(data,`?focus=${field[1].id}`);
+  for (const value of ['14.8 s','0.5 s','Interval to focus</dt><dd>-0.5 s',
+    'Interval to focus</dt><dd>+1.3 s','20 laps','1:01:01','Completed laps']) assert.ok(page.root.innerHTML.includes(value),value);
+  const h=helpers();
+  assert.equal(h.intervalToFocus(field[1],field[1],true),null);
+  assert.equal(h.intervalToFocus(field[0],field[1],false),null);
+  assert.equal(h.intervalToFocus({...field[2],interval_preceding_id:syntheticId(90)},field[1],true),null);
+  assert.equal(h.gapText({gap_laps:2,gap_to_leader:-8},true),'2 L');
+  for (const value of [-2,NaN,Infinity,null]) assert.equal(h.gapText({gap_to_leader:value},true),'—');
+  assert.equal(h.gapText({gap_to_leader:0},true),'0.0 s');
+  assert.equal(h.gapText({gap_laps:1},false),'—');
+  assert.equal(h.intervalText({gap_laps:1,gap_to_leader:4,interval:1},true),'—');
+});
+
+test('session clock and focused persisted sectors label completed laps without projections', async () => {
+  const field=syntheticField(1);
+  Object.assign(field[0],{total_laps:0,sector_lap_number:2,sector1:30.5,sector2:31.25,sector3:null});
+  const data={...sessionData(field),session:{session_type:'Race'},
+    timing:{configured_minutes:30,configured_laps:null,elapsed_seconds:0}};
+  const page=await sessionHarness(data,`?focus=${field[0].id}`);
+  for (const value of ['30 min','0:00:00','Completed laps: 0','checkpoint lap 2','0:30.500','0:31.250'])
+    assert.ok(page.root.innerHTML.includes(value),value);
+  assert.doesNotMatch(page.root.innerHTML,/remaining laps|Current lap|Remaining time|official remaining/i);
+  await page.poll({...data,live:false,timing:{...data.timing,elapsed_seconds:123}});
+  assert.match(page.root.innerHTML,/Elapsed session time: —/);
+  const h=helpers();
+  for (const value of [null,-1,Infinity]) assert.equal(h.clockText(value),'—');
+  assert.match(h.focusTiming([{...field[0],sector1:-1,sector2:Infinity}],field[0].id),/S1<div class="value">—/);
+});

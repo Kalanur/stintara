@@ -24,6 +24,7 @@ from .lifecycle import end_observation, expire_observations, resolve_session
 from .migrations import migrate_sample_ids
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
 from .secrets import read_secret
+from .timing import newest_scoring, project_timing, session_timing
 from .uuid7 import uuid7
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -262,21 +263,23 @@ async def api_live_sessions() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def spectator_participants(rows, session_id, live, states, now):
+def spectator_participants(rows, session_id, live, states, now, session_type=None):
     """Overlay one newest fresh observation; never combine different sessions by names."""
     participants = [dict(row) for row in rows]
-    candidates = [state for state in states if live and state.get("session_id") == session_id
-                  and now - state.get("last_scoring_at", 0) < 15 and state.get("scoring")]
-    state = max(candidates, key=lambda s: s["last_scoring_at"], default={})
-    vehicles = {v["id"]: v for v in state.get("scoring", {}).get("vehicles", [])}
+    scoring = newest_scoring(session_id, live, states, now)
+    vehicles = {v["id"]: v for v in scoring.get("vehicles", [])}
     for p in participants:
         vehicle = vehicles.get(p["local_vehicle_id"])
         if vehicle:
             for key in ("position", "total_laps", "last_lap_time", "best_lap_time", "in_pits"):
                 p[key] = vehicle.get(key)
+            p["gap_to_leader"] = vehicle.get("time_behind_leader")
+            p["laps_behind_leader"] = vehicle.get("laps_behind_leader")
+        elif scoring:
+            # Retain the recorded participant, but never mix old gaps into this observation.
+            p["gap_to_leader"] = p["laps_behind_leader"] = None
         p.update(vehicle_identity(p))
-        # Gap/interval interpretation is unverified. Keep raw ingestion unchanged.
-        p.update(gap_to_leader=None, interval=None)
+    project_timing(participants, session_type)
     return sorted(participants, key=lambda p: (p["position"] is None,
                                               p["position"] or 0, str(p["id"])))
 
@@ -295,15 +298,25 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
             SELECT p.id, p.driver_id, d.slug AS driver_slug, p.local_vehicle_id,
                    p.display_name, p.team_name, p.car_name, p.car_class,
                    CASE WHEN p.provider='lmu' THEN NULL ELSE p.car_number END AS car_number,
-                   p.position, p.total_laps, p.last_lap_time, p.best_lap_time, p.in_pits
+                   p.position, p.total_laps, p.last_lap_time, p.best_lap_time, p.in_pits,
+                   p.gap_to_leader, p.laps_behind_leader,
+                   lap.lap_number AS sector_lap_number, lap.sector1, lap.sector2, lap.sector3
             FROM session_participants p LEFT JOIN drivers d ON d.id=p.driver_id
+            LEFT JOIN LATERAL (
+                SELECT lap_number,sector1,sector2,sector3 FROM laps
+                WHERE session_participant_id=p.id AND lap_number > 0
+                ORDER BY lap_number DESC LIMIT 1
+            ) lap ON true
             WHERE p.session_id=$1
         """, session_id)
     data = dict(session)
     live = data.pop("live")
+    now = time.monotonic()
+    states = list(runtime.values())
     return {"session": data, "live": live,
-            "participants": spectator_participants(participants, session_id, live,
-                                                    runtime.values(), time.monotonic())}
+            "timing": session_timing(data, newest_scoring(session_id, live, states, now)),
+            "participants": spectator_participants(participants, session_id, live, states, now,
+                                                    data.get("session_type"))}
 
 
 @app.get("/api/sessions/{session_id}/participants/{participant_id}/fuel")
