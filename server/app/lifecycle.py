@@ -1,6 +1,7 @@
 """Provider-neutral session/observation persistence; no RaceControl inference."""
 from .convergence import (
     OBSERVATION_FRESH_SECONDS,
+    TRANSITION_GRACE_SECONDS,
     clock_consistent,
     clock_reset,
     finite,
@@ -53,9 +54,10 @@ async def expire_observations(conn, timeout_seconds):
         await complete_if_unobserved(conn, row["session_id"])
 
 
-async def cross_agent_session(conn, agent, provider, track, scoring):
+async def cross_agent_candidates(conn, agent, provider, track, scoring):
+    """Return strict matches and roster-only candidates from the same locked snapshot."""
     if provider != "lmu" or not finite(scoring.get("session_time")):
-        return None
+        return [], []
     candidates = await conn.fetch("""
         SELECT s.id FROM sessions s
         WHERE s.simulator_provider=$1 AND s.track_name=$2 AND s.session_type=$3 AND s.status='live'
@@ -64,7 +66,7 @@ async def cross_agent_session(conn, agent, provider, track, scoring):
             AND o.last_seen_at > clock_timestamp() - $5 * interval '1 second')
         ORDER BY s.id FOR UPDATE OF s
     """, provider, track, scoring["session_type"], agent["id"], OBSERVATION_FRESH_SECONDS)
-    matches = []
+    matches, plausible = [], []
     for candidate in candidates:
         observations = await conn.fetch("""SELECT last_session_time,last_seen_at
             FROM session_observations WHERE session_id=$1 AND agent_id<>$2 AND ended_at IS NULL
@@ -72,17 +74,22 @@ async def cross_agent_session(conn, agent, provider, track, scoring):
         now = await conn.fetchval("SELECT clock_timestamp()")
         observation = next((o for o in observations if finite(o["last_session_time"])
                             and 0 <= (now - o["last_seen_at"]).total_seconds() < OBSERVATION_FRESH_SECONDS), None)
-        if observation is None or not clock_consistent(scoring["session_time"], observation["last_session_time"],
-                                                       (now - observation["last_seen_at"]).total_seconds()):
+        if observation is None:
             continue
         roster = await conn.fetch("""SELECT local_vehicle_id,display_name,team_name,car_name,car_class
             FROM session_participants WHERE session_id=$1""", candidate["id"])
         if matching_rosters(provider, scoring.get("vehicles", []), roster):
-            matches.append(candidate["id"])
-    return matches[0] if len(matches) == 1 else None
+            plausible.append(candidate["id"])
+            if clock_consistent(scoring["session_time"], observation["last_session_time"],
+                                (now - observation["last_seen_at"]).total_seconds()):
+                matches.append(candidate["id"])
+    return matches, plausible
 
 
 async def resolve_session(conn, agent, state, scoring, timeout_seconds):
+    # Caller supplies a transaction-local state copy and publishes it only after commit.
+    pending = state.pop("pending_convergence", None)
+    invalidated = state.pop("convergence_invalidated", False)
     provider = state["provider"]
     track = state.get("track_name")
     if not track:
@@ -99,12 +106,17 @@ async def resolve_session(conn, agent, state, scoring, timeout_seconds):
     """, agent["id"])
     session_id = None
     now = await conn.fetchval("SELECT clock_timestamp()")
+    namespace = (provider, track, scoring["session_type"])
     reset = (state.get("persisted_track") == track and state.get("session_type") == scoring["session_type"]
              and clock_reset(scoring.get("session_time"), state.get("scoring", {}).get("session_time")))
     reset = reset or any(previous["simulator_provider"] == provider and previous["track_name"] == track
                          and previous["session_type"] == scoring["session_type"]
                          and clock_reset(scoring.get("session_time"), previous["last_session_time"])
                          for previous in rows)
+    if pending:
+        invalidated = (invalidated or pending["namespace"] != namespace
+                       or not 0 <= (now - pending["started_at"]).total_seconds() < TRANSITION_GRACE_SECONDS
+                       or clock_reset(scoring.get("session_time"), pending["last_clock"]))
     for previous in rows:
         fresh = (now - previous["observation_seen"]).total_seconds() < timeout_seconds
         if session_id is None and not reset and fresh and same_session(
@@ -114,10 +126,22 @@ async def resolve_session(conn, agent, state, scoring, timeout_seconds):
             session_id = previous["id"]
         else:
             await end_observation(conn, previous["id"], agent["id"])
-    if session_id is None and not reset:
-        session_id = await cross_agent_session(conn, agent, provider, track, scoring)
+    if session_id is None and not reset and not invalidated:
+        matches, plausible = await cross_agent_candidates(conn, agent, provider, track, scoring)
+        # Once waiting, candidate changes/ambiguity must fail closed, even if one
+        # candidate now passes the clock gate. Never restart the deadline.
+        safe_retry = not pending or plausible == [pending["candidate_id"]]
+        if safe_retry and len(matches) == 1:
+            session_id = matches[0]
         if session_id is not None:
             await attach_observation(conn, session_id, agent["id"])
+        elif safe_retry and not matches and len(plausible) == 1:
+            state["pending_convergence"] = dict(
+                namespace=namespace, candidate_id=plausible[0],
+                started_at=pending["started_at"] if pending else now,
+                last_clock=scoring["session_time"],
+            )
+            return None
     if session_id is None:
         session_id = uuid7()
         await conn.execute("""

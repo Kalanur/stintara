@@ -418,10 +418,15 @@ async def authenticate_agent(token: str) -> asyncpg.Record | None:
 
 async def current_or_create_session(agent, payload):
     state = runtime.setdefault(str(agent["id"]), {})
+    resolution_state = state.copy()
     async with pool.acquire() as conn, conn.transaction():
-        session_id = await resolve_session(conn, agent, state, payload, SESSION_TIMEOUT_SECONDS)
+        session_id = await resolve_session(conn, agent, resolution_state, payload, SESSION_TIMEOUT_SECONDS)
         if session_id:
             await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
+    for key in ("pending_convergence", "convergence_invalidated"):
+        state.pop(key, None)
+        if key in resolution_state:
+            state[key] = resolution_state[key]
     if session_id != state.get("session_id"):
         for key in ("last_sample_at", "last_persisted_scoring", "scoring"):
             state.pop(key, None)
@@ -557,6 +562,12 @@ async def finalize_agent_session(agent):
 
 async def handle_message(agent, provider, kind, payload):
     state = runtime.setdefault(str(agent["id"]), {})
+    if state.get("pending_convergence") and (
+        state.get("provider") != provider
+        or (kind == "session_info" and state.get("track_name") != payload["track_name"])
+    ):
+        state.pop("pending_convergence")
+        state["convergence_invalidated"] = True
     state.update(provider=provider, driver_slug=agent["slug"])
     if kind == "connection":
         state["game_version"] = payload.get("plugin_version")
@@ -587,7 +598,7 @@ async def handle_message(agent, provider, kind, payload):
                    or state.get("persisted_track") != state.get("track_name")
                    or (previous.get("session_time") is not None and payload.get("session_time") is not None
                        and payload["session_time"] < previous["session_time"] - 2))
-        if changed or sample_due(state.get("last_persisted_scoring"), now):
+        if state.get("pending_convergence") or changed or sample_due(state.get("last_persisted_scoring"), now):
             session_id = await current_or_create_session(agent, payload)
             if not session_id:
                 return
@@ -688,4 +699,7 @@ async def ingest(ws: WebSocket):
     finally:
         if agent_key:
             active_agents.discard(agent_key)
+            state = runtime.get(agent_key, {})
+            state.pop("pending_convergence", None)
+            state.pop("convergence_invalidated", None)
         # Preserve observation for short outages; cleanup closes it after timeout.
