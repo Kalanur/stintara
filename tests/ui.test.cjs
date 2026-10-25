@@ -108,7 +108,7 @@ test('spectator renders full synthetic field, unknown gaps, escaping and offline
 const syntheticId = i => `019a0000-0000-7000-8000-${String(i).padStart(12,'0')}`;
 const syntheticField = count => Array.from({length:count}, (_, i) => ({id:syntheticId(i+1),
   display_name:'Synthetic Driver', position:i+1, vehicle_class:'Synthetic Class',
-  total_laps:4, last_lap_time:123.456, best_lap_time:122.345, driver_slug:null}));
+  total_laps:4, finish_status:0, pitstops:0, last_lap_time:123.456, best_lap_time:122.345, driver_slug:null}));
 const sessionData = participants => ({live:true,session:{id:syntheticId(99),track_name:'Synthetic Track'},participants});
 function spectatorScript() {
   return readFileSync(path.join(__dirname, '../server/static/session.html'), 'utf8')
@@ -417,17 +417,17 @@ test('single class appears once; full field, relative and H2H keep class for mix
   assert.equal((h.root.innerHTML.match(/GT3/g)||[]).length,1);
   assert.doesNotMatch(h.root.innerHTML,/<th[^>]*>Class<\/th>|<dt>Class<\/dt>/);
   const full=h.root.innerHTML.split('<h2>Full field</h2>')[1];
-  assert.equal((full.match(/<th scope=/g)||[]).length,8);
+  assert.equal((full.match(/<th scope=/g)||[]).length,9);
   for (const value of ['Hypercar', null, '', '  ']) {
     const mixed=field.map(p => ({...p})); mixed[2].vehicle_class=value;
     await h.poll(sessionData(mixed));
     assert.match(h.root.innerHTML,/<th scope="col">Class<\/th>/);
     assert.match(h.root.innerHTML,/<th>Class<\/th>/);
     assert.match(h.root.innerHTML,/<dt>Class<\/dt>/);
-    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,9);
+    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,10);
   }
   await h.poll(sessionData([]));
-  assert.match(h.root.innerHTML,/colspan="9"/);
+  assert.match(h.root.innerHTML,/colspan="10"/);
   const escaped=await render('session.html',sessionData([{vehicle_class:'<GT3>',display_name:'<Driver>'}]));
   assert.match(escaped.innerHTML,/&lt;GT3&gt;/);
   assert.doesNotMatch(escaped.innerHTML,/<GT3>|<Driver>/);
@@ -621,4 +621,37 @@ test('dashboard source bounds desktop panels, keeps build identity and supports 
   assert.match(html,/<footer>__BUILD_LABEL__<\/footer>/);
   assert.match(html,/tabindex="0" role="region" aria-label="Full field standings"/);
   assert.match(html,/<label for="focus">Focus participant<\/label>/);
+});
+
+test('pit and finish states take precedence without contaminating timing columns', async () => {
+  const {engineerDemo}=require('../tools/engineer_demo.cjs');
+  const demo=engineerDemo();
+  assert.deepEqual(demo,engineerDemo());
+  const page=await sessionHarness(demo.data,`?focus=${demo.focus}`);
+  const full=page.root.innerHTML.split('<h2>Full field</h2>')[1];
+  assert.equal((full.match(/<tr class=/g)||[]).length,40);
+  for(const text of ['>Stops</th>','>Status</th>','1 · L12','2 · L27','>PIT</span>','>FIN</span>','>DNF</span>','>DQ</span>']) assert.ok(full.includes(text),text);
+  assert.equal((full.match(/>PIT<\/span>/g)||[]).length,1); // Finish overrides contradictory pit occupancy.
+  assert.doesNotMatch(full,/TRACK/);
+  assert.match(page.root.innerHTML,/1 stop · Last stop L12/);
+  const rows=full.match(/<tr class=[\s\S]*?<\/tr>/g);
+  for(const row of rows) {
+    const cells=Array.from(row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g),m=>m[1]);
+    assert.doesNotMatch(cells[5]+cells[6],/FIN|DNF|DQ|PIT/); // Single-class Gap / Interval.
+  }
+  page.change(demo.data.participants[5].id);
+  assert.match(page.root.innerHTML.split('aria-label="Focus status"')[1].split('</p>')[0],/>DNF<\/span>/);
+});
+
+test('unknown stop counts and unsupported finish codes do not acquire guessed meanings', () => {
+  const h=helpers();
+  for(const value of [null,undefined,-1,1.5,'2',true,NaN,Infinity]) assert.equal(h.stopsText({pitstops:value}),'—');
+  assert.equal(h.stopsText({pitstops:1,last_pit_lap:null}),'1');
+  assert.equal(h.stopsText({pitstops:0,last_pit_lap:12}),'0');
+  assert.equal(h.stopsText({pitstops:2,last_pit_lap:27},true),'2 stops · Last stop L27');
+  for(const value of [null,undefined,-1,99,'1',true]) {
+    assert.equal(h.participantStatus({finish_status:value,in_pits:false},true),'—');
+  }
+  assert.match(h.participantStatus({finish_status:0,in_pits:true}),/>PIT<\/span>/);
+  assert.equal(h.participantStatus({finish_status:0,in_pits:false}),'—');
 });
