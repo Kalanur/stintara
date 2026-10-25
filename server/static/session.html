@@ -1,16 +1,128 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Stintara Spectator</title><style>
-body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:0 16px;background:#111;color:#eee}.muted{color:#999}.live{color:#57d68d;font-weight:700}.hero{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}.metrics{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin:16px 0}.metric{background:#1d1d1d;border:1px solid #333;border-radius:12px;padding:12px}.value{font-size:24px;font-weight:700}table{width:100%;border-collapse:collapse;background:#171717}th,td{text-align:left;padding:8px;border-bottom:1px solid #2b2b2b}tr.me{background:#242424}a{color:white}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}table{font-size:12px}}
+:root{color-scheme:dark;--bg:#0b1017;--panel:#121b26;--raised:#1a2635;--line:#304153;--text:#edf3f9;--muted:#a9bacb;--live:#ff626b;--attention:#f4ce63;--info:#83b6ff;--ok:#7bdba7;--pit:#ffb56b;--best:#dda2ff;--focus:#72e3eb;--focus-bg:#19343e}
 
-.table-scroll{overflow-x:auto}th{white-space:nowrap}caption{text-align:left;padding:12px 0;color:#aaa}.status{padding:12px;border:1px solid #555;border-radius:8px}td{vertical-align:top}
-.focus{background:#193c30!important;box-shadow:inset 3px 0 #57d68d}.h2h{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.h2h article{padding:12px;border:1px solid #555;border-radius:8px;overflow-wrap:anywhere}.h2h dl{display:grid;grid-template-columns:1fr 1fr;gap:6px}.h2h dd{margin:0}.focus-control{margin:20px 0}select{max-width:100%;padding:8px;background:#222;color:#eee;border:1px solid #777;border-radius:6px}@media(max-width:700px){.h2h{grid-template-columns:1fr}}
-.focus-status{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 12px;border-left:3px solid #57d68d;background:#193c30;border-radius:6px}.focus-status span,.focus-status strong{min-width:0;overflow-wrap:anywhere}
-</style></head><body><a href="/">← Stintara</a>
-<div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div>
-<section aria-label="Fuel validation"><h2>Fuel · Experimental</h2><div id="fuel">Choose a participant to inspect fuel data.</div></section>
+*{box-sizing:border-box}
+body{margin:0;padding:12px 18px 6px;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,sans-serif;font-variant-numeric:tabular-nums}
+a{color:var(--focus)}
+h1,h2,h3,p{margin:0}
+h1{font-size:24px;line-height:1.15}
+h2{font-size:16px}
+h3{font-size:14px}
+p{margin:5px 0}
+.muted,dt{color:var(--muted)}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding-bottom:10px}
+.brand{font-weight:800;letter-spacing:.15em;text-decoration:none;color:var(--text)}
+.brand small{color:var(--muted);font-weight:400;letter-spacing:.06em;margin-left:16px}
+.focus-control{display:flex;align-items:center;gap:10px;min-width:0}
+select{max-width:360px;min-width:0;padding:7px 10px;background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:5px;font:inherit}
+a:focus-visible,select:focus-visible,summary:focus-visible,.table-scroll:focus-visible{outline:2px solid var(--focus);outline-offset:3px}
+
+.dashboard{display:grid;gap:10px;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);grid-template-rows:auto minmax(130px,1fr) auto auto 260px;min-height:0;min-width:0}
+#root{display:contents}
+.panel,.session-header{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:12px;min-width:0;min-height:0}
+.session-header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:20px}
+.session-header .context{min-width:0;overflow-wrap:anywhere}
+.status{color:var(--muted);font-size:13px}
+.feed{display:flex;align-items:center;gap:8px;font-weight:750;letter-spacing:.08em}
+.feed-live{color:var(--live)}
+.feed-stale{color:var(--muted)}
+.live-dot{width:9px;height:9px;flex:none;border-radius:50%;background:currentColor}
+.feed-live .live-dot{animation:live-pulse 1.5s ease-in-out infinite}
+@keyframes live-pulse{50%{opacity:.45;box-shadow:0 0 7px var(--live)}
+}
+
+.standings-panel{grid-column:1;grid-row:2/5;display:flex;flex-direction:column;overflow:hidden;padding:0}
+.panel-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px}
+.table-scroll{overflow:auto;min-height:0;min-width:0;scrollbar-color:var(--line) var(--panel)}
+.standings-panel>.table-scroll{flex:1}
+table{width:100%;border-collapse:separate;border-spacing:0}
+th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{white-space:nowrap;font-size:12px;color:var(--muted);background:var(--raised);position:sticky;top:0;z-index:1}
+td{font-size:14px;padding:5px 8px;line-height:1.3}
+td:not(:nth-child(2)){white-space:nowrap}
+caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
+.driver-cell{min-width:150px;max-width:260px;overflow-wrap:anywhere}
+.entry{display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
+.best-time{color:var(--best)}
+.badge{display:inline-block;font-size:12px;font-weight:750;border:1px solid currentColor;padding:1px 5px;border-radius:4px}
+.pit{color:var(--pit)}
+.track{color:var(--ok)}
+.focus{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus);transition:background-color .15s,border-color .15s}
+
+.map-panel{grid-column:2;grid-row:2;display:flex;flex-direction:column}
+.placeholder{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--muted);border:1px dashed var(--line);border-radius:4px;margin-top:8px;min-height:70px}
+.future-status{color:var(--muted);font-size:12px}
+.focus-panel{grid-column:2;grid-row:3;border-left:3px solid var(--focus)}
+.focus-status{display:flex;flex-wrap:wrap;gap:6px 16px;margin:5px 0}
+.focus-status strong{width:100%;color:var(--focus);font-size:18px}
+.focus-status span,.focus-status strong{min-width:0;overflow-wrap:anywhere}
+.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.metric{border-left:2px solid var(--line);padding-left:8px}
+.value{font-size:17px;font-weight:650}
+.sector-context{font-size:12px;color:var(--muted);margin-top:8px}
+.fuel-panel{grid-column:2;grid-row:4;max-height:260px;overflow:auto}
+.fuel-primary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.fuel-primary strong{font-size:20px;display:block;color:var(--pit)}
+details{margin-top:6px}
+summary{cursor:pointer;color:var(--muted)}
+.weather-panel{grid-column:2;grid-row:5;overflow:auto}
+.weather-panel h3{color:var(--muted);font-weight:500}
+.weather-panel ul{display:flex;gap:6px;padding:0;list-style:none;margin:6px 0}
+.weather-panel li{flex:1;min-width:0;padding:6px;background:var(--raised);border-radius:4px;font-size:12px}
+.weather-panel li strong{display:block;color:var(--text)}
+
+.comparison-panel{grid-column:1;grid-row:5;overflow:auto}
+.h2h{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}
+.h2h article{padding:8px;border:1px solid var(--line);border-radius:5px;overflow-wrap:anywhere}
+.h2h h3{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.h2h dl{display:grid;grid-template-columns:1fr 1fr;gap:2px;margin:6px 0 0;font-size:13px}
+.h2h dd{margin:0;text-align:right}
+.comparison-note{font-size:12px;color:var(--muted)}
+footer{font-size:11px;color:var(--muted);text-align:right;padding-top:4px;overflow-wrap:anywhere}
+
+@media(min-width:1200px) and (min-height:850px){body{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
+.dashboard{height:100%;overflow:hidden}
+}
+
+@media(max-width:1199px),(max-height:849px){.dashboard{grid-template-columns:minmax(0,1fr);grid-template-rows:none}
+.dashboard #root>*,.dashboard>.fuel-panel{grid-column:1;grid-row:auto}
+.session-header{flex-wrap:wrap}
+.standings-panel{max-height:65vh}
+.map-panel{min-height:160px}
+.focus-panel{order:1}
+.standings-panel{order:2}
+.comparison-panel{order:3}
+.fuel-panel{order:4;max-height:none}
+.weather-panel{order:5}
+.map-panel{order:6}
+.weather-panel ul{flex-wrap:wrap}
+.weather-panel li{min-width:100px}
+.toolbar{flex-wrap:wrap}
+}
+
+@media(max-width:600px){body{padding:10px}
+.brand small{display:none}
+.focus-control{width:100%}
+select{flex:1;width:100%}
+.h2h{grid-template-columns:1fr}
+.fuel-primary{grid-template-columns:1fr}
+.session-header{gap:8px}
+h1{font-size:22px}
+}
+
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+}
+
+</style></head><body>
+<nav class="toolbar" aria-label="Engineer controls"><a class="brand" href="/">STINTARA <small>RACE ENGINEER</small></a>
+<div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div></nav>
+<main class="dashboard">
 <div id="root">Loading…</div>
-<footer class="muted" style="margin-top:24px;font-size:12px;overflow-wrap:anywhere">__BUILD_LABEL__</footer>
+<section class="panel fuel-panel" aria-label="Fuel validation"><h2>Fuel <small class="muted">· Experimental</small></h2><div id="fuel">Choose a participant to inspect fuel data.</div></section>
+</main>
+<footer>__BUILD_LABEL__</footer>
 <script>
 __WEATHER_UI__
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -115,6 +227,13 @@ function feedStatus(d, now) {
   const age = checkpointAge(d.session.last_seen_at, now);
   return `${d.live ? 'Receiving scoring' : 'No live scoring — showing last stored standings'} · last checkpoint ${age}`;
 }
+function feedIndicator(live) {
+  // Preserve pulse phase across the existing polling renders; no extra timer.
+  return `<span class="feed ${live ? 'feed-live' : 'feed-stale'}"><span class="live-dot" aria-hidden="true" style="animation-delay:-${Date.now() % 1500}ms"></span>${live ? 'LIVE' : 'STORED'}</span>`;
+}
+function pitBadge(value) {
+  return value === true ? '<span class="badge pit">PIT</span>' : value === false ? '<span class="badge track">TRACK</span>' : '—';
+}
 function focusStatus(participants, focusId, race) {
   const p = participantById(participants, focusId);
   if (!p) return '';
@@ -123,12 +242,12 @@ function focusStatus(participants, focusId, race) {
     <span>P${validPosition(p.position) ? p.position : '—'}</span><span>Gap ${gapText(p, race)}</span>
     <span>Interval ${intervalText(p, race)}</span><span>${laps} completed laps</span>
     <span>Last ${fmt(p.last_lap_time)}</span><span>Best ${fmt(p.best_lap_time)}</span>
-    <span>${p.in_pits === true ? 'PIT' : p.in_pits === false ? 'TRACK' : '—'}</span></p>`;
+    <span>${pitBadge(p.in_pits)}</span></p>`;
 }
 function focusTiming(participants, focusId) {
   const p = participantById(participants, focusId);
-  return p ? `<section><h2>Focused timing</h2><p>Completed laps: ${esc(p.total_laps)}</p>
-    <p>Last completed lap sectors · checkpoint lap ${esc(p.sector_lap_number)}</p>
+  return p ? `<section aria-label="Focused timing">
+    <p class="sector-context">Last completed lap sectors · checkpoint lap ${esc(p.sector_lap_number)}</p>
     <div class="metrics">${['sector1','sector2','sector3'].map((key,i) => `<div class="metric">S${i+1}<div class="value">${fmt(p[key])}</div></div>`).join('')}</div></section>` : '';
 }
 function timingCells(p) {
@@ -138,19 +257,19 @@ function relativeWidget(participants, focusId) {
   const rows = relativeWindow(participants, focusId);
   const hideClass = singleClass(participants) !== null;
   return `<section><h2>Relative</h2><p class="muted">Relative standings: surrounding entries in standings order, not physical order or time gaps.</p>
-    ${rows.length ? `<div id="relative-scroll" class="table-scroll"><table><thead><tr><th>P</th><th>Driver</th>${hideClass ? '' : '<th>Class</th>'}<th>Completed laps</th><th>Last</th><th>Best</th><th>Pit</th><th>Interval</th></tr></thead>
+    ${rows.length ? `<div id="relative-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Relative standings"><table><thead><tr><th>P</th><th>Driver</th>${hideClass ? '' : '<th>Class</th>'}<th>Completed laps</th><th>Last</th><th>Best</th><th>Pit</th><th>Interval</th></tr></thead>
     <tbody>${rows.map(p => `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td>${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}</td>${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}${timingCells(p)}</tr>`).join('')}</tbody></table></div>` : '<p>Choose a participant to see relative standings.</p>'}</section>`;
 }
 function comparisonCard(label, p, focus, race, hideClass=false) {
   return `<article class="${label === 'Focus' ? 'focus' : ''}"><h3>${label}</h3>${p ? `<strong>${esc(p.display_name)}</strong><dl>
     <dt>Position</dt><dd>${esc(p.position)}</dd>${hideClass ? '' : `<dt>Class</dt><dd>${esc(p.vehicle_class || '—')}</dd>`}
-    <dt>Completed laps</dt><dd>${esc(p.total_laps)}</dd><dt>Last</dt><dd>${fmt(p.last_lap_time)}</dd><dt>Best</dt><dd>${fmt(p.best_lap_time)}</dd>
-    <dt>Pit</dt><dd>${p.in_pits === true ? 'PIT' : '—'}</dd><dt>Interval to focus</dt><dd>${seconds(intervalToFocus(p, focus, race), true)}</dd></dl>` : '<p>—</p>'}</article>`;
+    <dt>Last</dt><dd>${fmt(p.last_lap_time)}</dd><dt>Best</dt><dd class="best-time">${fmt(p.best_lap_time)}</dd>
+    <dt>Interval to focus</dt><dd>${seconds(intervalToFocus(p, focus, race), true)}</dd></dl>` : '<p>—</p>'}</article>`;
 }
 function headToHeadWidget(participants, focusId, race=false) {
   const hideClass = singleClass(participants) !== null;
   const focus = participantById(participants, focusId);
-  return `<section><h2>Head-to-Head</h2><p class="muted">Ahead / Behind refer only to unique adjacent provider positions, not physical order. Intervals are signed relative to focus where comparable; ambiguous values remain unknown.</p><div class="h2h">
+  return `<section><h2>Head-to-Head</h2><p class="comparison-note">Adjacent provider positions, not physical order. Signed intervals to focus; unknown when not comparable.</p><div class="h2h">
     ${comparisonCard('Ahead', uniquePositionNeighbor(participants, focus, -1), focus, race, hideClass)}${comparisonCard('Focus', focus, focus, race, hideClass)}${comparisonCard('Behind', uniquePositionNeighbor(participants, focus, 1), focus, race, hideClass)}</div></section>`;
 }
 
@@ -164,14 +283,17 @@ function fuelWidget(data) {
     ['stint_consumption_l','Provider stint consumption',' L']
   ];
   return `<p>${e.status === 'collecting' ? `Collecting fuel data · ${esc(e.available_sample_count)} / ${esc(e.minimum_samples)} valid samples` : 'Checkpoint consumption estimate'}</p>
-    <p>Current fuel: ${fuelNumber(c.fuel_l,' L')} · Capacity: ${fuelNumber(c.capacity_l,' L')}</p>
-    <p>Stintara consumption: ${fuelNumber(e.consumption_l_per_lap,' L/lap')} · Valid samples used: ${esc(e.sample_count)}</p>
-    <p>Estimated range: ${available ? fuelNumber(e.estimated_range_laps,' laps',1) : '—'}</p>
+    <div class="fuel-primary"><div>Current fuel: <strong>${fuelNumber(c.fuel_l,' L')}</strong></div>
+    <div>Stintara consumption: <strong>${fuelNumber(e.consumption_l_per_lap,' L/lap')}</strong></div>
+    <div>Estimated range: <strong>${available ? fuelNumber(e.estimated_range_laps,' laps',1) : '—'}</strong></div></div>
+    <p class="muted">Valid samples used: ${esc(e.sample_count)}</p>
     ${available ? '' : '<p>Current fuel telemetry unavailable or stale.</p>'}
+    <details id="fuel-diagnostics"><summary id="fuel-toggle">Fuel sample diagnostics / provider comparison</summary>
+    <p>Capacity: ${fuelNumber(c.capacity_l,' L')}</p>
     <p class="muted">Strategy checkpoint: ${esc(c.recorded_at)}. Lap fuel checkpoint timing is not yet verified.</p>
     ${comparison.some(([key]) => Number.isFinite(provider[key])) ? `<h3>Provider comparison</h3><p class="muted">Provider/Pitwall values only; not part of the Stintara calculation. They share the strategy checkpoint timestamp above.</p>
     <ul>${comparison.map(([key,label,unit]) => `<li>${label}: ${fuelNumber(provider[key],unit)}</li>`).join('')}</ul>` : ''}
-    <details id="fuel-diagnostics"><summary>Fuel sample diagnostics</summary><div class="table-scroll"><table>
+    <div class="table-scroll"><table>
     <thead><tr><th>Transition</th><th>Delta</th><th>Included</th><th>Used</th><th>Reason</th></tr></thead>
     <tbody>${data.samples.map(sample => `<tr><td>${esc(sample.from_lap)} → ${esc(sample.to_lap)}</td><td>${fuelNumber(sample.consumption_l,' L')}</td><td>${sample.included ? 'yes' : 'no'}</td><td>${sample.used_for_estimate ? 'yes' : 'no'}</td><td>${esc(sample.excluded_reason)}</td></tr>`).join('') || '<tr><td colspan="5">No checkpoint transitions yet.</td></tr>'}</tbody></table></div></details>`;
 }
@@ -202,9 +324,11 @@ async function refreshFuel() {
     if (request !== fuelRequest || focusId !== participant) return;
     if (data.participant_id !== participant || data.session_id !== sessionId) throw new Error('Fuel data unavailable. Retrying…');
     const open = document.querySelector('#fuel-diagnostics')?.open || false;
+    const focused = document.activeElement?.id === 'fuel-toggle';
     root.innerHTML = fuelWidget(data);
     const details = document.querySelector('#fuel-diagnostics');
     if (details) details.open = open;
+    if (focused) document.querySelector('#fuel-toggle')?.focus({preventScroll:true});
   } catch (error) {
     if (request === fuelRequest && focusId === participant) root.textContent = 'Fuel data unavailable. Retrying…';
   }
@@ -219,28 +343,47 @@ function renderSession(d) {
   const race = d.session.session_type === 'Race';
   const fieldClass = singleClass(d.participants);
   const hideClass = fieldClass !== null;
-  const scrolls = ['full-scroll', 'relative-scroll'].map(id => [id, document.querySelector('#'+id)?.scrollLeft || 0]);
+  const scrolls = ['full-scroll', 'relative-scroll', 'comparison-panel', 'weather-panel'].map(id => {
+    const element = document.querySelector('#'+id);
+    return [id, element?.scrollLeft || 0, element?.scrollTop || 0];
+  });
+  const activeId = ['full-scroll', 'relative-scroll', 'relative-toggle'].includes(document.activeElement?.id) ? document.activeElement.id : null;
+  const relativeOpen = document.querySelector('#relative-details')?.open || false;
   const options = '<option value="">Choose a participant</option>' + d.participants.map(p =>
     `<option value="${esc(p.id)}">${esc(p.position)} · ${esc(p.display_name)}</option>`).join('');
   if (options !== selectorOptions) { selector.innerHTML = options; selectorOptions = options; }
   selector.value = focusId || '';
-  root.innerHTML = `<h1>${esc(d.session.track_name)}</h1>
+  root.innerHTML = `<header class="session-header"><div class="context"><h1>${esc(d.session.track_name)}</h1>
       <p>${esc(d.session.simulator_provider)} · ${esc(d.session.session_type)} · ${hideClass ? esc(fieldClass)+' · ' : ''}${d.participants.length} participants</p>
-      ${sessionContext(d)}
-      <p class="status">${esc(feedStatus(d, Date.now()))}</p>
-      <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p>
-      ${focusStatus(d.participants, focusId, race)}
-      ${weatherWidget(d.session.weather, d.live)}
-      ${focusTiming(d.participants, focusId)}${relativeWidget(d.participants, focusId)}${headToHeadWidget(d.participants, focusId, race)}
-      <h2>Full field</h2><div id="full-scroll" class="table-scroll"><table>
+      ${sessionContext(d)}</div><div>${feedIndicator(d.live)}
+      <p class="status">${esc(feedStatus(d, Date.now()))}</p></div></header>
+      <section class="panel map-panel" aria-label="Future track map"><h2>Track Map <span class="muted">· next pass</span></h2>
+      <div class="placeholder"><span>Track geometry not available yet</span></div>
+      <p class="future-status">Flags / Race Control / Car Status · not available yet</p></section>
+      <section class="panel focus-panel" aria-label="Focus driver"><h2>Focus driver</h2>${focusStatus(d.participants, focusId, race) || '<p class="muted">Choose a participant using the focus selector.</p>'}
+      ${focusTiming(d.participants, focusId)}</section>
+      <div id="weather-panel" class="panel weather-panel">${weatherWidget(d.session.weather, d.live)}</div>
+      <section id="comparison-panel" class="panel comparison-panel" aria-label="Position comparisons">
+      ${headToHeadWidget(d.participants, focusId, race)}
+      <details id="relative-details"><summary id="relative-toggle">Relative standings / session details</summary>${relativeWidget(d.participants, focusId)}
+      <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p></details></section>
+      <section class="panel standings-panel" aria-label="Full field"><div class="panel-heading"><h2>Full field</h2><span class="muted">${d.participants.length} entries · provider order</span></div>
+      <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
       <caption>Provider positions and lap times. Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
-      <thead><tr><th scope="col">P</th><th scope="col">Driver</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col">Vehicle / entry</th><th scope="col">Team</th><th scope="col">Number</th><th scope="col">Completed laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col">Pit</th></tr></thead>
-      <tbody>${d.participants.map(p => `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td>${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? `<br><a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}</td>
-      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td>${vehicleCell(p, hideClass)}</td><td>${esc(p.team_name || '—')}</td><td>${esc(p.car_number)}</td>
-      <td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${p.in_pits === true ? 'PIT' : '—'}</td></tr>`).join('') || `<tr><td colspan="${hideClass ? 11 : 12}">No participants received yet.</td></tr>`}</tbody></table></div>`;
-  for (const [id, left] of scrolls) {
+      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col">Completed laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col">Pit</th></tr></thead>
+      <tbody>${d.participants.map(p => {
+        const vehicle = vehicleLabel(p);
+        const entry = vehicle.label && !(hideClass && vehicle.label === 'Class') ? `${vehicle.label}: ${vehicle.value}` : 'Entry: —';
+        return `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td class="driver-cell">${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? ` <a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}
+      <span class="entry" title="${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}">${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}</span></td>
+      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td class="best-time">${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${p.in_pits === true ? pitBadge(true) : '—'}</td></tr>`;
+      }).join('') || `<tr><td colspan="${hideClass ? 8 : 9}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
+  const relativeDetails = document.querySelector('#relative-details');
+  if (relativeDetails) relativeDetails.open = relativeOpen;
+  if (activeId) document.querySelector('#'+activeId)?.focus({preventScroll:true});
+  for (const [id, left, top] of scrolls) {
     const element = document.querySelector('#'+id);
-    if (element) element.scrollLeft = left;
+    if (element) { element.scrollLeft = left; element.scrollTop = top; }
   }
 }
 selector.addEventListener('change', () => {
