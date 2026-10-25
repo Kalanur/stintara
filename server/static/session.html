@@ -5,6 +5,7 @@ body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:
 
 .table-scroll{overflow-x:auto}th{white-space:nowrap}caption{text-align:left;padding:12px 0;color:#aaa}.status{padding:12px;border:1px solid #555;border-radius:8px}td{vertical-align:top}
 .focus{background:#193c30!important;box-shadow:inset 3px 0 #57d68d}.h2h{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.h2h article{padding:12px;border:1px solid #555;border-radius:8px;overflow-wrap:anywhere}.h2h dl{display:grid;grid-template-columns:1fr 1fr;gap:6px}.h2h dd{margin:0}.focus-control{margin:20px 0}select{max-width:100%;padding:8px;background:#222;color:#eee;border:1px solid #777;border-radius:6px}@media(max-width:700px){.h2h{grid-template-columns:1fr}}
+.focus-status{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 12px;border-left:3px solid #57d68d;background:#193c30;border-radius:6px}.focus-status span,.focus-status strong{min-width:0;overflow-wrap:anywhere}
 </style></head><body><a href="/">← Stintara</a>
 <div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div>
 <section aria-label="Fuel validation"><h2>Fuel · Experimental</h2><div id="fuel">Choose a participant to inspect fuel data.</div></section>
@@ -93,6 +94,36 @@ function sessionContext(d) {
   const configured = Number.isFinite(t.configured_minutes) && t.configured_minutes > 0 ? `${t.configured_minutes} min` :
     Number.isSafeInteger(t.configured_laps) && t.configured_laps > 0 ? `${t.configured_laps} laps` : '—';
   return `<p>Configured distance / duration: ${configured} · Elapsed session time: ${d.live ? clockText(t.elapsed_seconds) : '—'}</p>`;
+}
+function checkpointAge(timestamp, now) {
+  // Require an explicit timezone, not Date.parse's permissive local-date formats.
+  if (typeof timestamp !== 'string' || !Number.isFinite(now)) return 'unknown';
+  const match = timestamp.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/);
+  if (!match || +match[2] > 23 || +match[3] > 59 || +match[4] > 59 || match[5] === '-00:00') return 'unknown';
+  const date = new Date(match[1]+'T00:00:00Z');
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0,10) !== match[1]) return 'unknown';
+  const parsed = Date.parse(timestamp);
+  const age = now - parsed;
+  if (!Number.isFinite(age) || age < -1000) return 'unknown';
+  const seconds = Math.floor(Math.max(0, age) / 1000);
+  if (seconds < 1) return '<1 s ago';
+  if (seconds < 60) return `${seconds} s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds/60)} min ago`;
+  return seconds < 86400 ? `${Math.floor(seconds/3600)} h ago` : '24+ h ago';
+}
+function feedStatus(d, now) {
+  const age = checkpointAge(d.session.last_seen_at, now);
+  return `${d.live ? 'Receiving scoring' : 'No live scoring — showing last stored standings'} · last checkpoint ${age}`;
+}
+function focusStatus(participants, focusId, race) {
+  const p = participantById(participants, focusId);
+  if (!p) return '';
+  const laps = Number.isSafeInteger(p.total_laps) && p.total_laps >= 0 ? p.total_laps : '—';
+  return `<p class="focus-status" aria-label="Focus status"><strong>Focus: ${esc(p.display_name)}</strong>
+    <span>P${validPosition(p.position) ? p.position : '—'}</span><span>Gap ${gapText(p, race)}</span>
+    <span>Interval ${intervalText(p, race)}</span><span>${laps} completed laps</span>
+    <span>Last ${fmt(p.last_lap_time)}</span><span>Best ${fmt(p.best_lap_time)}</span>
+    <span>${p.in_pits === true ? 'PIT' : p.in_pits === false ? 'TRACK' : '—'}</span></p>`;
 }
 function focusTiming(participants, focusId) {
   const p = participantById(participants, focusId);
@@ -196,8 +227,9 @@ function renderSession(d) {
   root.innerHTML = `<h1>${esc(d.session.track_name)}</h1>
       <p>${esc(d.session.simulator_provider)} · ${esc(d.session.session_type)} · ${hideClass ? esc(fieldClass)+' · ' : ''}${d.participants.length} participants</p>
       ${sessionContext(d)}
-      <p class="status">${d.live ? 'Receiving scoring' : 'No live scoring — showing last stored standings'} · Last checkpoint: ${esc(d.session.last_seen_at)}</p>
+      <p class="status">${esc(feedStatus(d, Date.now()))}</p>
       <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p>
+      ${focusStatus(d.participants, focusId, race)}
       ${weatherWidget(d.session.weather, d.live)}
       ${focusTiming(d.participants, focusId)}${relativeWidget(d.participants, focusId)}${headToHeadWidget(d.participants, focusId, race)}
       <h2>Full field</h2><div id="full-scroll" class="table-scroll"><table>
