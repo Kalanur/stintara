@@ -9,6 +9,7 @@ body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:
 <div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div>
 <section aria-label="Fuel validation"><h2>Fuel · Experimental</h2><div id="fuel">Choose a participant to inspect fuel data.</div></section>
 <div id="root">Loading…</div>
+<footer class="muted" style="margin-top:24px;font-size:12px;overflow-wrap:anywhere">__BUILD_LABEL__</footer>
 <script>
 __WEATHER_UI__
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

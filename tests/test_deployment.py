@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from xml.etree import ElementTree
@@ -6,6 +7,24 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_docker_build_identity_propagation():
+    dockerfile = (ROOT / "server/Dockerfile").read_text()
+    assert "ARG VERSION=dev" in dockerfile and "ARG REVISION=unknown" in dockerfile
+    environment = dockerfile.replace("\\\n", " ").split("ENV ", 1)[1].split("\n", 1)[0]
+    assert "STINTARA_BUILD_VERSION=$VERSION" in environment
+    assert "STINTARA_BUILD_REVISION=$REVISION" in environment
+    assert 'org.opencontainers.image.version="$VERSION"' in dockerfile
+    assert 'org.opencontainers.image.revision="$REVISION"' in dockerfile
+    assert "FROM python:3.13-slim" in dockerfile
+    assert "http://127.0.0.1:8080/health" in dockerfile
+    assert not re.search(r"\b[0-9a-f]{40}\b", dockerfile)
+    workflow = yaml.load((ROOT / ".github/workflows/docker.yml").read_text(), Loader=yaml.BaseLoader)
+    build = next(step for step in workflow["jobs"]["docker"]["steps"]
+                 if step.get("uses", "").startswith("docker/build-push-action"))
+    assert build["with"]["build-args"].splitlines() == [
+        "VERSION=${{ steps.meta.outputs.version }}", "REVISION=${{ github.sha }}"]
 
 
 def test_unraid_templates():

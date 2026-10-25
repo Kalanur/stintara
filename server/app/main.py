@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
+from .build import APP_VERSION, build_info, inject_build_label
 from .domain import sample_due
 from .fuel import fuel_report
 from .lifecycle import end_observation, expire_observations, resolve_session
@@ -80,7 +81,7 @@ async def lifespan(app):
             await pool.close()
 
 
-app = FastAPI(title="Stintara", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Stintara", version=APP_VERSION, lifespan=lifespan)
 pool: asyncpg.Pool | None = None
 
 # Per-agent runtime state. PostgreSQL remains the source of persisted history.
@@ -186,19 +187,19 @@ async def health() -> dict[str, str]:
     assert pool
     async with pool.acquire() as conn:
         await conn.fetchval("SELECT 1")
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", **build_info()}
 
 
 @app.get("/", response_class=HTMLResponse)
 async def frontpage() -> HTMLResponse:
-    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+    return HTMLResponse(inject_build_label((STATIC_DIR / "index.html").read_text(encoding="utf-8")))
 
 
 @app.get("/drivers/{slug}/live", response_class=HTMLResponse)
 async def driver_live_page(slug: str) -> HTMLResponse:
     html = (STATIC_DIR / "live.html").read_text(encoding="utf-8")
     html = html.replace("__WEATHER_UI__", (STATIC_DIR / "weather.js").read_text(encoding="utf-8"))
-    return HTMLResponse(html.replace("__DRIVER_SLUG__", json.dumps(slug).replace("<", "\\u003c")))
+    return HTMLResponse(inject_build_label(html.replace("__DRIVER_SLUG__", json.dumps(slug).replace("<", "\\u003c"))))
 
 
 async def get_live_rows(slug: str | None = None) -> list[dict[str, Any]]:
@@ -245,7 +246,7 @@ async def api_live() -> list[dict[str, Any]]:
 async def session_live_page(session_id: UUID) -> HTMLResponse:
     html = (STATIC_DIR / "session.html").read_text(encoding="utf-8")
     html = html.replace("__WEATHER_UI__", (STATIC_DIR / "weather.js").read_text(encoding="utf-8"))
-    return HTMLResponse(html.replace("__SESSION_ID__", json.dumps(str(session_id))))
+    return HTMLResponse(inject_build_label(html.replace("__SESSION_ID__", json.dumps(str(session_id)))))
 
 
 # Freshness describes the observation feed, not whether a race is finished.
@@ -642,7 +643,7 @@ async def ingest(ws: WebSocket):
             return
         agent_key = key
         active_agents.add(key)
-        await ws.send_json({"type": "agent_welcome", "driver_slug": agent["slug"], "version": "0.1.0"})
+        await ws.send_json({"type": "agent_welcome", "driver_slug": agent["slug"], "version": APP_VERSION})
         while True:
             kind = None
             raw = await ws.receive_text()
