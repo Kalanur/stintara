@@ -120,7 +120,7 @@ h1{font-size:22px}
 <div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div></nav>
 <main class="dashboard">
 <div id="root">Loading…</div>
-<section class="panel fuel-panel" aria-label="Fuel validation"><h2>Fuel / Strategy <small class="muted">· Experimental</small></h2><div id="fuel">Choose a participant to inspect fuel data.</div></section>
+<section class="panel fuel-panel" aria-label="Fuel validation"><h2>Fuel <small class="muted">· Experimental</small></h2><div id="fuel">Choose a participant to inspect fuel data.</div></section>
 </main>
 <footer>__BUILD_LABEL__</footer>
 <script>
@@ -376,7 +376,7 @@ function renderSession(d) {
         const entry = vehicle.label && !(hideClass && vehicle.label === 'Class') ? `${vehicle.label}: ${vehicle.value}` : 'Entry: —';
         return `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td class="driver-cell">${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? ` <a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}
       <span class="entry" title="${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}">${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}</span></td>
-      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td class="best-time">${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${pitBadge(p.in_pits)}</td></tr>`;
+      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td class="best-time">${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${p.in_pits === true ? pitBadge(true) : '—'}</td></tr>`;
       }).join('') || `<tr><td colspan="${hideClass ? 8 : 9}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
   const relativeDetails = document.querySelector('#relative-details');
   if (relativeDetails) relativeDetails.open = relativeOpen;

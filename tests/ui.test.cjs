@@ -564,6 +564,22 @@ test('engineer dashboard keeps live and stored cues explicit alongside existing 
   assert.match(page.root.innerHTML,/50 entries/);
 });
 
+test('Full Field highlights only PIT while focused driver retains explicit TRACK state', async () => {
+  const field=syntheticField(3);
+  field[0].in_pits=false;
+  field[1].in_pits=true;
+  field[2].in_pits=null;
+  const page=await sessionHarness(sessionData(field),`?focus=${field[0].id}`);
+  const full=page.root.innerHTML.split('<h2>Full field</h2>')[1];
+  assert.match(full,/<span class="badge pit">PIT<\/span>/);
+  assert.doesNotMatch(full,/TRACK|badge track/);
+  assert.match(full,/<td>—<\/td><\/tr>/);
+  assert.match(page.root.innerHTML,/<span class="badge track">TRACK<\/span>/);
+  const source=readFileSync(path.join(__dirname,'../server/static/session.html'),'utf8');
+  assert.match(source,/<h2>Fuel <small class="muted">· Experimental<\/small><\/h2>/);
+  assert.doesNotMatch(source,/Fuel \/ Strategy/);
+});
+
 test('dashboard disclosures, keyboard scroll focus and both scroll axes survive polling', async () => {
   const data=sessionData(syntheticField(50)), page=await sessionHarness(data);
   page.relativeDetails.open=true;
