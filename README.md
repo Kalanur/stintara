@@ -370,6 +370,10 @@ Position and gap values remain provider values. Repeated positions are not dedup
 
 ## Session spectator
 
+The Session/Spectator page includes an engineer dashboard targeting a 1920x1080 browser viewport: internally scrolling standings with a sticky header, focus and persisted sectors, compact comparisons, fuel and weather. Entry/team/number metadata sits beneath the driver name; Relative standings and fuel/provider diagnostics remain expandable. Desktop scroll positions and disclosure state survive polling. At narrower widths or shorter viewports, panels stack and the page scrolls normally; tables can scroll horizontally on small screens.
+
+A restrained red LIVE dot follows the existing API feed state; stale sessions show STORED and the last-stored wording. Reduced-motion preferences disable the pulse and transitions. Track Map, Flags/Race Control and Car Status areas are explicitly unavailable placeholders, not new data features. This visual pass references #22 without completing spectator parity; API contracts, polling cadence and timing/fuel calculations are unchanged.
+
 The home page lists sessions with scoring received within the last 15 seconds. Open a session to watch its complete recorded participant field at `/sessions/{session_id}/live`; registered drivers also have links to their existing strategy pages. Separate session IDs remain separate cards, including sessions on the same track. Conservative LMU multi-observer convergence is implemented as described below; ambiguous or insufficient evidence retains separate sessions.
 
 - `GET /api/sessions/live`: session ID, provider, track, type, start time and recorded participant count; each session appears once.

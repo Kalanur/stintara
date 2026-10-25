@@ -122,17 +122,21 @@ function helpers() {
 async function sessionHarness(data, query='', fuelReply=null) {
   const root = {innerHTML:'',textContent:''};
   const selector = {innerHTML:'',value:'',addEventListener(name, listener) { this[name] = listener; }};
-  const scrolls = {'#full-scroll':{scrollLeft:31},'#relative-scroll':{scrollLeft:17}};
+  const scrolls = {'#full-scroll':{scrollLeft:31,scrollTop:400,focus() {this.focused=true;}},
+    '#relative-scroll':{scrollLeft:17,scrollTop:20},'#comparison-panel':{scrollTop:12},'#weather-panel':{scrollTop:5},
+    '#fuel-toggle':{focus() {this.focused=true;}}};
   const location = {href:'http://localhost/sessions/session/live'+query};
   const replacements = [], fuelRequests = [];
   const fuel = {html:'',text:'', get innerHTML() { return this.html; }, set innerHTML(value) { this.html=value; this.text=''; },
     get textContent() { return this.text; }, set textContent(value) { this.text=value; this.html=''; }};
   const details = {open:false};
+  const relativeDetails = {open:false};
+  const document = {activeElement:null,querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : name==='#relative-details' ? relativeDetails : scrolls[name]};
   let queued, finish, currentData=data;
   let done = new Promise(resolve => { finish=resolve; });
   const context = vm.createContext({URL,location,
     history:{replaceState(state,unused,url) { replacements.push(url); location.href=new URL(url,location.href).href; }},
-    document:{querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : scrolls[name]},
+    document,
     fetch:async url => {
       if (!url.endsWith('/fuel')) return {ok:true,json:async () => currentData};
       fuelRequests.push(url);
@@ -143,7 +147,7 @@ async function sessionHarness(data, query='', fuelReply=null) {
   });
   vm.runInContext(spectatorScript(), context);
   await done;
-  return {root,selector,location,replacements,scrolls,fuel,fuelRequests,details,
+  return {root,selector,location,replacements,scrolls,fuel,fuelRequests,details,relativeDetails,document,
     change(id) { selector.value=id; selector.change(); },
     async poll(data) {
       currentData=data;
@@ -287,7 +291,7 @@ test('fuel follows UUID focus, clears on switch/disappearance and never loads wi
   assert.match(page.fuel.textContent,/Choose a participant/);
   page.change(field[0].id); await settleFuel();
   assert.ok(page.fuelRequests.at(-1).endsWith(`/participants/${field[0].id}/fuel`));
-  assert.match(page.fuel.innerHTML,/Stintara consumption: 2.80 L\/lap/);
+  assert.match(page.fuel.innerHTML,/Stintara consumption: <strong>2.80 L\/lap/);
   page.change(field[1].id);
   assert.equal(page.fuel.innerHTML,'');
   assert.match(page.fuel.textContent,/Loading/);
@@ -303,14 +307,14 @@ test('fuel collecting, ready, stale and provider comparison remain distinct', ()
   for (const count of [0,1,2]) {
     const html=h.fuelWidget(fuelData(syntheticId(1),count));
     assert.ok(html.includes(`Collecting fuel data · ${count} / 3 valid samples`));
-    assert.match(html,/Stintara consumption: —/);
-    assert.match(html,/Estimated range: —/);
+    assert.match(html,/Stintara consumption: <strong>—/);
+    assert.match(html,/Estimated range: <strong>—/);
     assert.match(html,/Provider consumption: 99.00 L\/lap/);
   }
   const data=fuelData(syntheticId(1)), html=h.fuelWidget(data);
-  assert.match(html,/Current fuel: 42.00 L/);
-  assert.match(html,/Stintara consumption: 2.80 L\/lap/);
-  assert.match(html,/Estimated range: 15.0 laps/);
+  assert.match(html,/Current fuel: <strong>42.00 L/);
+  assert.match(html,/Stintara consumption: <strong>2.80 L\/lap/);
+  assert.match(html,/Estimated range: <strong>15.0 laps/);
   assert.match(html,/Valid samples used: 3/);
   assert.match(html,/Provider comparison/);
   assert.match(html,/not part of the Stintara calculation/);
@@ -319,8 +323,8 @@ test('fuel collecting, ready, stale and provider comparison remain distinct', ()
   assert.doesNotMatch(html,/Fuel to finish|Refuel recommendation|Finish margin/i);
   data.current.fresh=false;
   const stale=h.fuelWidget(data);
-  assert.match(stale,/Estimated range: —/);
-  assert.match(stale,/Stintara consumption: 2.80 L\/lap/);
+  assert.match(stale,/Estimated range: <strong>—/);
+  assert.match(stale,/Stintara consumption: <strong>2.80 L\/lap/);
   assert.match(stale,/unavailable or stale/);
   data.current.fuel_l=null; data.provider={};
   assert.doesNotMatch(h.fuelWidget(data),/Provider comparison/);
@@ -337,8 +341,8 @@ test('fuel rejects late responses across A-B-A focus switches and clears errors'
   }});
   answer(2,30); await settleFuel();
   answer(0,10); answer(1,20); await settleFuel();
-  assert.match(page.fuel.innerHTML,/Current fuel: 30.00 L/);
-  assert.doesNotMatch(page.fuel.innerHTML,/Current fuel: (10|20).00 L/);
+  assert.match(page.fuel.innerHTML,/Current fuel: <strong>30.00 L/);
+  assert.doesNotMatch(page.fuel.innerHTML,/Current fuel: <strong>(10|20).00 L/);
   page.change(field[1].id); pending[3].resolve({ok:false}); await settleFuel();
   assert.equal(page.fuel.innerHTML,'');
   assert.match(page.fuel.textContent,/unavailable/);
@@ -387,7 +391,7 @@ test('session clock and focused persisted sectors label completed laps without p
   const data={...sessionData(field),session:{session_type:'Race'},
     timing:{configured_minutes:30,configured_laps:null,elapsed_seconds:0}};
   const page=await sessionHarness(data,`?focus=${field[0].id}`);
-  for (const value of ['30 min','0:00:00','Completed laps: 0','checkpoint lap 2','0:30.500','0:31.250'])
+  for (const value of ['30 min','0:00:00','0 completed laps','checkpoint lap 2','0:30.500','0:31.250'])
     assert.ok(page.root.innerHTML.includes(value),value);
   assert.doesNotMatch(page.root.innerHTML,/remaining laps|Current lap|Remaining time|official remaining/i);
   await page.poll({...data,live:false,timing:{...data.timing,elapsed_seconds:123}});
@@ -413,17 +417,17 @@ test('single class appears once; full field, relative and H2H keep class for mix
   assert.equal((h.root.innerHTML.match(/GT3/g)||[]).length,1);
   assert.doesNotMatch(h.root.innerHTML,/<th[^>]*>Class<\/th>|<dt>Class<\/dt>/);
   const full=h.root.innerHTML.split('<h2>Full field</h2>')[1];
-  assert.equal((full.match(/<th scope=/g)||[]).length,11);
+  assert.equal((full.match(/<th scope=/g)||[]).length,8);
   for (const value of ['Hypercar', null, '', '  ']) {
     const mixed=field.map(p => ({...p})); mixed[2].vehicle_class=value;
     await h.poll(sessionData(mixed));
     assert.match(h.root.innerHTML,/<th scope="col">Class<\/th>/);
     assert.match(h.root.innerHTML,/<th>Class<\/th>/);
     assert.match(h.root.innerHTML,/<dt>Class<\/dt>/);
-    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,12);
+    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,9);
   }
   await h.poll(sessionData([]));
-  assert.match(h.root.innerHTML,/colspan="12"/);
+  assert.match(h.root.innerHTML,/colspan="9"/);
   const escaped=await render('session.html',sessionData([{vehicle_class:'<GT3>',display_name:'<Driver>'}]));
   assert.match(escaped.innerHTML,/&lt;GT3&gt;/);
   assert.doesNotMatch(escaped.innerHTML,/<GT3>|<Driver>/);
@@ -488,7 +492,7 @@ test('compact focus status reuses timing rules, escapes names and distinguishes 
   for (const value of ['Focus: &lt;img onerror=&quot;x&quot;&gt;','P8','Gap 14.8 s','Interval 0.5 s',
     '23 completed laps','Last 1:42.381','Best 1:41.904','TRACK']) assert.ok(html.includes(value),value);
   assert.doesNotMatch(html,/<img|<script>/);
-  assert.match(h.focusStatus([{...p,in_pits:true}],p.id,true),/<span>PIT<\/span>/);
+  assert.match(h.focusStatus([{...p,in_pits:true}],p.id,true),/<span class="badge pit">PIT<\/span>/);
   assert.doesNotMatch(h.focusStatus([{...p,in_pits:null}],p.id,true),/TRACK|PIT/);
   for (const id of [null,'',syntheticId(90),'not-a-uuid']) assert.equal(h.focusStatus([p],id,true),'');
   assert.equal(h.focusStatus([],p.id,true),'');
@@ -538,4 +542,67 @@ test('checkpoint age never determines live or finished state', () => {
   assert.equal(h.feedStatus({live:false,session:{last_seen_at:'2026-10-25T11:59:59.5Z'}},now),
     'No live scoring — showing last stored standings · last checkpoint <1 s ago');
   assert.match(h.feedStatus({live:false,session:{}},now),/last checkpoint unknown/);
+});
+
+test('engineer dashboard keeps live and stored cues explicit alongside existing widgets', async () => {
+  const field=syntheticField(50), data=sessionData(field);
+  data.session.weather=syntheticWeather();
+  const page=await sessionHarness(data,`?focus=${field[7].id}`);
+  const html=page.root.innerHTML;
+  assert.match(html,/class="feed feed-live"/);
+  assert.match(html,/class="live-dot" aria-hidden="true"/);
+  assert.match(html,/>LIVE<\/span>/);
+  for(const text of ['50 participants','Full field','Focus status','Head-to-Head','Relative standings',
+    'Current conditions','Track geometry not available yet','Flags / Race Control / Car Status · not available yet']) assert.ok(html.includes(text),text);
+  assert.match(page.fuel.innerHTML,/Current fuel: <strong>42.00 L/);
+  await page.poll({...data,live:false});
+  assert.match(page.root.innerHTML,/class="feed feed-stale"/);
+  assert.match(page.root.innerHTML,/>STORED<\/span>/);
+  assert.match(page.root.innerHTML,/No live scoring — showing last stored standings/);
+  assert.match(page.root.innerHTML,/Last stored conditions/);
+  assert.doesNotMatch(page.root.innerHTML,/feed-live|>LIVE<\/span>/);
+  assert.match(page.root.innerHTML,/50 entries/);
+});
+
+test('dashboard disclosures, keyboard scroll focus and both scroll axes survive polling', async () => {
+  const data=sessionData(syntheticField(50)), page=await sessionHarness(data);
+  page.relativeDetails.open=true;
+  page.document.activeElement={id:'full-scroll'};
+  await page.poll(data);
+  assert.equal(page.relativeDetails.open,true);
+  assert.equal(page.scrolls['#full-scroll'].scrollTop,400);
+  assert.equal(page.scrolls['#full-scroll'].scrollLeft,31);
+  assert.equal(page.scrolls['#full-scroll'].focused,true);
+  assert.equal(page.scrolls['#relative-scroll'].scrollTop,20);
+  assert.equal(page.scrolls['#weather-panel'].scrollTop,5);
+  page.change(data.participants[0].id);
+  await settleFuel();
+  page.document.activeElement={id:'fuel-toggle'};
+  await page.poll(data);
+  assert.equal(page.scrolls['#fuel-toggle'].focused,true);
+});
+
+test('fuel headline values remain separate from collapsed provider diagnostics', () => {
+  const html=helpers().fuelWidget(fuelData(syntheticId(1)));
+  const [primary,diagnostics]=html.split('<details id="fuel-diagnostics">');
+  for(const value of ['Current fuel:','Stintara consumption:','Estimated range:','Valid samples used:']) assert.ok(primary.includes(value));
+  assert.doesNotMatch(primary,/Provider consumption|Strategy checkpoint/);
+  assert.match(diagnostics,/Provider comparison/);
+  assert.match(diagnostics,/Fuel sample diagnostics/);
+});
+
+test('dashboard source bounds desktop panels, keeps build identity and supports reduced motion', () => {
+  const html=readFileSync(path.join(__dirname,'../server/static/session.html'),'utf8');
+  const css=html.match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.match(css,/height:100dvh/);
+  assert.match(css,/grid-template-rows:auto minmax\(0,1fr\) auto/);
+  assert.match(css,/\.table-scroll\{[^}]*overflow:auto/);
+  assert.match(css,/position:sticky;top:0/);
+  assert.match(css,/@media\(prefers-reduced-motion:reduce\)/);
+  assert.match(css,/animation:none!important;transition:none!important/);
+  assert.match(css,/\.feed-live \.live-dot\{animation:live-pulse/);
+  assert.doesNotMatch(css,/\.feed-stale[^}]*animation:live-pulse/);
+  assert.match(html,/<footer>__BUILD_LABEL__<\/footer>/);
+  assert.match(html,/tabindex="0" role="region" aria-label="Full field standings"/);
+  assert.match(html,/<label for="focus">Focus participant<\/label>/);
 });
