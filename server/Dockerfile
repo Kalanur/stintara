@@ -10,7 +10,9 @@ LABEL org.opencontainers.image.title="Stintara" \
       org.opencontainers.image.source="https://github.com/kalanur/stintara"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    STINTARA_BUILD_VERSION=$VERSION \
+    STINTARA_BUILD_REVISION=$REVISION
 
 WORKDIR /app
 COPY requirements.txt .

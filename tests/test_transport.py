@@ -33,6 +33,15 @@ def hello(ws, token="test-secret"):
     ws.send_json({"type": "agent_hello", "protocol": "stintara-agent-v1", "token": token, "simulator": "lmu"})
 
 
+def test_welcome_version_is_application_version_not_build_channel(ingest_client, monkeypatch):
+    monkeypatch.setenv("STINTARA_BUILD_VERSION", "dev")
+    monkeypatch.setenv("STINTARA_BUILD_REVISION", "0123456789abcdef" * 2 + "01234567")
+    client, _ = ingest_client
+    with client.websocket_connect("/ws/ingest") as ws:
+        hello(ws)
+        assert ws.receive_json() == {"type": "agent_welcome", "driver_slug": "driver", "version": "0.1.0"}
+
+
 def frame(ws, kind="telemetry", payload=None, protocol="stintara-agent-v1"):
     ws.send_json({"protocol": protocol, "message_type": kind, "payload": payload if payload is not None else {"fuel": 42}})
 

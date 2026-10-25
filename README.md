@@ -90,6 +90,10 @@ Replace the placeholders with local test credentials. Tests create and remove th
 
 ## Local Docker Compose
 
+Deployed builds expose their identity through `/health`: `version` remains the application/protocol version (`0.1.0`), while `build_version` is the supplied build channel/version and `revision` is the full Git SHA. The existing Docker `VERSION` and `REVISION` build arguments populate `STINTARA_BUILD_VERSION` and `STINTARA_BUILD_REVISION` as well as the OCI labels. No runtime Git checkout is needed. Without supplied metadata, local starts show `dev` / `unknown`.
+
+The main, Driver Live and Session/Spectator pages show a quiet footer such as `Stintara dev · 0123456`. Valid 40-character SHAs are shortened to seven characters only for display; `/health` retains the full revision for field-test reports. The footer is server-rendered without additional polling. Build versions are displayed as supplied (including release versions); they do not change agent protocol semantics or publication tags.
+
 Copy `.env.example` to `.env` and set your own random `POSTGRES_PASSWORD` and `BOOTSTRAP_AGENT_TOKEN`. Empty values prevent startup; example/default tokens are rejected. Keep `.env` out of Git.
 
 ```powershell
