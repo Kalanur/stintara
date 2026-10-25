@@ -480,3 +480,62 @@ test('driver forecast expansion survives the existing refresh loop', async () =>
   await next();
   assert.equal(details.open,false);
 });
+
+test('compact focus status reuses timing rules, escapes names and distinguishes pit state', () => {
+  const h=helpers(), p={...syntheticField(1)[0],display_name:'<img onerror="x">',position:8,
+    gap_to_leader:14.8,interval:.5,total_laps:23,last_lap_time:102.381,best_lap_time:101.904,in_pits:false};
+  let html=h.focusStatus([p],p.id,true);
+  for (const value of ['Focus: &lt;img onerror=&quot;x&quot;&gt;','P8','Gap 14.8 s','Interval 0.5 s',
+    '23 completed laps','Last 1:42.381','Best 1:41.904','TRACK']) assert.ok(html.includes(value),value);
+  assert.doesNotMatch(html,/<img|<script>/);
+  assert.match(h.focusStatus([{...p,in_pits:true}],p.id,true),/<span>PIT<\/span>/);
+  assert.doesNotMatch(h.focusStatus([{...p,in_pits:null}],p.id,true),/TRACK|PIT/);
+  for (const id of [null,'',syntheticId(90),'not-a-uuid']) assert.equal(h.focusStatus([p],id,true),'');
+  assert.equal(h.focusStatus([],p.id,true),'');
+  for (const race of [true,false]) {
+    html=h.focusStatus([{...p,gap_to_leader:-1,interval:null}],p.id,race);
+    assert.match(html,/Gap —/); assert.match(html,/Interval —/);
+  }
+  html=h.focusStatus([p],p.id,false);
+  assert.match(html,/Gap —/); assert.match(html,/Interval —/);
+  html=h.focusStatus([{...p,gap_laps:1}],p.id,true);
+  assert.match(html,/Gap 1 L/); assert.match(html,/Interval —/);
+});
+
+test('focus summary follows UUID selection and precedes larger sections without removing context', async () => {
+  const field=syntheticField(2), data={...sessionData(field),timing:{configured_minutes:80,elapsed_seconds:120}};
+  data.session.session_type='Race';
+  const page=await sessionHarness(data);
+  assert.doesNotMatch(page.root.innerHTML,/aria-label="Focus status"/);
+  page.change(field[0].id);
+  let html=page.root.innerHTML;
+  assert.ok(html.indexOf('class="status"') < html.indexOf('aria-label="Focus status"'));
+  assert.ok(html.indexOf('aria-label="Focus status"') < html.indexOf('aria-label="Weather"'));
+  for (const value of ['80 min','0:02:00','Focused timing','Relative','Head-to-Head','Full field']) assert.ok(html.includes(value),value);
+  await page.poll({...data,participants:[field[1]]});
+  assert.doesNotMatch(page.root.innerHTML,/aria-label="Focus status"/);
+});
+
+test('checkpoint age accepts absolute timestamps only and bounds clock noise and old ages', () => {
+  const h=helpers(), now=Date.parse('2026-10-25T12:00:00Z');
+  for (const [timestamp,expected] of [
+    ['2026-10-25T11:59:59.500000Z','<1 s ago'],['2026-10-25T11:59:56Z','4 s ago'],
+    ['2026-10-25T11:58:00Z','2 min ago'],['2026-10-25T11:00:00Z','1 h ago'],
+    ['2026-10-25T13:59:56+02:00','4 s ago'],['2026-10-25T12:00:00.500Z','<1 s ago'],
+    ['2026-10-24T12:00:00Z','24+ h ago'],['2026-10-25T12:00:02Z','unknown'],
+    [null,'unknown'],[undefined,'unknown'],['invalid','unknown'],[0,'unknown'],
+    ['2026-10-25T11:59:56','unknown'],['2026-10-25','unknown'],
+    ['2026-02-30T00:00:00Z','unknown'],['2026-10-25T24:00:00Z','unknown'],
+    ['2026-10-25T12:00:00+99:00','unknown'],['2026-10-25T12:00:00-00:00','unknown'],
+  ]) assert.equal(h.checkpointAge(timestamp,now),expected,String(timestamp));
+  for (const value of [NaN,Infinity,null]) assert.equal(h.checkpointAge('2026-10-25T12:00:00Z',value),'unknown');
+});
+
+test('checkpoint age never determines live or finished state', () => {
+  const h=helpers(), now=Date.parse('2026-10-25T12:00:00Z');
+  assert.equal(h.feedStatus({live:true,session:{last_seen_at:'2026-10-25T11:58:00Z'}},now),
+    'Receiving scoring · last checkpoint 2 min ago');
+  assert.equal(h.feedStatus({live:false,session:{last_seen_at:'2026-10-25T11:59:59.5Z'}},now),
+    'No live scoring — showing last stored standings · last checkpoint <1 s ago');
+  assert.match(h.feedStatus({live:false,session:{}},now),/last checkpoint unknown/);
+});
