@@ -46,6 +46,17 @@ def frame(ws, kind="telemetry", payload=None, protocol="stintara-agent-v1"):
     ws.send_json({"protocol": protocol, "message_type": kind, "payload": payload if payload is not None else {"fuel": 42}})
 
 
+def test_socket_disconnect_clears_only_pending_convergence_state(ingest_client, monkeypatch):
+    client, _ = ingest_client
+    state = {"pending_convergence": {"candidate_id": "synthetic"},
+             "convergence_invalidated": True, "session_id": None, "track_name": "Synthetic Circuit"}
+    monkeypatch.setitem(main.runtime, "test-agent", state)
+    with client.websocket_connect("/ws/ingest") as ws:
+        hello(ws)
+        assert ws.receive_json()["type"] == "agent_welcome"
+    assert state == {"session_id": None, "track_name": "Synthetic Circuit"}
+
+
 def test_transient_session_info_is_not_forwarded_over_existing_connection(ingest_client, caplog):
     client, handler = ingest_client
     messages = [

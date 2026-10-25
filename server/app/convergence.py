@@ -8,6 +8,8 @@ MIN_SHARED_SLOTS = 5
 MIN_SMALLER_OVERLAP = 0.8
 CLOCK_TOLERANCE_SECONDS = 5.0
 OBSERVATION_FRESH_SECONDS = 15.0
+# Covers a roughly six-second transition skew without relaxing actual attachment.
+TRANSITION_GRACE_SECONDS = 10.0
 
 
 def namespace_key(provider, track, session_type):
