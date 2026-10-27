@@ -64,4 +64,6 @@ def pit_settings(plan):
         result["additional_stop_required"] |= fuel_target > capacity
     projected = next(r["amount"] for r in plan["at_pit"] if r["resource_kind"] == "fuel")
     result["expected_fuel_added_l"] = max(0, fuel_target - projected)
+    if not math.isfinite(result["expected_fuel_added_l"]):
+        return None
     return result

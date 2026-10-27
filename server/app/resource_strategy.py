@@ -60,6 +60,10 @@ def finish_projection(completed, timing, lap_times, race=True):
         if not math.isfinite(seconds):
             return result
         typical = median(pace)
+        if not math.isfinite(typical):
+            ordered = sorted(pace)
+            low, high = ordered[len(ordered)//2-1:len(ordered)//2+1]
+            typical = low + (high - low) / 2
         remaining = max(0, seconds - elapsed) / typical
         if not math.isfinite(remaining):
             return result

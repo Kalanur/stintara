@@ -172,3 +172,11 @@ def test_setting_rounding_handles_binary_noise_without_safety_multiplier():
     assert round_up(51.00000000000001) == 51
     assert round_up(51.0001) == 52
     assert math.isfinite(round_up(1e100, 2))
+
+
+def test_finite_extremes_cannot_overflow_public_projection_or_settings():
+    projection = finish_projection(1, dict(configured_minutes=10, elapsed_seconds=1), [1e308]*4)
+    assert projection['pace_seconds'] == 1e308
+    p = plan([resource('fuel', 1, 1.7e308, 8e307, True, 5, 'L')], completed=1, stop=3, end=4)
+    assert p['status'] == 'unsafe_plan'
+    assert pit_settings(p) is None  # Expected addition overflows; no nonfinite JSON.
