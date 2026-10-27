@@ -395,7 +395,8 @@ let latestData = null;
 let selectorOptions = '';
 let fuelRequest = 0;
 let fuelParticipant = null;
-const planStorage = typeof localStorage==='undefined'?null:localStorage;
+let planStorage = null;
+try { planStorage = typeof localStorage==='undefined'?null:localStorage; } catch { /* Storage may be blocked by browser policy. */ }
 function updatePlanControl() {
   const input=document.querySelector('#planned-stop');
   if(input) { input.value=readPlan(planStorage,sessionId,focusId) ?? ''; input.disabled=!focusId; }

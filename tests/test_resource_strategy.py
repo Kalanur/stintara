@@ -4,7 +4,7 @@ import math
 import pytest
 
 from agent.pitwall import normalize
-from server.app.lmu_resources import lmu_resources, pit_settings
+from server.app.lmu_resources import lmu_resources, pit_settings, round_up
 from server.app.protocol import Scoring, Telemetry
 from server.app.resource_strategy import (
     PitServiceMode,
@@ -164,3 +164,11 @@ def test_lmu_capability_is_not_inferred_from_zero():
     assert not known and len(rs) == 2
     rs, known = lmu_resources(fuel, dict(energy_available=False))
     assert known and len(rs) == 1 and rs[0]['pit_service_mode'] == 'TARGET_LEVEL'
+
+
+def test_setting_rounding_handles_binary_noise_without_safety_multiplier():
+    assert round_up(.8600000000000003, 2) == .86
+    assert round_up(.860001, 2) == .87
+    assert round_up(51.00000000000001) == 51
+    assert round_up(51.0001) == 52
+    assert math.isfinite(round_up(1e100, 2))
