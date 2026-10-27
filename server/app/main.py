@@ -303,6 +303,7 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
                    p.display_name, p.team_name, p.car_name, p.car_class,
                    CASE WHEN p.provider='lmu' THEN NULL ELSE p.car_number END AS car_number,
                    p.position, p.total_laps, p.last_lap_time, p.best_lap_time, p.in_pits,
+                   p.pitstops, p.finish_status, p.has_telemetry, pit.last_pit_lap,
                    p.gap_to_leader, p.laps_behind_leader,
                    lap.lap_number AS sector_lap_number, lap.sector1, lap.sector2, lap.sector3
             FROM session_participants p LEFT JOIN drivers d ON d.id=p.driver_id
@@ -311,6 +312,14 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
                 WHERE session_participant_id=p.id AND lap_number > 0
                 ORDER BY lap_number DESC LIMIT 1
             ) lap ON true
+            LEFT JOIN LATERAL (
+                SELECT max(lap_number) AS last_pit_lap FROM (
+                    SELECT lap_number,pitstops,
+                           max(pitstops) OVER (ORDER BY lap_number
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_max
+                    FROM laps WHERE session_participant_id=p.id AND lap_number > 0 AND pitstops >= 0
+                ) history WHERE pitstops > previous_max
+            ) pit ON true
             WHERE p.session_id=$1
         """, session_id)
     data = dict(session)
@@ -481,6 +490,12 @@ async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: d
             )
             if not p:
                 continue
+            # Accepted snapshot state is independent of completed-lap insertability.
+            # Keep scoring positions/pit occupancy and checkpoint freshness untouched.
+            await conn.execute("""UPDATE session_participants SET
+                pitstops=GREATEST(pitstops,$2),finish_status=$3,has_telemetry=$4
+                WHERE id=$1""", p["id"], d.get("num_pitstops", 0),
+                d.get("finish_status", 0), bool(d.get("has_telemetry", False)))
             wheels = d.get("wheels") or [{}, {}, {}, {}]
             while len(wheels) < 4:
                 wheels.append({})

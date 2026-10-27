@@ -49,6 +49,9 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .badge{display:inline-block;font-size:12px;font-weight:750;border:1px solid currentColor;padding:1px 5px;border-radius:4px}
 .pit{color:var(--pit)}
 .track{color:var(--ok)}
+.finished{color:var(--info)}
+.retired{color:var(--live)}
+.disqualified{color:var(--best)}
 .focus{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus);transition:background-color .15s,border-color .15s}
 
 .map-panel{grid-column:2;grid-row:2;display:flex;flex-direction:column}
@@ -234,6 +237,21 @@ function feedIndicator(live) {
 function pitBadge(value) {
   return value === true ? '<span class="badge pit">PIT</span>' : value === false ? '<span class="badge track">TRACK</span>' : '—';
 }
+function participantStatus(p, focused=false) {
+  const finish = {1:['FIN','finished'],2:['DNF','retired'],3:['DSQ','disqualified']};
+  if (Number.isInteger(p.finish_status) && finish[p.finish_status]) {
+    const [label,style] = finish[p.finish_status];
+    return `<span class="badge ${style}">${label}</span>`;
+  }
+  if (p.in_pits === true) return pitBadge(true);
+  return focused && p.finish_status === 0 ? pitBadge(p.in_pits) : '—';
+}
+function stopsText(p, focused=false) {
+  if (!Number.isSafeInteger(p.pitstops) || p.pitstops < 0) return focused ? 'Stops —' : '—';
+  const last = p.pitstops > 0 && Number.isSafeInteger(p.last_pit_lap) && p.last_pit_lap > 0 ? p.last_pit_lap : null;
+  if (focused) return `${p.pitstops} ${p.pitstops === 1 ? 'stop' : 'stops'}${last === null ? '' : ` · Last stop L${last}`}`;
+  return `${p.pitstops}${last === null ? '' : ` · L${last}`}`;
+}
 function focusStatus(participants, focusId, race) {
   const p = participantById(participants, focusId);
   if (!p) return '';
@@ -242,7 +260,8 @@ function focusStatus(participants, focusId, race) {
     <span>P${validPosition(p.position) ? p.position : '—'}</span><span>Gap ${gapText(p, race)}</span>
     <span>Interval ${intervalText(p, race)}</span><span>${laps} completed laps</span>
     <span>Last ${fmt(p.last_lap_time)}</span><span>Best ${fmt(p.best_lap_time)}</span>
-    <span>${pitBadge(p.in_pits)}</span></p>`;
+    <span title="Last stop: first persisted completed-lap snapshot with an increased counter; not exact entry/exit.">${stopsText(p, true)}</span>
+    <span>${participantStatus(p, true)}</span></p>`;
 }
 function focusTiming(participants, focusId) {
   const p = participantById(participants, focusId);
@@ -370,14 +389,14 @@ function renderSession(d) {
       <section class="panel standings-panel" aria-label="Full field"><div class="panel-heading"><h2>Full field</h2><span class="muted">${d.participants.length} entries · provider order</span></div>
       <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
       <caption>Provider positions and lap times. Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
-      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col">Completed laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col">Pit</th></tr></thead>
+      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col">Completed laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
       <tbody>${d.participants.map(p => {
         const vehicle = vehicleLabel(p);
         const entry = vehicle.label && !(hideClass && vehicle.label === 'Class') ? `${vehicle.label}: ${vehicle.value}` : 'Entry: —';
         return `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td class="driver-cell">${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? ` <a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}
       <span class="entry" title="${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}">${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}</span></td>
-      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td class="best-time">${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${p.in_pits === true ? pitBadge(true) : '—'}</td></tr>`;
-      }).join('') || `<tr><td colspan="${hideClass ? 8 : 9}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
+      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td class="best-time">${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
+      }).join('') || `<tr><td colspan="${hideClass ? 9 : 10}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
   const relativeDetails = document.querySelector('#relative-details');
   if (relativeDetails) relativeDetails.open = relativeOpen;
   if (activeId) document.querySelector('#'+activeId)?.focus({preventScroll:true});

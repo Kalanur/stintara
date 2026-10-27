@@ -379,13 +379,19 @@ The home page lists sessions with scoring received within the last 15 seconds. O
 - `GET /api/sessions/live`: session ID, provider, track, type, start time and recorded participant count; each session appears once.
 - `GET /api/sessions/{session_id}/live`: session metadata, feed freshness (`live`) and every recorded participant, including unresolved drivers. Unknown UUID returns 404; malformed UUID returns 422.
 - Positions are provider positions, with no renumbering or derived class ranks. Race gaps and intervals use the conservative Timing Pass 1 rules below; unsupported cases remain an em dash. Missing model, manufacturer, team and race number are not inferred.
-- A stopped feed retains the last stored field on its direct page, explicitly labelled as stale. Receiving scoring does not mean that the race is still running; FINISHED/DNF/DQ behavior remains Issue #9.
+- A stopped feed retains the last stored field on its direct page, explicitly labelled as stale. Receiving scoring does not mean that the race is still running; FINISHED/DNF/DSQ behavior remains Issue #9.
 - Existing driver endpoints remain compatible. Full race Fuel Calculator and Trackmap are deferred; experimental fuel validation is described below.
 
 The table includes position, historical participant name, class, typed vehicle/entry label, team, verified number where available, laps, last/best lap and pit indication. It scrolls horizontally on narrow screens. No live LMU/MAPC validation of this iteration has been performed.
 
 
 ### Participant focus, Relative and Head-to-Head
+
+Full Field now separates `Stops` and `Status` from timing. Accepted AllDrivers snapshots update participant pitstop count, raw finish code and telemetry availability even without a new valid lap. Counts never decrease within a participant/session. Scoring remains authoritative for current pit occupancy. Codes 1/2/3 display FIN/DNF/DSQ with precedence over PIT; code 0 is ordinary active/none, and unsupported codes do not acquire a guessed finish label. Feed freshness and session closure do not generate finish state.
+
+`1 · L12` means one reported stop and the most recent proven counter increase first observed in the persisted completed-lap snapshot for lap 12. A first known positive counter alone does not establish a pit lap. Missing intervening laps are not interpolated; neither exact pit entry/exit nor inlap/outlap association is claimed. Existing non-null database defaults remain 0 before a snapshot; there is no new per-field provenance/availability schema. Finish code and telemetry availability represent the last accepted snapshot, not an irreversible lifecycle classification. This partially addresses #9/#22; post-race strategy handling and real LMU counter timing still need validation.
+
+For reproducible UI review, `node tools/engineer_demo.cjs --json` emits a wholly synthetic 40-car API presentation fixture. With optional externally available Playwright and a browser, `node tools/engineer_demo.cjs --screenshot --browser msedge` renders the actual dashboard at 1920x1080 and 900x900, writes screenshots only under ignored `build/`, and checks viewport bounds. Omit `--browser` to use Playwright's Chromium. This is a presentation harness with intercepted API responses, not an ingestion/database replay; the six-car `tools/replay/scenarios.py` scenario and its fixture remain unchanged. Do not use real captures in public demos.
 
 Choose any participant in the spectator selector, including an unresolved participant, or share `/sessions/<session-id>/live?focus=<participant-id>`. Selection uses only the internal session participant UUID. Without the parameter, exactly one registered Stintara participant may be selected automatically; otherwise choose explicitly. Invalid or foreign UUIDs leave focus unset. Manual changes replace the URL without reloading. Polling preserves the UUID; a missing participant clears focus and removes the parameter without selecting a replacement. The existing Driver-Live link supplies focus only when its own participant association is unique.
 
