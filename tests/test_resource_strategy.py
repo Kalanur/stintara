@@ -86,6 +86,7 @@ def test_safe_manual_stop_and_lmu_ratio_units():
     assert settings['ve_target_percent'] == 50
     assert settings['resulting_fuel_target_l'] == 43
     assert settings['expected_fuel_added_l'] == 0
+    assert settings['projected_fuel_out_l'] == pytest.approx(51.6)
 
 
 def test_round_up_no_hidden_factor_and_add_informational():
@@ -95,6 +96,27 @@ def test_round_up_no_hidden_factor_and_add_informational():
     assert s['ve_target_percent'] == 51
     assert s['resulting_fuel_target_l'] == pytest.approx(43.86)
     assert s['expected_fuel_added_l'] == pytest.approx(43.86 - (42-4*8.61))
+    assert s['projected_fuel_out_l'] == pytest.approx(43.86)
+
+
+@pytest.mark.parametrize('energy', [True, False])
+def test_target_level_preserves_excess_arrival_fuel_and_checks_output_capacity(energy):
+    rs = resources(fuel=86, energy=.8, fuel_use=8.6, energy_use=.1)
+    if not energy:
+        rs = rs[:1]
+    p = plan(rs, end=36)
+    s = pit_settings(p)
+    target_key = 'resulting_fuel_target_l' if energy else 'fuel_target_l'
+    assert s[target_key] == 43
+    assert s['expected_fuel_added_l'] == 0
+    assert s['projected_fuel_out_l'] == pytest.approx(51.6)
+    for capacity in [40, 45, None]:
+        p['resources'][0]['capacity'] = capacity
+        s = pit_settings(p)
+        assert s['projected_fuel_out_l'] is None
+        assert s['capacity_feasible'] is (None if capacity is None else False)
+        if capacity is not None:
+            assert s['additional_stop_required']
 
 
 @pytest.mark.parametrize('rs,cause', [(resources(fuel=8), 'fuel'), (resources(energy=.2), 'energy')])
@@ -112,6 +134,7 @@ def test_capacities_and_fuel_only_target():
     assert s['additional_stop_required']
     p = plan(resources(capacity=10))
     assert pit_settings(p)['capacity_feasible'] is False
+    assert pit_settings(p)['projected_fuel_out_l'] is None
     p = plan([resources(capacity=10)[0]])
     s = pit_settings(p)
     assert 've_target_percent' not in s and s['fuel_target_l'] == pytest.approx(19.6)

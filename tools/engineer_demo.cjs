@@ -38,7 +38,7 @@ function engineerDemo() {
     next_stint_requirements:[{resource_kind:'fuel',amount:60.2},{resource_kind:'energy',amount:.714}],
     provider_pit_settings:{provider:'lmu',fuel_service_mode:'TARGET_LEVEL',energy_kind:'VIRTUAL_ENERGY',
       ve_target_percent:72,measured_fuel_ratio_l_per_percent_ve:8.6/10.2,fuel_ratio_l_per_percent_ve:.85,
-      resulting_fuel_target_l:61.2,expected_fuel_added_l:25.6,capacity_feasible:true,additional_stop_required:false}};
+      resulting_fuel_target_l:61.2,projected_fuel_out_l:61.2,expected_fuel_added_l:25.6,capacity_feasible:true,additional_stop_required:false}};
   return {strategy,focus:id(3),data:{live:true,session,participants,timing:{configured_laps:38,elapsed_seconds:2880}},
     fuel:{session_id:session.id,participant_id:id(3),
       estimate:{status:'ready',consumption_l_per_lap:2.8,sample_count:5,estimated_range_laps:15},

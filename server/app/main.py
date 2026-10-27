@@ -379,7 +379,8 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
     vehicle = next((v for v in scoring.get("vehicles", []) if v["id"] == context["local_vehicle_id"]), None)
     completed = vehicle["total_laps"] if vehicle else context["total_laps"]
     timing = session_timing(context, scoring)
-    finish = finish_projection(completed, timing, [r["lap_time"] for r in laps], context["session_type"] == "Race")
+    pace_times = [r["lap_time"] for r in laps if r["in_pits"] is not True]
+    finish = finish_projection(completed, timing, pace_times, context["session_type"] == "Race")
     provider = context["simulator_provider"]
     resources, known = lmu_resources(fuel, sample) if provider == "lmu" else ([], False)
     manual = planned_stop_lap if type(planned_stop_lap) is int else None

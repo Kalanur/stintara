@@ -672,7 +672,7 @@ const strategyDemo = () => structuredClone(require('../tools/engineer_demo.cjs')
 test('LMU resource presentation has explicit units, limiting VE and actionable settings', () => {
   const d=strategyDemo(),html=helpers().strategyWidget(d);
   for(const text of ['Virtual Energy','LIMIT','63.0%','10.2%/lap','6.2 laps','SET VE TO 72%',
-    'FUEL RATIO 0.85','Fuel carried ≈ 61.2 L','Expected added ≈ 25.6 L','Reserve 1.0 lap','Latest resource-safe stop L33']) assert.ok(html.includes(text),text);
+    'FUEL RATIO 0.85','Fuel target ≈ 61.2 L','Projected fuel out ≈ 61.2 L','Expected added ≈ 25.6 L','Reserve 1.0 lap','Latest resource-safe stop L33']) assert.ok(html.includes(text),text);
   assert.doesNotMatch(html,/current ratio|Optimal stop|NaN|undefined|Infinity/);
 });
 
@@ -736,4 +736,26 @@ test('manual Apply, focus restore and AUTO use only read-only strategy requests'
   assert.match(page.planFeedback.textContent,/later than completed/);
   page.planAuto.click();await settleFuel();assert.equal(page.planInput.value,'');
   assert.ok(page.fuelRequests.at(-1).endsWith('/strategy'));
+});
+
+
+test('TARGET_LEVEL distinguishes setting target, retained excess fuel and expected addition', () => {
+  for (const energy of [true,false]) {
+    const d=strategyDemo();
+    d.provider_pit_settings={provider:'lmu',energy_kind:energy?'VIRTUAL_ENERGY':'NONE',
+      ve_target_percent:50,fuel_ratio_l_per_percent_ve:.86,resulting_fuel_target_l:43,fuel_target_l:43,
+      projected_fuel_out_l:51.6,expected_fuel_added_l:0,capacity_feasible:true};
+    if(!energy) d.resources=d.resources.slice(0,1);
+    const html=helpers().strategyWidget(d);
+    assert.ok(html.includes(energy?'Fuel target ≈ 43.0 L':'SET FUEL TO 43.0 L'));
+    assert.match(html,/Projected fuel out ≈ 51.6 L/);
+    assert.match(html,/Expected added ≈ 0.0 L/);
+    assert.doesNotMatch(html,/Fuel carried/);
+    d.provider_pit_settings.capacity_feasible=false;
+    d.provider_pit_settings.projected_fuel_out_l=null;
+    const infeasible=helpers().strategyWidget(d);
+    assert.match(infeasible,/Tank capacity insufficient/);
+    assert.match(infeasible,/Projected fuel out ≈ —/);
+    assert.doesNotMatch(infeasible,/Projected fuel out ≈ (43.0|51.6)/);
+  }
 });

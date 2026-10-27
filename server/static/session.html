@@ -365,8 +365,8 @@ function strategyWidget(d) {
   const finish=d.finish_projection || {};
   const lap=value=>Number.isSafeInteger(value)&&value>=0?`L${value}`:'—';
   const instructions=lmu && settings?.provider==='lmu' ? `<div class="resource-settings"><h3>LMU PIT SETTINGS</h3>
-    ${settings.energy_kind==='VIRTUAL_ENERGY' ? `<strong>SET VE TO ${fuelNumber(settings.ve_target_percent,'%',0)} · FUEL RATIO ${fuelNumber(settings.fuel_ratio_l_per_percent_ve,'',2)}</strong>
-    <p>Fuel carried ≈ ${fuelNumber(settings.resulting_fuel_target_l,' L',1)}</p>` : `<strong>SET FUEL TO ${fuelNumber(settings.fuel_target_l,' L',1)}</strong>`}
+    ${settings.energy_kind==='VIRTUAL_ENERGY' ? `<strong>SET VE TO ${fuelNumber(settings.ve_target_percent,'%',0)} · FUEL RATIO ${fuelNumber(settings.fuel_ratio_l_per_percent_ve,'',2)}</strong>` : `<strong>SET FUEL TO ${fuelNumber(settings.fuel_target_l,' L',1)}</strong>`}
+    <p>${settings.energy_kind==='VIRTUAL_ENERGY'?`Fuel target ≈ ${fuelNumber(settings.resulting_fuel_target_l,' L',1)} · `:''}Projected fuel out ≈ ${fuelNumber(settings.projected_fuel_out_l,' L',1)}</p>
     <p class="muted">Expected added ≈ ${fuelNumber(settings.expected_fuel_added_l,' L',1)} · informational only</p>
     ${settings.capacity_feasible===false?'<p class="strategy-danger">Tank capacity insufficient · calculated settings infeasible</p>':''}
     ${settings.capacity_feasible===null?'<p class="muted">Tank capacity unknown · feasibility unverified</p>':''}

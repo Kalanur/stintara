@@ -80,10 +80,13 @@ Display conversion is `fraction × 100`; `.106` consumption is `10.6 % VE/lap`.
 - Reserve = **1.0 lap**, explicit for every required resource.
 - Exact lap race: finish lap = configured lap count. Positive configured duration
   takes precedence if both duration and lap count are supplied.
-- Timed race: median of up to five recent positive finite completed lap times,
+- Timed race: exclude persisted rows explicitly marked `in_pits == true`, then take
+  the median of up to five recent positive finite completed lap times,
   minimum three. Remaining seconds = max(0, duration − elapsed). Finish estimate =
   completed laps + ceil(remaining seconds / pace) + 1. It is labelled projected,
-  never official remaining laps; without pace/fresh clock it is unavailable.
+  never official remaining laps; without pace/fresh clock it is unavailable. No additional
+  inlaps/outlaps are guessed. Provider pit-context timing is incomplete and requires
+  real LMU field validation.
 - Latest resource-safe boundary = completed + floor(effective range − reserve).
   An immediate boundary displays BOX THIS LAP; its projection uses the end of the
   current running lap (completed + 1). No stop is recommended at/after finish.
@@ -100,10 +103,17 @@ LMU uses `TARGET_LEVEL`. For confirmed fuel-only vehicles the instruction is
 - Recommended ratio rounds upward to 0.01; no hidden percentage safety factor.
 - VE target = ceil(required fraction × 100), at most 100%. A requirement above
   100% explicitly reports ADDITIONAL STOP REQUIRED.
-- Resulting fuel carried = VE target percent × recommended ratio. For example,
+- Setting-derived Fuel Target (`resulting_fuel_target_l`) = VE target percent × recommended ratio. For example,
   51 × 0.86 = 43.86 L. Above tank capacity is explicitly infeasible, not silently clamped.
 - Expected added fuel = max(0, resulting target − projected fuel at pit), secondary
   information only. It is not the LMU pit-menu input.
+- Projected Fuel Out (`projected_fuel_out_l`) = max(projected fuel at pit, fuel target),
+  equivalently arrival fuel + expected added. LMU is not assumed to remove excess fuel.
+  This applies both to VE setting-derived targets and fuel-only `fuel_target_l`.
+  For example, arrival 51.6 L and target 43.0 L gives 0.0 L added and 51.6 L out.
+  Output is null when capacity is unknown/exceeded or projected arrival fuel is negative;
+  capacity feasibility checks the projected output as well as the target. Targets remain
+  visible separately, including explicitly infeasible settings.
 
 Only binary floating-point noise within 1e-10 of a setting increment boundary is
 removed before upward rounding. Unknown tank capacity is labelled unverified.

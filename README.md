@@ -460,7 +460,7 @@ No historical duplicate repair, transient same-agent fragment repair, RaceContro
 
 ### Resource Strategy V0.1
 
-The Engineer **Strategy** panel combines independent Fuel consumption with optional provider-normalized Energy. LMU is the only implemented mapping: confirmed fuel-only vehicles show `SET FUEL TO`; VE-enabled vehicles show `SET VE TO`, `FUEL RATIO` (L / 1% VE), and resulting fuel carried. Unknown Energy capability never silently becomes fuel-only. All plans include an explicit **1.0-lap reserve**; unsafe plans and insufficient capacity are reported, not silently clamped into success.
+The Engineer **Strategy** panel combines independent Fuel consumption with optional provider-normalized Energy. LMU is the only implemented mapping: confirmed fuel-only vehicles show `SET FUEL TO`; VE-enabled vehicles show `SET VE TO`, `FUEL RATIO` (L / 1% VE), and the setting-derived Fuel Target, Projected Fuel Out and Expected Added Fuel. Excess arrival fuel is not assumed to be removed. Unknown Energy capability never silently becomes fuel-only. All plans include an explicit **1.0-lap reserve**; unsafe plans and insufficient capacity are reported, not silently clamped into success.
 
 Manual `Pit at end of lap N` overrides live only in browser localStorage, scoped by session and participant UUID; AUTO clears them. The read-only `/api/sessions/{session_id}/participants/{participant_id}/strategy` endpoint accepts the optional planned lap. No server write endpoint or in-game control is added. FIN/DNF/DSQ, stale data and unavailable finish projections suppress active recommendations. Timed finishes are conservative estimates, not official remaining laps.
 

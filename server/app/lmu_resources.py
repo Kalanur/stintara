@@ -58,12 +58,16 @@ def pit_settings(plan):
                       resulting_fuel_target_l=fuel_target)
     else:
         result.update(energy_kind=EnergyKind.NONE, fuel_target_l=fuel_target)
+    projected = next(r["amount"] for r in plan["at_pit"] if r["resource_kind"] == "fuel")
+    fuel_out = max(projected, fuel_target)  # TARGET_LEVEL does not imply draining excess fuel.
     capacity = resources["fuel"]["capacity"]
     if capacity is not None:
-        result["capacity_feasible"] = fuel_target <= capacity
-        result["additional_stop_required"] |= fuel_target > capacity
-    projected = next(r["amount"] for r in plan["at_pit"] if r["resource_kind"] == "fuel")
+        result["capacity_feasible"] = fuel_out <= capacity
+        result["additional_stop_required"] |= fuel_out > capacity
     result["expected_fuel_added_l"] = max(0, fuel_target - projected)
     if not math.isfinite(result["expected_fuel_added_l"]):
         return None
+    # Do not present an achievable output with unknown/exceeded capacity or
+    # a negative arrival quantity (the car cannot reach that stop as projected).
+    result["projected_fuel_out_l"] = fuel_out if result["capacity_feasible"] is True and projected >= 0 else None
     return result
