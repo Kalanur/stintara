@@ -130,24 +130,36 @@ async function sessionHarness(data, query='', fuelReply=null) {
   const fuel = {html:'',text:'', get innerHTML() { return this.html; }, set innerHTML(value) { this.html=value; this.text=''; },
     get textContent() { return this.text; }, set textContent(value) { this.text=value; this.html=''; }};
   const details = {open:false};
+  const storage=new Map();
+  const localStorage={getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
+  const planInput={value:''},planFeedback={textContent:''};
+  const planForm={addEventListener(name,listener){this[name]=listener;}};
+  const planAuto={addEventListener(name,listener){this[name]=listener;}};
   const relativeDetails = {open:false};
-  const document = {activeElement:null,querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : name==='#relative-details' ? relativeDetails : scrolls[name]};
+  const controls={'#planned-stop':planInput,'#plan-feedback':planFeedback,'#plan-form':planForm,'#plan-auto':planAuto};
+  const document = {activeElement:null,querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : name==='#relative-details' ? relativeDetails : controls[name]||scrolls[name]};
   let queued, finish, currentData=data;
   let done = new Promise(resolve => { finish=resolve; });
-  const context = vm.createContext({URL,location,
+  const context = vm.createContext({URL,location,localStorage,
     history:{replaceState(state,unused,url) { replacements.push(url); location.href=new URL(url,location.href).href; }},
     document,
     fetch:async url => {
-      if (!url.endsWith('/fuel')) return {ok:true,json:async () => currentData};
+      if (!url.includes('/strategy')) return {ok:true,json:async () => currentData};
       fuelRequests.push(url);
       const id=url.split('/').at(-2);
-      return fuelReply ? fuelReply(id) : {ok:true,json:async () => fuelData(id)};
+      const response=fuelReply ? await fuelReply(id) : {ok:true,json:async () => fuelData(id)};
+      return {...response,json:async()=>{
+        const data=await response.json();
+        return data.resources?data:{session_id:data.session_id,participant_id:data.participant_id,
+          status:'collecting_or_stale',resources:[],diagnostics:{fuel:data}};
+      }};
     },
     setTimeout:callback => { queued=callback; finish(); },
   });
   vm.runInContext(spectatorScript(), context);
   await done;
   return {root,selector,location,replacements,scrolls,fuel,fuelRequests,details,relativeDetails,document,
+    planInput,planFeedback,planForm,planAuto,storage,
     change(id) { selector.value=id; selector.change(); },
     async poll(data) {
       currentData=data;
@@ -290,13 +302,13 @@ test('fuel follows UUID focus, clears on switch/disappearance and never loads wi
   assert.equal(page.fuelRequests.length,0);
   assert.match(page.fuel.textContent,/Choose a participant/);
   page.change(field[0].id); await settleFuel();
-  assert.ok(page.fuelRequests.at(-1).endsWith(`/participants/${field[0].id}/fuel`));
+  assert.ok(page.fuelRequests.at(-1).endsWith(`/participants/${field[0].id}/strategy`));
   assert.match(page.fuel.innerHTML,/Stintara consumption: <strong>2.80 L\/lap/);
   page.change(field[1].id);
   assert.equal(page.fuel.innerHTML,'');
   assert.match(page.fuel.textContent,/Loading/);
   await settleFuel();
-  assert.ok(page.fuelRequests.at(-1).endsWith(`/participants/${field[1].id}/fuel`));
+  assert.ok(page.fuelRequests.at(-1).endsWith(`/participants/${field[1].id}/strategy`));
   await page.poll(sessionData(field.filter(p=>p.id!==field[1].id)));
   assert.equal(page.fuel.innerHTML,'');
   assert.match(page.fuel.textContent,/Choose a participant/);
@@ -576,7 +588,7 @@ test('Full Field highlights only PIT while focused driver retains explicit TRACK
   assert.match(full,/<td>—<\/td><\/tr>/);
   assert.match(page.root.innerHTML,/<span class="badge track">TRACK<\/span>/);
   const source=readFileSync(path.join(__dirname,'../server/static/session.html'),'utf8');
-  assert.match(source,/<h2>Fuel <small class="muted">· Experimental<\/small><\/h2>/);
+  assert.match(source,/<h2>Strategy <small class="muted">· Experimental<\/small><\/h2>/);
   assert.doesNotMatch(source,/Fuel \/ Strategy/);
 });
 
@@ -654,4 +666,74 @@ test('unknown stop counts and unsupported finish codes do not acquire guessed me
   }
   assert.match(h.participantStatus({finish_status:0,in_pits:true}),/>PIT<\/span>/);
   assert.equal(h.participantStatus({finish_status:0,in_pits:false}),'—');
+});
+const strategyDemo = () => structuredClone(require('../tools/engineer_demo.cjs').engineerDemo().strategy);
+
+test('LMU resource presentation has explicit units, limiting VE and actionable settings', () => {
+  const d=strategyDemo(),html=helpers().strategyWidget(d);
+  for(const text of ['Virtual Energy','LIMIT','63.0%','10.2%/lap','6.2 laps','SET VE TO 72%',
+    'FUEL RATIO 0.85','Fuel carried ≈ 61.2 L','Expected added ≈ 25.6 L','Reserve 1.0 lap','Latest resource-safe stop L33']) assert.ok(html.includes(text),text);
+  assert.doesNotMatch(html,/current ratio|Optimal stop|NaN|undefined|Infinity/);
+});
+
+test('fuel-only LMU settings omit irrelevant VE and future providers do not inherit LMU labels', () => {
+  const d=strategyDemo(); d.resources=d.resources.slice(0,1);d.limiting_resource='fuel';
+  d.provider_pit_settings={provider:'lmu',energy_kind:'NONE',fuel_target_l:42,expected_fuel_added_l:20};
+  const html=helpers().strategyWidget(d);
+  assert.match(html,/SET FUEL TO 42.0 L/); assert.doesNotMatch(html,/SET VE|FUEL RATIO|Virtual Energy/);
+  d.simulator_provider='synthetic-provider';d.resources[0].pit_service_mode='ADD_AMOUNT';d.provider_pit_settings=null;
+  assert.doesNotMatch(helpers().strategyWidget(d),/LMU PIT SETTINGS|SET FUEL TO|SET VE|FUEL RATIO/);
+});
+
+test('resource warnings distinguish Fuel and Energy shortfall, capacity and additional stops', () => {
+  const d=strategyDemo();d.status='unsafe_plan';
+  d.shortfall=[{resource_kind:'fuel',laps:1.2},{resource_kind:'energy',laps:.7}];
+  d.provider_pit_settings.capacity_feasible=false;d.provider_pit_settings.additional_stop_required=true;
+  const html=helpers().strategyWidget(d);
+  for(const text of ['UNSAFE PLAN','Fuel short by 1.2 laps','VE short by 0.7 laps','ADDITIONAL STOP REQUIRED','Tank capacity insufficient']) assert.ok(html.includes(text));
+  assert.match(html,/strategy-danger/);
+});
+
+test('finish estimates, balanced and no-stop states remain explicit', () => {
+  const d=strategyDemo();d.finish_projection.kind='timed_estimate';d.balanced=true;
+  assert.match(helpers().strategyWidget(d),/Projected finish ≈ L38/);
+  assert.match(helpers().strategyWidget(d),/BALANCED/);
+  d.status='no_stop_required';d.provider_pit_settings=null;
+  const html=helpers().strategyWidget(d);
+  assert.match(html,/strategy-safe/);assert.match(html,/No resource stop required/);assert.doesNotMatch(html,/SET VE/);
+  d.status='box_this_lap';assert.match(helpers().strategyWidget(d),/BOX THIS LAP/);
+});
+
+test('unknown capability and unavailable values render safely without provider string injection', () => {
+  const d=strategyDemo();d.status='capability_unknown';d.provider_pit_settings=null;
+  d.resources[0].current=null;d.resources[0].sample_count='<img onerror=x>';
+  const html=helpers().strategyWidget(d);
+  assert.match(html,/Energy capability unknown/);assert.match(html,/&lt;img/);
+  assert.doesNotMatch(html,/<img|NaN|Infinity|undefined|SET VE/);
+});
+
+test('versioned local plans isolate session and participant and reject malformed storage', () => {
+  const h=helpers(),map=new Map(),storage={getItem:k=>map.get(k),setItem:(k,v)=>map.set(k,v),removeItem:k=>map.delete(k)};
+  const sid=syntheticId(99),a=syntheticId(1),b=syntheticId(2);
+  assert.ok(h.savePlan(storage,sid,a,32));assert.equal(h.readPlan(storage,sid,a),32);
+  assert.equal(h.readPlan(storage,sid,b),null);assert.equal(h.readPlan(storage,syntheticId(98),a),null);
+  assert.ok([...map.keys()][0].startsWith('stintara:strategy:v1:'));assert.doesNotMatch([...map.keys()][0],/lmu/i);
+  for(const bad of [0,-1,2.5,NaN,'32',true]) assert.equal(h.savePlan(storage,sid,a,bad),false);
+  map.set(h.strategyKey(sid,a),'malformed');assert.equal(h.readPlan(storage,sid,a),null);
+  assert.ok(h.savePlan(storage,sid,a,null));assert.equal(map.size,0);
+  assert.equal(h.savePlan(null,sid,a,32),false);
+});
+
+test('manual Apply, focus restore and AUTO use only read-only strategy requests', async () => {
+  const field=syntheticField(2),page=await sessionHarness(sessionData(field));
+  page.change(field[0].id);await settleFuel();
+  page.planInput.value='8';page.planForm.submit({preventDefault(){}});await settleFuel();
+  assert.match(page.fuelRequests.at(-1),/strategy\?planned_stop_lap=8$/);
+  page.change(field[1].id);await settleFuel();assert.equal(page.planInput.value,'');
+  page.planInput.value='9';page.planForm.submit({preventDefault(){}});await settleFuel();
+  page.change(field[0].id);await settleFuel();assert.equal(page.planInput.value,8);
+  page.planInput.value='4';page.planForm.submit({preventDefault(){}});
+  assert.match(page.planFeedback.textContent,/later than completed/);
+  page.planAuto.click();await settleFuel();assert.equal(page.planInput.value,'');
+  assert.ok(page.fuelRequests.at(-1).endsWith('/strategy'));
 });

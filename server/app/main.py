@@ -14,7 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
@@ -22,8 +22,10 @@ from .build import APP_VERSION, build_info, inject_build_label
 from .domain import sample_due
 from .fuel import fuel_report
 from .lifecycle import end_observation, expire_observations, resolve_session
+from .lmu_resources import lmu_resources, pit_settings
 from .migrations import migrate_sample_ids
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
+from .resource_strategy import finish_projection, plan_resources
 from .secrets import read_secret
 from .timing import newest_scoring, project_timing, session_timing
 from .uuid7 import uuid7
@@ -352,6 +354,44 @@ async def api_participant_fuel(session_id: UUID, participant_id: UUID) -> dict[s
             **fuel_report(checkpoints, strategy, now)}
 
 
+@app.get("/api/sessions/{session_id}/participants/{participant_id}/strategy")
+async def api_participant_strategy(session_id: UUID, participant_id: UUID,
+                                   planned_stop_lap: int | None = Query(default=None, ge=1)) -> dict[str, Any]:
+    assert pool
+    # The GET is entirely read-only, including local Engineer overrides.
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        context = await conn.fetchrow(f"""SELECT p.total_laps,p.finish_status,p.local_vehicle_id,
+            s.session_type,s.session_laps,s.session_minutes,s.simulator_provider,({SESSION_LIVE_SQL}) AS live
+            FROM sessions s JOIN session_participants p ON p.session_id=s.id
+            WHERE s.id=$1 AND p.id=$2""", session_id, participant_id)
+        if not context:
+            raise HTTPException(404, "session participant not found")
+        laps = await conn.fetch("""SELECT lap_number,lap_time,fuel_remaining_l,pitstops,in_pits
+            FROM laps WHERE session_participant_id=$1 ORDER BY lap_number""", participant_id)
+        row = await conn.fetchrow("""SELECT * FROM strategy_samples WHERE session_participant_id=$1
+            ORDER BY recorded_at DESC,id DESC LIMIT 1""", participant_id)
+        now = await conn.fetchval("SELECT clock_timestamp()")
+    sample = dict(row) if row else {}
+    if isinstance(sample.get("energy_history"), str):
+        sample["energy_history"] = json.loads(sample["energy_history"])
+    fuel = fuel_report(laps, sample, now)
+    scoring = newest_scoring(session_id, context["live"], list(runtime.values()), time.monotonic())
+    vehicle = next((v for v in scoring.get("vehicles", []) if v["id"] == context["local_vehicle_id"]), None)
+    completed = vehicle["total_laps"] if vehicle else context["total_laps"]
+    timing = session_timing(context, scoring)
+    finish = finish_projection(completed, timing, [r["lap_time"] for r in laps], context["session_type"] == "Race")
+    provider = context["simulator_provider"]
+    resources, known = lmu_resources(fuel, sample) if provider == "lmu" else ([], False)
+    manual = planned_stop_lap if type(planned_stop_lap) is int else None
+    result = plan_resources(resources, completed, finish, manual_stop=manual,
+                            active=context["live"] and vehicle is not None and context["session_type"] == "Race"
+                            and context["finish_status"] == 0, capability_known=known)
+    result.update(session_id=session_id, participant_id=participant_id, simulator_provider=provider,
+                  provider_pit_settings=pit_settings(result) if provider == "lmu" else None,
+                  diagnostics={"fuel": fuel, "energy_history_samples": len(sample.get("energy_history") or [])})
+    return result
+
+
 @app.get("/api/drivers/{slug}/live")
 async def api_driver_live(slug: str) -> dict[str, Any]:
     assert pool
@@ -550,6 +590,11 @@ async def store_strategy_sample(agent, session_id, payload):
             "fuel_stint_number": payload.get("fuel_stint_number"), "fuel_stint_laps": payload.get("fuel_stint_laps"),
             "fuel_stint_consumption_l": payload.get("fuel_stint_consumption"),
             "water_temp_c": payload.get("water_temp"), "oil_temp_c": payload.get("oil_temp"),
+            "energy_available": payload.get("energy_available"), "energy_kind": payload.get("energy_kind"),
+            "energy_history": json.dumps(payload.get("energy_history", [])),
+            "energy_current_fraction": next((v.get("energy_current_fraction")
+                for v in state.get("scoring", {}).get("vehicles", [])
+                if v["id"] == state.get("scoring", {}).get("player_vehicle_id")), None),
         }
         tires = (payload.get("tires") or []) + [{}, {}, {}, {}]
         for corner, tire in zip(("fl", "fr", "rl", "rr"), tires):

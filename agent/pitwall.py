@@ -8,6 +8,11 @@ MESSAGE_TYPES = {
 }
 
 
+def energy_fraction(value):
+    return value if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                     and math.isfinite(value) and 0 <= value <= 1) else None
+
+
 def clean(value):
     if isinstance(value, float) and not math.isfinite(value):
         return None
@@ -56,7 +61,14 @@ def normalize(message):
         for vehicle in payload.get("vehicles", []):
             # Pitwall uses mID here: keep it as id, never as a race number.
             vehicle["car_number"] = None
+            vehicle["energy_current_fraction"] = energy_fraction(vehicle.pop("virtual_energy", None))
     elif kind == "telemetry":
+        available = payload.pop("ve_available", None)
+        payload["energy_available"] = available if type(available) is bool else None
+        payload["energy_kind"] = "VIRTUAL_ENERGY" if available is True else "NONE" if available is False else None
+        history = payload.pop("ve_history", None)
+        # Pitwall's final entry is the evolving current level, not a completed lap.
+        payload["energy_history"] = [energy_fraction(v) for v in history[:-1]][-512:] if isinstance(history, list) else []
         payload["tires"] = [wheel(t) for t in payload.get("tires", [])]
         for key in ("water_temp", "oil_temp"):
             if isinstance(payload.get(key), (int, float)) and payload[key] <= -200:

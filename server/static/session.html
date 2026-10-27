@@ -19,7 +19,7 @@ p{margin:5px 0}
 select{max-width:360px;min-width:0;padding:7px 10px;background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:5px;font:inherit}
 a:focus-visible,select:focus-visible,summary:focus-visible,.table-scroll:focus-visible{outline:2px solid var(--focus);outline-offset:3px}
 
-.dashboard{display:grid;gap:10px;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);grid-template-rows:auto minmax(130px,1fr) auto auto 260px;min-height:0;min-width:0}
+.dashboard{display:grid;gap:10px;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);grid-template-rows:auto minmax(100px,1fr) auto auto 210px;min-height:0;min-width:0}
 #root{display:contents}
 .panel,.session-header{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:12px;min-width:0;min-height:0}
 .session-header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:20px}
@@ -55,7 +55,7 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .focus{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus);transition:background-color .15s,border-color .15s}
 
 .map-panel{grid-column:2;grid-row:2;display:flex;flex-direction:column}
-.placeholder{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--muted);border:1px dashed var(--line);border-radius:4px;margin-top:8px;min-height:70px}
+.placeholder{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--muted);border:1px dashed var(--line);border-radius:4px;margin-top:8px;min-height:30px}
 .future-status{color:var(--muted);font-size:12px}
 .focus-panel{grid-column:2;grid-row:3;border-left:3px solid var(--focus)}
 .focus-status{display:flex;flex-wrap:wrap;gap:6px 16px;margin:5px 0}
@@ -65,7 +65,21 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .metric{border-left:2px solid var(--line);padding-left:8px}
 .value{font-size:17px;font-weight:650}
 .sector-context{font-size:12px;color:var(--muted);margin-top:8px}
-.fuel-panel{grid-column:2;grid-row:4;max-height:260px;overflow:auto}
+.fuel-panel{grid-column:2;grid-row:4;max-height:390px;overflow:auto}
+.resource-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0}
+.resource-grid article{border-left:2px solid var(--line);padding-left:8px}
+.resource-grid strong{font-size:19px}
+.resource-plan{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
+.resource-plan p{margin:1px 0}
+.resource-settings{padding:6px 10px;background:var(--raised);border-left:3px solid var(--focus)}
+.resource-settings strong{font-size:18px;color:var(--focus)}
+.strategy-safe{color:var(--ok)}
+.strategy-attention{color:var(--pit)}
+.strategy-danger{color:var(--live)}
+.plan-control{display:flex;align-items:center;gap:8px;margin:6px 0;flex-wrap:wrap}
+.plan-control input{width:75px}
+.plan-control input,.plan-control button{font:inherit;background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:3px 6px}
+.plan-control :focus-visible{outline:2px solid var(--focus)}
 .fuel-primary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .fuel-primary strong{font-size:20px;display:block;color:var(--pit)}
 details{margin-top:6px}
@@ -123,7 +137,9 @@ h1{font-size:22px}
 <div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div></nav>
 <main class="dashboard">
 <div id="root">Loading…</div>
-<section class="panel fuel-panel" aria-label="Fuel validation"><h2>Fuel <small class="muted">· Experimental</small></h2><div id="fuel">Choose a participant to inspect fuel data.</div></section>
+<section class="panel fuel-panel" aria-label="Resource strategy"><h2>Strategy <small class="muted">· Experimental</small></h2>
+<form id="plan-form" class="plan-control"><label for="planned-stop">Pit at end of lap</label><input id="planned-stop" type="number" min="1" step="1" aria-describedby="plan-feedback"><button type="submit">Apply</button><button id="plan-auto" type="button">AUTO</button><span id="plan-feedback" class="muted" role="status"></span></form>
+<div id="fuel">Choose a participant to inspect resource data.</div></section>
 </main>
 <footer>__BUILD_LABEL__</footer>
 <script>
@@ -317,6 +333,60 @@ function fuelWidget(data) {
     <tbody>${data.samples.map(sample => `<tr><td>${esc(sample.from_lap)} → ${esc(sample.to_lap)}</td><td>${fuelNumber(sample.consumption_l,' L')}</td><td>${sample.included ? 'yes' : 'no'}</td><td>${sample.used_for_estimate ? 'yes' : 'no'}</td><td>${esc(sample.excluded_reason)}</td></tr>`).join('') || '<tr><td colspan="5">No checkpoint transitions yet.</td></tr>'}</tbody></table></div></details>`;
 }
 
+function strategyKey(session, participant) { return `stintara:strategy:v1:${session}:${participant}`; }
+function readPlan(storage, session, participant) {
+  try {
+    const value=JSON.parse(storage?.getItem(strategyKey(session,participant)) || 'null');
+    return Number.isSafeInteger(value) && value>0 ? value : null;
+  } catch { return null; }
+}
+function savePlan(storage, session, participant, value) {
+  if (!participant || (value!==null && (!Number.isSafeInteger(value) || value<1))) return false;
+  try {
+    if (!storage) return false;
+    if(value===null) storage.removeItem(strategyKey(session,participant));
+    else storage.setItem(strategyKey(session,participant),JSON.stringify(value));
+    return true;
+  } catch { return false; }
+}
+function strategyWidget(d) {
+  const lmu=d.simulator_provider==='lmu';
+  const energy=d.resources?.find(r=>r.resource_kind==='energy');
+  const ve=lmu && energy?.energy_kind==='VIRTUAL_ENERGY';
+  const label=kind=>kind==='fuel'?'Fuel':ve?'VE':'Energy';
+  const amount=(kind,value)=>fuelNumber(kind==='energy'&&ve&&Number.isFinite(value)?value*100:value,kind==='fuel'?' L':ve?'%':'',1);
+  const statuses={no_stop_required:'No resource stop required',stop_required:'Resource stop required',unsafe_plan:'UNSAFE PLAN',
+    box_this_lap:'BOX THIS LAP',finish_shortfall:'Finish resource shortfall',capability_unknown:'Energy capability unknown',
+    collecting_or_stale:'Collecting samples / stale resource data',inactive:'No active pit recommendation',
+    finish_unknown:'Finish distance unavailable',invalid_plan:'Plan must be later than completed laps and before finish'};
+  const danger=['unsafe_plan','box_this_lap','finish_shortfall','invalid_plan'].includes(d.status);
+  const tone=danger?'strategy-danger':d.status==='no_stop_required'?'strategy-safe':d.status==='stop_required'?'strategy-attention':'muted';
+  const settings=d.provider_pit_settings;
+  const finish=d.finish_projection || {};
+  const lap=value=>Number.isSafeInteger(value)&&value>=0?`L${value}`:'—';
+  const instructions=lmu && settings?.provider==='lmu' ? `<div class="resource-settings"><h3>LMU PIT SETTINGS</h3>
+    ${settings.energy_kind==='VIRTUAL_ENERGY' ? `<strong>SET VE TO ${fuelNumber(settings.ve_target_percent,'%',0)} · FUEL RATIO ${fuelNumber(settings.fuel_ratio_l_per_percent_ve,'',2)}</strong>
+    <p>Fuel carried ≈ ${fuelNumber(settings.resulting_fuel_target_l,' L',1)}</p>` : `<strong>SET FUEL TO ${fuelNumber(settings.fuel_target_l,' L',1)}</strong>`}
+    <p class="muted">Expected added ≈ ${fuelNumber(settings.expected_fuel_added_l,' L',1)} · informational only</p>
+    ${settings.capacity_feasible===false?'<p class="strategy-danger">Tank capacity insufficient · calculated settings infeasible</p>':''}
+    ${settings.capacity_feasible===null?'<p class="muted">Tank capacity unknown · feasibility unverified</p>':''}
+    ${settings.additional_stop_required?'<p class="strategy-danger">ADDITIONAL STOP REQUIRED</p>':''}</div>` : '';
+  return `<p class="${tone}"><strong>${esc(statuses[d.status] || 'Resource strategy unavailable')}</strong></p>
+    <div class="resource-grid">${(d.resources || []).map(r=>`<article><h3>${r.resource_kind==='fuel'?'Fuel':ve?'Virtual Energy':'Energy'} ${d.limiting_resource===r.resource_kind?'<span class="strategy-attention">LIMIT</span>':''}</h3>
+    <strong>${amount(r.resource_kind,r.current)}</strong> · ${amount(r.resource_kind,r.consumption_per_lap)}/lap
+    <p>${r.available?fuelNumber(r.range_laps,' laps',1):'—'} · ${esc(r.sample_count)} samples${r.fresh?'':' · stale / unavailable'}</p></article>`).join('')}</div>
+    <div class="resource-plan"><p>${finish.kind==='timed_estimate'?'Projected finish ≈':'Finish'} ${lap(finish.finish_lap)}</p>
+    <p>Latest resource-safe stop ${lap(d.latest_safe_stop_lap)}</p>
+    <p>Plan: ${esc(d.plan_source)} ${lap(d.planned_stop_lap)}</p><p>Reserve ${fuelNumber(d.reserve_laps,' lap',1)}${d.balanced?' · BALANCED':''}</p></div>
+    ${(d.at_pit||[]).length?`<p>At pit: ${d.at_pit.map(r=>`${label(r.resource_kind)} ≈ ${amount(r.resource_kind,r.amount)}`).join(' · ')}</p>`:''}
+    ${(d.shortfall||[]).map(r=>`<p class="strategy-danger">${label(r.resource_kind)} short by ${fuelNumber(r.laps,' laps',1)} (including reserve)</p>`).join('')}
+    ${instructions}
+    <details id="strategy-diagnostics"><summary id="strategy-toggle">Resource diagnostics / provider comparison</summary>
+    <p class="muted">Energy checkpoints are not verified clean laps. LMU current Fuel Ratio is unavailable. Timed finish is estimated.</p>
+    ${settings?.measured_fuel_ratio_l_per_percent_ve!==undefined?`<p>Measured LMU Fuel Ratio ${fuelNumber(settings.measured_fuel_ratio_l_per_percent_ve,' L / 1% VE',4)}</p>`:''}
+    ${d.diagnostics?.fuel?fuelWidget(d.diagnostics.fuel):''}</details>`;
+}
+
 const sessionId = __SESSION_ID__;
 const selector = document.querySelector('#focus');
 let focusId = null;
@@ -325,6 +395,27 @@ let latestData = null;
 let selectorOptions = '';
 let fuelRequest = 0;
 let fuelParticipant = null;
+const planStorage = typeof localStorage==='undefined'?null:localStorage;
+function updatePlanControl() {
+  const input=document.querySelector('#planned-stop');
+  if(input) { input.value=readPlan(planStorage,sessionId,focusId) ?? ''; input.disabled=!focusId; }
+}
+document.querySelector('#plan-form')?.addEventListener?.('submit',event=>{
+  event.preventDefault();
+  const value=Number(document.querySelector('#planned-stop').value);
+  const completed=participantById(latestData?.participants||[],focusId)?.total_laps;
+  const feedback=document.querySelector('#plan-feedback');
+  if(!Number.isSafeInteger(value)||!Number.isSafeInteger(completed)||value<=completed) {
+    feedback.textContent='Enter an integer lap later than completed laps.'; return;
+  }
+  if(!savePlan(planStorage,sessionId,focusId,value)) { feedback.textContent='Local storage unavailable; plan not saved.'; return; }
+  feedback.textContent='Local plan saved'; void refreshFuel();
+});
+document.querySelector('#plan-auto')?.addEventListener?.('click',()=>{
+  const saved=savePlan(planStorage,sessionId,focusId,null);
+  document.querySelector('#plan-feedback').textContent=saved?'Automatic plan':'Local storage unavailable';
+  updatePlanControl(); void refreshFuel();
+});
 async function refreshFuel() {
   const request = ++fuelRequest;
   const participant = focusId;
@@ -332,19 +423,26 @@ async function refreshFuel() {
   if (!participant) {
     fuelParticipant = null;
     root.textContent = 'Choose a participant to inspect fuel data.';
+    updatePlanControl();
     return;
   }
-  if (fuelParticipant !== participant) root.textContent = 'Loading fuel data…';
+  if (fuelParticipant !== participant) { root.textContent = 'Loading resource data…'; updatePlanControl(); }
   fuelParticipant = participant;
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(participant)}/fuel`, {cache:'no-store'});
+    const plan=readPlan(planStorage,sessionId,participant);
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(participant)}/strategy${plan===null?'':`?planned_stop_lap=${plan}`}`, {cache:'no-store'});
     if (!response.ok) throw new Error('Fuel data unavailable. Retrying…');
     const data = await response.json();
     if (request !== fuelRequest || focusId !== participant) return;
     if (data.participant_id !== participant || data.session_id !== sessionId) throw new Error('Fuel data unavailable. Retrying…');
     const open = document.querySelector('#fuel-diagnostics')?.open || false;
     const focused = document.activeElement?.id === 'fuel-toggle';
-    root.innerHTML = fuelWidget(data);
+    const strategyOpen=document.querySelector('#strategy-diagnostics')?.open || false;
+    const strategyFocused=document.activeElement?.id==='strategy-toggle';
+    root.innerHTML = strategyWidget(data);
+    const strategyDetails=document.querySelector('#strategy-diagnostics');
+    if(strategyDetails) strategyDetails.open=strategyOpen;
+    if(strategyFocused) document.querySelector('#strategy-toggle')?.focus({preventScroll:true});
     const details = document.querySelector('#fuel-diagnostics');
     if (details) details.open = open;
     if (focused) document.querySelector('#fuel-toggle')?.focus({preventScroll:true});
