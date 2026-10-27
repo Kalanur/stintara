@@ -1,7 +1,16 @@
 """Stintara transport contracts, independent of provider wire classes."""
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, FiniteFloat
+from pydantic import BaseModel, BeforeValidator, Field, FiniteFloat, StrictBool
+
+
+def numeric_only(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("expected numeric fraction")
+    return value
+
+
+Fraction = Annotated[FiniteFloat, Field(ge=0, le=1), BeforeValidator(numeric_only)]
 
 
 class Wheel(BaseModel):
@@ -31,6 +40,7 @@ class SessionInfo(BaseModel):
 
 
 class Vehicle(BaseModel):
+    energy_current_fraction: Fraction | None = None
     id: int = Field(ge=0)
     driver_name: str = Field(default="Unknown", max_length=512)
     team_name: str | None = None
@@ -77,6 +87,9 @@ class LapSnapshots(BaseModel):
 
 
 class Telemetry(BaseModel):
+    energy_available: StrictBool | None = None
+    energy_kind: Literal["NONE", "VIRTUAL_ENERGY", "HYBRID", "ERS"] | None = None
+    energy_history: list[Fraction | None] = Field(default_factory=list, max_length=512)
     current_et: FiniteFloat | None = None
     speed_ms: FiniteFloat | None = None
     rpm: FiniteFloat | None = None

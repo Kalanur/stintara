@@ -178,6 +178,11 @@ CREATE INDEX IF NOT EXISTS ix_strategy_samples_participant_time
 
 -- Additive compatibility changes for existing V0.1 databases.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS weather jsonb NOT NULL DEFAULT '{}';
+-- Optional provider-normalized energy context on the existing 1 Hz sample.
+ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS energy_current_fraction double precision;
+ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS energy_available boolean;
+ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS energy_kind text;
+ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS energy_history jsonb;
 ALTER TABLE session_observations ADD COLUMN IF NOT EXISTS last_seen_at timestamptz NOT NULL DEFAULT now();
 ALTER TABLE session_observations ADD COLUMN IF NOT EXISTS last_session_time double precision;
 ALTER TABLE laps ADD COLUMN IF NOT EXISTS tyre_snapshot jsonb;

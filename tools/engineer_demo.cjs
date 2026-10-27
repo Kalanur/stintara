@@ -26,7 +26,20 @@ function engineerDemo() {
       forecast:{timeline_complete:true,nodes:Array.from({length:5},(_,i)=>({position_percent:i*25,
         temperature_c:24+i,rain_chance:i*.05,humidity_percent:50,wind_direction:'NE',wind_speed_mps:3}))},
     }};
-  return {focus:id(3),data:{live:true,session,participants,timing:{configured_minutes:80,elapsed_seconds:2880}},
+  const strategy={session_id:session.id,participant_id:id(3),simulator_provider:'lmu',status:'stop_required',
+    completed_laps:28,finish_projection:{kind:'exact',finish_lap:38},reserve_laps:1,plan_source:'manual',
+    resources:[{resource_kind:'fuel',current:70,capacity:100,consumption_per_lap:8.6,range_laps:70/8.6,
+      fresh:true,available:true,sample_count:5,units:'L',pit_service_mode:'TARGET_LEVEL'},
+      {resource_kind:'energy',energy_kind:'VIRTUAL_ENERGY',current:.63,capacity:1,consumption_per_lap:.102,
+        range_laps:.63/.102,fresh:true,available:true,sample_count:5,units:'fraction',pit_service_mode:'TARGET_LEVEL'}],
+    limiting_resource:'energy',effective_range_laps:.63/.102,latest_safe_stop_lap:33,planned_stop_lap:32,
+    planned_stop_safe:true,shortfall:[],additional_stop_required:false,
+    at_pit:[{resource_kind:'fuel',amount:35.6},{resource_kind:'energy',amount:.222}],
+    next_stint_requirements:[{resource_kind:'fuel',amount:60.2},{resource_kind:'energy',amount:.714}],
+    provider_pit_settings:{provider:'lmu',fuel_service_mode:'TARGET_LEVEL',energy_kind:'VIRTUAL_ENERGY',
+      ve_target_percent:72,measured_fuel_ratio_l_per_percent_ve:8.6/10.2,fuel_ratio_l_per_percent_ve:.85,
+      resulting_fuel_target_l:61.2,projected_fuel_out_l:61.2,expected_fuel_added_l:25.6,capacity_feasible:true,additional_stop_required:false}};
+  return {strategy,focus:id(3),data:{live:true,session,participants,timing:{configured_laps:38,elapsed_seconds:2880}},
     fuel:{session_id:session.id,participant_id:id(3),
       estimate:{status:'ready',consumption_l_per_lap:2.8,sample_count:5,estimated_range_laps:15},
       current:{fresh:true,fuel_l:42,capacity_l:100,recorded_at:epoch},provider:{},samples:[]}};
@@ -45,9 +58,11 @@ async function screenshot(channel) {
   const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
   try {
     const page=await browser.newPage({viewport:{width:1920,height:1080},reducedMotion:'reduce'});
-    await page.addInitScript(value=>{Date.now=()=>Date.parse(value);},epoch);
+    await page.addInitScript(({epoch,sid,pid})=>{Date.now=()=>Date.parse(epoch);
+      localStorage.setItem(`stintara:strategy:v1:${sid}:${pid}`,'32');
+    },{epoch,sid:demo.data.session.id,pid:demo.focus});
     await page.route('**/*',route=>route.fulfill(route.request().url().includes('/api/') ?
-      {json:route.request().url().endsWith('/fuel')?demo.fuel:demo.data} : {contentType:'text/html',body:html}));
+      {json:route.request().url().includes('/strategy')?demo.strategy:demo.data} : {contentType:'text/html',body:html}));
     await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
     await page.locator('#fuel strong').first().waitFor();
     for (const [width,height] of [[1920,1080],[900,900]]) {
@@ -57,7 +72,7 @@ async function screenshot(channel) {
       assert.equal(dimensions.rows,40);
       assert.ok(dimensions.width<=width);
       if(width===1920) assert.ok(dimensions.height<=height);
-      const file=path.join(output,`engineer-pit-finish-${width}.png`);
+      const file=path.join(output,`engineer-resource-strategy-${width}.png`);
       await page.screenshot({path:file,fullPage:true});
       console.log(JSON.stringify({file,...dimensions}));
     }
