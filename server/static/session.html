@@ -238,7 +238,7 @@ function pitBadge(value) {
   return value === true ? '<span class="badge pit">PIT</span>' : value === false ? '<span class="badge track">TRACK</span>' : '—';
 }
 function participantStatus(p, focused=false) {
-  const finish = {1:['FIN','finished'],2:['DNF','retired'],3:['DQ','disqualified']};
+  const finish = {1:['FIN','finished'],2:['DNF','retired'],3:['DSQ','disqualified']};
   if (Number.isInteger(p.finish_status) && finish[p.finish_status]) {
     const [label,style] = finish[p.finish_status];
     return `<span class="badge ${style}">${label}</span>`;

@@ -630,14 +630,14 @@ test('pit and finish states take precedence without contaminating timing columns
   const page=await sessionHarness(demo.data,`?focus=${demo.focus}`);
   const full=page.root.innerHTML.split('<h2>Full field</h2>')[1];
   assert.equal((full.match(/<tr class=/g)||[]).length,40);
-  for(const text of ['>Stops</th>','>Status</th>','1 · L12','2 · L27','>PIT</span>','>FIN</span>','>DNF</span>','>DQ</span>']) assert.ok(full.includes(text),text);
+  for(const text of ['>Stops</th>','>Status</th>','1 · L12','2 · L27','>PIT</span>','>FIN</span>','>DNF</span>','>DSQ</span>']) assert.ok(full.includes(text),text);
   assert.equal((full.match(/>PIT<\/span>/g)||[]).length,1); // Finish overrides contradictory pit occupancy.
   assert.doesNotMatch(full,/TRACK/);
   assert.match(page.root.innerHTML,/1 stop · Last stop L12/);
   const rows=full.match(/<tr class=[\s\S]*?<\/tr>/g);
   for(const row of rows) {
     const cells=Array.from(row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g),m=>m[1]);
-    assert.doesNotMatch(cells[5]+cells[6],/FIN|DNF|DQ|PIT/); // Single-class Gap / Interval.
+    assert.doesNotMatch(cells[5]+cells[6],/FIN|DNF|DSQ|PIT/); // Single-class Gap / Interval.
   }
   page.change(demo.data.participants[5].id);
   assert.match(page.root.innerHTML.split('aria-label="Focus status"')[1].split('</p>')[0],/>DNF<\/span>/);
