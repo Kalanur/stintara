@@ -455,14 +455,57 @@ function syntheticWeather() {
       temperature_c:24+i,rain_chance:0,humidity_percent:50,wind_direction:'NE',wind_speed_mps:2}))}};
 }
 
+test('surface moisture thresholds are generic, finite fractions only', () => {
+  const h=helpers();
+  for (const [value,state] of [[0,'DRY'],[.01999,'DRY'],[.02,'DAMP'],[.18,'DAMP'],[.3999,'DAMP'],[.4,'WET'],[1,'WET']]) {
+    assert.equal(h.surfaceMoisture(value),state);
+  }
+  for (const value of [undefined,null,true,false,'0.1','<img>',NaN,Infinity,-Infinity,-.01,1.01,{}]) {
+    assert.equal(h.surfaceMoisture(value),'—');
+  }
+});
+
+test('engineer weather keeps current intensity separate from compact forecast probability and details', () => {
+  const weather=syntheticWeather(), h=helpers();
+  weather.current.rain_intensity=.08;
+  weather.forecast.nodes[4].rain_chance=.6;
+  const html=h.engineerWeather(weather,true);
+  assert.match(html,/Surface<\/span><strong>DAMP/);
+  assert.match(html,/Rain: <\/span><strong>8 %/);
+  assert.match(html,/Forecast · temperature \/ rain chance/);
+  assert.match(html,/rain-chance">60 %/);
+  assert.equal((html.match(/<li>/g)||[]).length,5);
+  for (const label of ['Start','25 %','50 %','75 %','Finish']) assert.ok(html.includes(`<strong>${label}</strong>`));
+  const details=html.split('<details id="weather-details">')[1];
+  for (const text of ['Weather details','Cloudiness: 25 %','Wind: 3.0 m/s','Humidity: 50.0 %','NE 2.0 m/s','Track wetness min / max: 0 % / 20 %']) assert.ok(details.includes(text),text);
+  assert.doesNotMatch(html,/SLIPPERY|RealRoad|grip|WETTING|DRYING|<details[^>]* open/i);
+  assert.match(html,/Current conditions/);
+  assert.match(h.engineerWeather(weather,false),/Last stored conditions/);
+});
+
+test('engineer weather preserves incomplete source order and rejects malformed presentation values', () => {
+  const h=helpers();
+  for (const complete of [false,true]) {
+    const html=h.engineerWeather({current:{wetness_avg:'<img>',air_temp_c:Infinity,rain_intensity:true},
+      forecast:{timeline_complete:complete,nodes:[{temperature_c:19,position_percent:0},{temperature_c:27,position_percent:100},null,'<script>']}},false);
+    assert.match(html,/Forecast 1[\s\S]*19.0 °C[\s\S]*Forecast 2[\s\S]*27.0 °C/);
+    assert.match(html,/timeline positions unavailable/);
+    assert.doesNotMatch(html,/<strong>(Start|25 %|50 %|75 %|Finish)<\/strong>|NaN|Infinity|undefined|<img|<script/);
+    assert.match(html,/Surface<\/span><strong>—/);
+  }
+  for (const weather of [null,{}, {forecast:{nodes:'<img>'}}]) {
+    assert.match(h.engineerWeather(weather,false),/Forecast unavailable/);
+  }
+});
+
 test('both weather views format current and forecast units; stale session labels last stored', async () => {
   const weather=syntheticWeather();
   for (const file of ['session.html','live.html']) {
     const data={...sessionData([]),driver:{display_name:'Synthetic Driver'}}; data.session.weather=weather;
-    const html=(await render(file,data)).innerHTML;
+    const html=(await render(file,data)).innerHTML.replace(/<[^>]*>/g,'');
     for (const text of ['Current conditions','Air: 24.0 °C','Track: 41.0 °C','Rain: 0 %',
       'Track wetness: 10 %','Cloudiness: 25 %','Wind: 3.0 m/s','Start','25 %','50 %','75 %','Finish','Humidity: 50.0 %','NE 2.0 m/s']) assert.ok(html.includes(text),text);
-    assert.equal((html.match(/<li>/g)||[]).length,5);
+    assert.equal(((await render(file,data)).innerHTML.match(/<li>/g)||[]).length,5);
   }
   const data=sessionData([]); data.live=false; data.session.weather=weather;
   const html=(await render('session.html',data)).innerHTML;

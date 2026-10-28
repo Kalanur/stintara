@@ -22,9 +22,9 @@ function engineerDemo() {
   Object.assign(participants[7],{pitstops:1}); // Joined after the first stop; lap unknown.
   const session = {id:id(99),track_name:'Synthetic Circuit',session_type:'Race',simulator_provider:'lmu',
     last_seen_at:epoch,started_at:epoch,weather:{
-      current:{air_temp_c:24,track_temp_c:41,rain_intensity:0,wetness_avg:0,cloudiness:.25,wind_speed_mps:3},
+      current:{air_temp_c:21,track_temp_c:29,rain_intensity:.03,wetness_avg:.18,wetness_min:.1,wetness_max:.24,cloudiness:.45,wind_speed_mps:3},
       forecast:{timeline_complete:true,nodes:Array.from({length:5},(_,i)=>({position_percent:i*25,
-        temperature_c:24+i,rain_chance:i*.05,humidity_percent:50,wind_direction:'NE',wind_speed_mps:3}))},
+        temperature_c:21+i,rain_chance:[0,.05,.1,.35,.6][i],humidity_percent:50,wind_direction:'NE',wind_speed_mps:3}))},
     }};
   const strategy={session_id:session.id,participant_id:id(3),simulator_provider:'lmu',status:'stop_required',
     completed_laps:28,finish_projection:{kind:'exact',finish_lap:38},reserve_laps:1,plan_source:'manual',
@@ -65,14 +65,33 @@ async function screenshot(channel) {
       {json:route.request().url().includes('/strategy')?demo.strategy:demo.data} : {contentType:'text/html',body:html}));
     await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
     await page.locator('#fuel strong').first().waitFor();
+    // Verify the real DOM disclosure/focus survives a polling replacement.
+    await page.locator('#weather-toggle').click();
+    await page.evaluate(()=>{window.previousWeatherDetails=document.querySelector('#weather-details');});
+    await page.waitForFunction(()=>!window.previousWeatherDetails.isConnected);
+    assert.equal(await page.locator('#weather-details').evaluate(el=>el.open),true);
+    assert.equal(await page.evaluate(()=>document.activeElement.id),'weather-toggle');
+    await page.locator('#weather-toggle').click();
     for (const [width,height] of [[1920,1080],[900,900]]) {
       await page.setViewportSize({width,height});
       const dimensions=await page.evaluate(()=>({width:document.documentElement.scrollWidth,
         height:document.documentElement.scrollHeight,rows:document.querySelectorAll('#full-scroll tbody tr').length}));
       assert.equal(dimensions.rows,40);
       assert.ok(dimensions.width<=width);
-      if(width===1920) assert.ok(dimensions.height<=height);
-      const file=path.join(output,`engineer-resource-strategy-${width}.png`);
+      if(width===1920) {
+        assert.ok(dimensions.height<=height);
+        const panels=await page.evaluate(()=>{
+          const weather=document.querySelector('#weather-panel'), field=document.querySelector('#full-scroll');
+          return {weatherHeight:weather.clientHeight,weatherContent:weather.scrollHeight,
+            fieldHeight:field.clientHeight,fieldContent:field.scrollHeight,
+            mapHeight:document.querySelector('.map-panel').clientHeight};
+        });
+        assert.ok(panels.weatherHeight<210,'Weather recovers vertical space');
+        assert.ok(panels.weatherContent<=panels.weatherHeight,'Collapsed weather fits without internal scrolling');
+        assert.ok(panels.fieldContent>panels.fieldHeight,'Full Field scrolls internally');
+        assert.ok(panels.mapHeight>=100,'Map retains useful room');
+      }
+      const file=path.join(output,`engineer-mfd-weather-${width}.png`);
       await page.screenshot({path:file,fullPage:true});
       console.log(JSON.stringify({file,...dimensions}));
     }
