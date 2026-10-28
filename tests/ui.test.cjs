@@ -97,7 +97,10 @@ test('spectator renders full synthetic field, unknown gaps, escaping and offline
   assert.match(root.innerHTML, /\/drivers\/test\/live/);
   assert.match(root.innerHTML, /<td>60<\/td>/);
   assert.match(root.innerHTML, /PIT/);
-  assert.doesNotMatch(root.innerHTML, /<Driver>|<GT3>|-2|3 s/);
+  assert.doesNotMatch(root.innerHTML, /<Driver>|<GT3>/);
+  const timing=helpers();
+  assert.equal(timing.gapText(participants[0],true),'—');
+  assert.equal(timing.intervalText(participants[0],true),'—');
   assert.match((await render('session.html', {...data,live:false})).innerHTML, /No live scoring/);
   assert.match((await render('session.html', {...data,participants:[]})).innerHTML, /No participants/);
   assert.match((await render('session.html', null,false,404)).textContent, /Session not found/);
