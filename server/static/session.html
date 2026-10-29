@@ -109,11 +109,27 @@ summary{cursor:pointer;color:var(--muted)}
 .comparison-note{font-size:12px;color:var(--muted)}
 footer{font-size:11px;color:var(--muted);text-align:right;padding-top:4px;overflow-wrap:anywhere}
 
-@media(min-width:1200px) and (min-height:850px){body{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
+@media(min-width:1200px) and (min-height:951px),(min-width:1800px) and (min-height:800px){body{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
 .dashboard{height:100%;overflow:hidden}
 }
 
-@media(max-width:1199px),(max-height:849px){.dashboard{grid-template-columns:minmax(0,1fr);grid-template-rows:none}
+/* Compact desktop uses available CSS viewport height, not monitor dimensions. */
+@media(min-width:1800px) and (min-height:800px) and (max-height:950px){
+body{padding-top:8px}
+.toolbar{padding-bottom:6px}
+.dashboard{gap:8px}
+.panel,.session-header{padding-top:8px;padding-bottom:8px}
+.standings-panel{padding:0}
+.panel-heading{padding:8px 12px}
+.session-header p{margin:3px 0}
+.focus-status{margin:3px 0;gap:4px 12px}
+.sector-context{margin-top:4px}
+.fuel-panel{max-height:clamp(180px,calc(100dvh - 580px),350px)}
+.resource-grid{margin:4px 0;gap:6px}
+.plan-control{margin:4px 0}
+}
+
+@media(max-width:1199px),(max-height:799px),(max-width:1799px) and (max-height:950px){.dashboard{grid-template-columns:minmax(0,1fr);grid-template-rows:none}
 .dashboard #root>*,.dashboard>.fuel-panel{grid-column:1;grid-row:auto}
 .session-header{flex-wrap:wrap}
 .standings-panel{max-height:65vh}

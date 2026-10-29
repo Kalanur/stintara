@@ -72,26 +72,39 @@ async function screenshot(channel) {
     assert.equal(await page.locator('#weather-details').evaluate(el=>el.open),true);
     assert.equal(await page.evaluate(()=>document.activeElement.id),'weather-toggle');
     await page.locator('#weather-toggle').click();
-    for (const [width,height] of [[1920,1080],[900,900]]) {
+    for (const [width,height] of [[1920,1080],[1920,900],[1920,800],[2560,1300],[900,900],[1920,799],[1200,760],[1600,760],[1800,800]]) {
       await page.setViewportSize({width,height});
       const dimensions=await page.evaluate(()=>({width:document.documentElement.scrollWidth,
-        height:document.documentElement.scrollHeight,rows:document.querySelectorAll('#full-scroll tbody tr').length}));
+        height:document.documentElement.scrollHeight,rows:document.querySelectorAll('#full-scroll tbody tr').length,
+        visibleRows:[...document.querySelectorAll('#full-scroll tbody tr')].filter(row=>{
+          const r=row.getBoundingClientRect(),f=document.querySelector('#full-scroll').getBoundingClientRect();
+          const header=document.querySelector('#full-scroll thead').getBoundingClientRect();
+          return r.top>=Math.max(f.top,header.bottom) && r.bottom<=f.bottom;
+        }).length}));
       assert.equal(dimensions.rows,40);
       assert.ok(dimensions.width<=width);
-      if(width===1920) {
+      if((width>=1200 && height>=951) || (width>=1800 && height>=800)) {
         assert.ok(dimensions.height<=height);
         const panels=await page.evaluate(()=>{
           const weather=document.querySelector('#weather-panel'), field=document.querySelector('#full-scroll');
           return {weatherHeight:weather.clientHeight,weatherContent:weather.scrollHeight,
             fieldHeight:field.clientHeight,fieldContent:field.scrollHeight,
-            mapHeight:document.querySelector('.map-panel').clientHeight};
+            mapHeight:document.querySelector('.map-panel').getBoundingClientRect().height,
+            strategyHeight:document.querySelector('.fuel-panel').clientHeight,
+            strategyBottom:document.querySelector('.fuel-panel').getBoundingClientRect().bottom,
+            weatherBottom:weather.getBoundingClientRect().bottom};
         });
         assert.ok(panels.weatherHeight<210,'Weather recovers vertical space');
-        assert.ok(panels.weatherContent<=panels.weatherHeight,'Collapsed weather fits without internal scrolling');
+        assert.ok(panels.weatherContent<=panels.weatherHeight && panels.weatherBottom<=height,'Collapsed weather fits without internal scrolling or clipping');
         assert.ok(panels.fieldContent>panels.fieldHeight,'Full Field scrolls internally');
         assert.ok(panels.mapHeight>=100,'Map retains useful room');
+        assert.ok(panels.strategyHeight>=178 && panels.strategyBottom<=height,JSON.stringify(panels));
+      } else {
+        assert.ok(dimensions.height>height,'Stacked fallback permits page scrolling');
+        assert.equal(await page.locator('.fuel-panel').evaluate(el=>el.scrollHeight<=el.clientHeight),true);
       }
-      const file=path.join(output,`engineer-mfd-weather-${width}.png`);
+      const suffix=(width===1920 && height===1080) || width===900 ? width : `${width}x${height}`;
+      const file=path.join(output,`engineer-mfd-weather-${suffix}.png`);
       await page.screenshot({path:file,fullPage:true});
       console.log(JSON.stringify({file,...dimensions}));
     }

@@ -681,6 +681,17 @@ test('dashboard source bounds desktop panels, keeps build identity and supports 
   assert.match(html,/<label for="focus">Focus participant<\/label>/);
 });
 
+test('desktop height modes use CSS viewport bounds without shrinking primary text', () => {
+  const html=readFileSync(path.join(__dirname,'../server/static/session.html'),'utf8');
+  const css=html.match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.ok(css.includes('@media(min-width:1200px) and (min-height:951px),(min-width:1800px) and (min-height:800px)'));
+  const compact=css.split('/* Compact desktop')[1].split('@media(max-width:1199px)')[0];
+  assert.match(compact,/max-height:950px/);
+  assert.match(compact,/max-height:clamp\(180px,calc\(100dvh - 580px\),350px\)/);
+  assert.doesNotMatch(compact,/font-size|display:none/);
+  assert.ok(css.includes('@media(max-width:1199px),(max-height:799px),(max-width:1799px) and (max-height:950px)'));
+});
+
 test('pit and finish states take precedence without contaminating timing columns', async () => {
   const {engineerDemo}=require('../tools/engineer_demo.cjs');
   const demo=engineerDemo();
