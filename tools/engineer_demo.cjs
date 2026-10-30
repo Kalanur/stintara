@@ -103,6 +103,23 @@ async function screenshot(channel) {
         assert.ok(dimensions.height>height,'Stacked fallback permits page scrolling');
         assert.equal(await page.locator('.fuel-panel').evaluate(el=>el.scrollHeight<=el.clientHeight),true);
       }
+      const pitSettings=await page.evaluate(()=>{
+        const el=document.querySelector('.resource-settings');
+        const panel=el.closest('.fuel-panel'), box=el.getBoundingClientRect(), bounds=panel.getBoundingClientRect();
+        const controls=document.querySelector('.plan-control').getBoundingClientRect();
+        return {position:getComputedStyle(el).position,text:el.textContent,scrollTop:panel.scrollTop,
+          inside:box.top>=bounds.top+panel.clientTop && box.bottom<=bounds.top+panel.clientTop+panel.clientHeight &&
+            box.left>=bounds.left+panel.clientLeft && box.right<=bounds.left+panel.clientLeft+panel.clientWidth,
+          clearOfControls:box.top>=controls.bottom,noHorizontalScroll:panel.scrollWidth<=panel.clientWidth};
+      });
+      if(width>=1800 && height>=800 && height<=950) {
+        assert.equal(pitSettings.scrollTop,0,'Pit settings visible at initial Strategy scroll position');
+        assert.equal(pitSettings.inside,true,'Entire pit settings block inside visible Strategy viewport');
+        assert.equal(pitSettings.clearOfControls,true,'Pit settings do not overlap plan controls');
+        assert.match(pitSettings.text,/SET VE TO 72%/);
+        assert.match(pitSettings.text,/FUEL RATIO 0.85/);
+        assert.equal(pitSettings.noHorizontalScroll,true);
+      } else assert.notEqual(pitSettings.position,'sticky','No sticky settings outside compact desktop');
       const suffix=(width===1920 && height===1080) || width===900 ? width : `${width}x${height}`;
       const file=path.join(output,`engineer-mfd-weather-${suffix}.png`);
       await page.screenshot({path:file,fullPage:true});
