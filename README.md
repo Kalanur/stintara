@@ -79,14 +79,34 @@ python -m pytest -q
 node --test tests/ui.test.cjs
 ```
 
-Without `TEST_DATABASE_URL`, PostgreSQL-dependent tests are explicitly skipped. For the full suite, point it at a dedicated local PostgreSQL 17 test database:
+Without `TEST_DATABASE_URL`, PostgreSQL-dependent tests are explicitly skipped. When Docker is available, use the complete local suite instead:
 
 ```powershell
-$env:TEST_DATABASE_URL = 'postgresql://TEST_USER:TEST_PASSWORD@127.0.0.1:5432/stintara_tests'
-python -m pytest -q
+.\tools\test.ps1
+# Optional explicit interpreter; defaults to .venv/Scripts/python.exe, then python:
+.\tools\test.ps1 -Python .\.venv\Scripts\python.exe
 ```
 
-Replace the placeholders with local test credentials. Tests create and remove their own temporary schemas; never use a production database for tests. The suite includes an actual WebSocket agent/server test using a simulated Pitwall source, not a live LMU session. CI runs the database suite with a dedicated PostgreSQL service.
+Requires Docker running Linux containers and Compose v2 with `up --wait`. The runner validates the dedicated `docker-compose.test.yml`, starts only PostgreSQL 17 under project **stintara-tests**, waits up to 90 seconds for health, runs `python -m pytest -q` from the repository root, and executes `down --volumes` in `finally`, including after failed startup/tests. Pytest's exit code is preserved; cleanup failure turns an otherwise successful run into failure. Existing test-project containers cause a refusal rather than disrupting another run; do not run this fixed-port project concurrently. A forced process termination/power loss cannot execute `finally`; use the manual teardown below if necessary.
+
+The DB is `stintara_tests`, user `stintara_test`, password `local-test-only`. These are **public, non-secret disposable local test credentials**, never deployment credentials. Port 55432 binds exclusively to `127.0.0.1`. PostgreSQL data lives in container tmpfs; no application service, production directories or persistent volumes are used. The dedicated Compose project gets its own network. All data is generated synthetically by tests. DB fixtures create fresh random schemas, apply the current schema and drop them afterwards. No production/shared DB, real capture, or anonymized database dump is needed or permitted.
+
+If `TEST_DATABASE_URL` already exists, the runner refuses to use or silently replace it. Pass `-UseLocalDocker` to explicitly select this disposable container; the original process value is restored afterwards. User/machine environment settings are never modified. For an explicitly verified isolated database of your own, run pytest directly instead.
+
+Manual equivalent (in a dedicated development shell):
+
+```powershell
+docker compose --project-name stintara-tests -f docker-compose.test.yml up -d --wait --wait-timeout 90
+# Only this disposable test container, never a deployment database:
+$env:TEST_DATABASE_URL = 'postgresql://stintara_test:local-test-only@127.0.0.1:55432/stintara_tests'
+.\.venv\Scripts\python.exe -m pytest -q
+docker compose --project-name stintara-tests -f docker-compose.test.yml down --volumes
+# Check that no test containers/volumes remain:
+docker ps -a --filter label=com.docker.compose.project=stintara-tests
+docker volume ls --filter label=com.docker.compose.project=stintara-tests
+```
+
+Always perform the manual teardown even if pytest fails. Closing that dedicated shell discards its environment override. The suite includes an actual WebSocket agent/server test using a simulated Pitwall source, not a live LMU session. CI remains unchanged and runs its own PostgreSQL 17 service. `tools/test-runner.tests.ps1` exercises runner exit codes, cleanup and environment restoration with mock commands; it does not replace a real Docker/DB run.
 
 ## Local Docker Compose
 
