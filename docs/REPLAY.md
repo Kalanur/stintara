@@ -87,3 +87,22 @@ No real recording has been performed for this iteration.
 6. For a permanent public regression, separately author a wholly synthetic minimal scenario. Never copy a real-derived capture into the public fixture directory.
 
 Validate parallel recorder/agent operation, full-session capture, sanitizer/audit completeness, 1× wire replay, accelerated compiled replay, pitstop/fuel, finish, negative gap, session transition and disconnect/reconnect on real LMU later. Synthetic scenarios prove no real gap/finish/pit timing, fuel checkpoint timing, lap validity or actual provider frequency. Issues #6/#9/#10, convergence, Fuel-to-Finish, Trackmap, RaceControl and livestream remain untouched.
+
+## Streaming capture inspector
+
+Inspect a private v1 wire capture directly, including files too large for replay compilation:
+
+```powershell
+python -m tools.replay.inspect data/captures/example.jsonl --output data/reports/example.json
+```
+
+Without `--output` the CLI prints only the summary. The optional exclusive-create JSON report uses format `capture-report-v1`. Keep raw captures and real-derived reports private under ignored `data/`; the CLI enforces this output boundary for real/sanitized-real headers. A report can contain raw field names, codes, local slots, coordinates and timing examples. Only wholly synthetic fixtures belong in Git.
+
+`tools.replay.inspector.inspect_stream(binary_stream)` returns the same dictionary without CLI or server dependencies. It reads one physical line at a time with a 32 MiB ceiling (including newline), drains oversized lines in chunks, requires a valid capture header and skips malformed message records. Physical line counts include the header; valid/invalid record counts exclude it. Rates average valid messages over last minus first capture time, with unknown rates for zero duration. No timestamp list or whole-file read is needed.
+
+The report retains up to 128 distinct type names plus overflow, 256 diagnostic field paths, 16 example values per field, 256 source/slot comparison contexts, 256 latest driver snapshots, and the first 12 examples per event category. Counts continue after example limits. Field discovery inspects nested containers to depth four and bounds field names and scalar/list examples. Limits and truncation markers indicate incomplete detail. Retained memory depends on these limits and the maximum decoded record, independent of file length.
+
+- VE availability, history entries (including a separate tail summary), electronics and per-vehicle scoring values are reported separately in raw units. Ranges can span different cars or segments. Increases are diagnostic candidates, not confirmed refills. Player-associated lap advances can include latest local VE samples with their own capture timestamps; check sample age before correlating.
+- Slot comparisons use source and integer local vehicle ID. Track/type changes delimit observed segments. Missing metadata cannot establish session identity. Disconnects and backwards source clocks discard comparison state. Rollbacks identify both segments where available; they do not establish a new official race.
+- A spatial step over 100 raw XYZ units is a diagnostic example. Sampling gaps or missing cars can cause large steps. A distance decrease paired with a lap advance is reported separately from a candidate crossing from the last 10% to the first 10% of known track length. Inspect the before/after samples for missing geometry. No interpolation or line closing the track is generated.
+- Sector/timing values, flag codes and explicit validity/cut/off-track fields remain observations. The inspector records pit state/counter changes with raw lap, session time and the latest available AllDrivers sample for that slot. A raw snapshot does not prove what was committed to a database. There is no inferred lap invalidity, grip state or strategy recommendation.
