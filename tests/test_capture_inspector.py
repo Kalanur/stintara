@@ -6,7 +6,14 @@ import pytest
 
 from tools.replay.format import FormatError, header
 from tools.replay.inspect import inspect
-from tools.replay.inspector import EXAMPLE_LIMIT, FIELD_LIMIT, TYPE_LIMIT, inspect_stream
+from tools.replay.inspector import (
+    EXAMPLE_LIMIT,
+    FIELD_LIMIT,
+    PLAYER_LAP_LIMIT,
+    PLAYER_PIT_LIMIT,
+    TYPE_LIMIT,
+    inspect_stream,
+)
 
 
 def line(record):
@@ -91,6 +98,63 @@ def test_streaming_reader_recovers_at_next_physical_line():
     assert r["rates_hz"]["TelemetryUpdate"] is None
     with pytest.raises(FormatError):
         inspect_stream(io.BytesIO(b"not a header\n"))
+
+
+def scoring(t, player, *rows):
+    return message(t, "ScoringUpdate", session_time=t+10, player_vehicle_id=player, vehicles=list(rows))
+
+
+def test_player_correlates_only_observed_slot_and_timestamped_samples():
+    r = analyze(
+        scoring(1, 7, dict(id=7, total_laps=3, lap_dist=990, virtual_energy=.5, in_pits=False)),
+        message(2, "AllDriversUpdate", drivers=[dict(id=7, num_pitstops=1)]),
+        message(3, "ElectronicsUpdate", virtual_energy=.42),
+        message(4, "AllDriversUpdate", session_time=14, drivers=[
+            dict(id=7, num_pitstops=2, total_laps=3, driver_name="Synthetic private identity"),
+            dict(id=8, num_pitstops=9)]),
+        scoring(5, 7, dict(id=8, total_laps=10), dict(id=7, total_laps=4, lap_dist=2,
+                virtual_energy=.4, in_pits=True, team_name="Synthetic private identity")),
+    )["player"]
+    electronics = dict(t=3, age_s=2, value=.42)
+    assert r["lap_checkpoints"] == [dict(segment=1, player_vehicle_id=7, t=5, session_time=15,
+        before=dict(total_laps=3, lap_dist=990, virtual_energy=.5),
+        after=dict(total_laps=4, lap_dist=2, virtual_energy=.4), electronics_ve=electronics,
+        in_pits=True, num_pitstops=dict(t=4, value=2))]
+    count, pits = r["pit_transitions"]
+    assert count == dict(segment=1, player_vehicle_id=7, t=4, session_time=14,
+        source="AllDriversUpdate.drivers[]", field="num_pitstops", before=1, after=2,
+        total_laps=3, scoring_ve=.5, electronics_ve=dict(t=3, age_s=1, value=.42))
+    assert pits == dict(segment=1, player_vehicle_id=7, t=5, session_time=15,
+        source="ScoringUpdate.vehicles[]", field="in_pits", before=False, after=True,
+        total_laps=4, scoring_ve=.4, electronics_ve=electronics)
+    assert "Synthetic private identity" not in json.dumps(r)
+
+
+def test_player_switch_and_session_change_start_fresh_comparisons():
+    r = analyze(
+        message(0, "SessionInfo", track_name="Synthetic A"),
+        scoring(1, 1, dict(id=1, total_laps=3), dict(id=2, total_laps=2, in_pits=True)),
+        message(2, "ElectronicsUpdate", virtual_energy=.8),
+        message(3, "AllDriversUpdate", drivers=[dict(id=2, num_pitstops=2)]),
+        scoring(4, 2, dict(id=2, total_laps=5, in_pits=False)),
+        scoring(5, 2, dict(id=2, total_laps=6)),
+        message(6, "ElectronicsUpdate", virtual_energy=.2),
+        message(7, "AllDriversUpdate", drivers=[dict(id=2, num_pitstops=4)]),
+        message(8, "SessionInfo", track_name="Synthetic B"),
+        scoring(9, 2, dict(id=2, total_laps=8, in_pits=True)),
+        scoring(10, 2, dict(id=2, total_laps=9)),
+    )["player"]
+    assert r["pit_transitions"] == []
+    assert [(p["segment"], p["player_vehicle_id"], p["t"], p["electronics_ve"], p["num_pitstops"])
+            for p in r["lap_checkpoints"]] == [(1, 2, 5, None, None), (2, 2, 10, None, None)]
+
+
+def test_player_buckets_have_independent_capture_wide_limits():
+    n = PLAYER_LAP_LIMIT + 3
+    r = analyze(*(scoring(i, 1, dict(id=1, total_laps=i, in_pits=bool(i % 2))) for i in range(n+1)))
+    for bucket, cap in (("lap_checkpoints", PLAYER_LAP_LIMIT), ("pit_transitions", PLAYER_PIT_LIMIT)):
+        assert [p["t"] for p in r["player"][bucket]] == list(range(1, cap+1))
+        assert r["limits_hit"]["omitted_player_" + bucket] == n-cap
 
 
 def test_report_cardinality_is_bounded():

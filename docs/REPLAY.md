@@ -90,6 +90,17 @@ Validate parallel recorder/agent operation, full-session capture, sanitizer/audi
 
 ## Streaming capture inspector
 
+In the JSON report, `player.lap_checkpoints` retains the first 256 observed scoring lap advances
+for the slot identified by `ScoringUpdate.player_vehicle_id`. Each checkpoint pairs consecutive
+player scoring samples with the latest known Electronics VE and AllDrivers pit count. Their
+`t` values are capture times in seconds. Electronics `age_s` is measured at the observation.
+Unknown values are null. `player.pit_transitions` retains the first 64 observed changes of
+`in_pits` or `num_pitstops`, compared within each source. These raw changes do not establish
+pit service or refuelling. Changing player or resetting session comparisons clears the
+correlation state. Both caps apply across the capture, independently of general event examples.
+`limits_hit.omitted_player_lap_checkpoints` and `limits_hit.omitted_player_pit_transitions`
+count additional observations when the respective list fills.
+
 Inspect a private v1 wire capture directly, including files too large for replay compilation:
 
 ```powershell

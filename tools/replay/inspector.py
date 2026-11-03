@@ -11,6 +11,8 @@ TYPE_LIMIT = 128
 FIELD_LIMIT = 256
 SLOT_LIMIT = 256
 EXAMPLE_LIMIT = 12
+PLAYER_LAP_LIMIT = 256
+PLAYER_PIT_LIMIT = 64
 NAME_LIMIT = 96
 VALUE_LIMIT = 16
 MISSING = object()
@@ -78,15 +80,62 @@ class Inspector:
         self.clocks = {}
         self.session = {}
         self.segment = 1
+        self.player_report = {"lap_checkpoints": [], "pit_transitions": []}
         self.last_clock = {}
         self.reset_comparisons()
 
     def reset_comparisons(self):
         self.previous = {}
         self.latest_checkpoint = {}
-        self.player = None
-        self.local_ve = {}
+        self.reset_player(None)
         self.length = None
+
+    def reset_player(self, slot):
+        self.player = slot
+        self.local_ve = {}
+        self.player_scoring = {}
+        self.player_pit_values = {}
+        self.player_stops = None
+
+    def player_event(self, bucket, limit, point, **data):
+        records = self.player_report[bucket]
+        if len(records) >= limit:
+            self.limits["omitted_player_" + bucket] += 1
+            return
+        t = point["t"]
+        electronics = self.local_ve.get("electronics")
+        records.append(dict(segment=self.segment, player_vehicle_id=self.player, t=t,
+                            session_time=point["session_time"],
+                            electronics_ve=dict(t=electronics[0], age_s=t-electronics[0],
+                                                value=electronics[1]) if electronics else None,
+                            **data))
+
+    def player_sample(self, source, point):
+        scoring = source == "ScoringUpdate.vehicles[]"
+        previous = self.player_scoring
+        if scoring:
+            self.player_scoring = point
+            if ("total_laps" in previous and "total_laps" in point
+                    and point["total_laps"] > previous["total_laps"]):
+                keys = ("total_laps", "lap_dist", "virtual_energy")
+                self.player_event("lap_checkpoints", PLAYER_LAP_LIMIT, point,
+                                  before={k: previous.get(k) for k in keys},
+                                  after={k: point.get(k) for k in keys},
+                                  in_pits=point.get("in_pits"), num_pitstops=self.player_stops)
+        elif "num_pitstops" in point:
+            self.player_stops = dict(t=point["t"], value=point["num_pitstops"])
+        for field in ("in_pits", "num_pitstops"):
+            if field not in point:
+                continue
+            key = (source, field)
+            before = self.player_pit_values.get(key)
+            after = point[field]
+            if before is not None and before != after:
+                self.player_event("pit_transitions", PLAYER_PIT_LIMIT, point,
+                                  source=source, field=field, before=before, after=after,
+                                  total_laps=point.get("total_laps", self.player_scoring.get("total_laps")),
+                                  scoring_ve=self.player_scoring.get("virtual_energy"))
+            self.player_pit_values[key] = after
 
     def event(self, name, t, **data):
         bucket = self.events.setdefault(name, {"count": 0, "examples": []})
@@ -193,6 +242,8 @@ class Inspector:
         if type(row.get("in_pits")) is bool:
             point["in_pits"] = row["in_pits"]
         point.update(t=t, session_time=clock)
+        if self.player is not None and slot == self.player and source != "TelemetryUpdate":
+            self.player_sample(source, point)
         state["slot"] = slot
         for k in ("lap_dist", "pos_x", "pos_y", "pos_z"):
             measure(self.spatial.setdefault(source, {}).setdefault(k, {}), row.get(k, MISSING), t)
@@ -233,11 +284,12 @@ class Inspector:
             self.reset_comparisons()
             self.last_clock.clear()
         clock = m.get("session_time") if finite(m.get("session_time")) else None
-        if kind == "ScoringUpdate" and type(m.get("player_vehicle_id")) is int:
-            if self.player != m["player_vehicle_id"]:
-                self.local_ve.clear()
+        if kind == "ScoringUpdate" and "player_vehicle_id" in m:
+            slot = m["player_vehicle_id"]
+            slot = slot if type(slot) is int and slot >= 0 else None
+            if self.player != slot:
+                self.reset_player(slot)
                 self.previous.pop(("ElectronicsUpdate", None), None)
-            self.player = m["player_vehicle_id"]
         state = self.state(kind, None)
         if kind == "TelemetryUpdate":
             flag = m.get("ve_available", MISSING)
@@ -325,4 +377,4 @@ def inspect_stream(stream, *, line_limit=LINE_LIMIT):
                 types=dict(analysis.types), rates_hz={k: n / duration if duration and finite(n / duration)
                                                      else None for k, n in analysis.types.items()},
                 session_time=analysis.clocks, ve=analysis.ve, spatial=analysis.spatial, fields=analysis.fields,
-                events=analysis.events, limits_hit=dict(analysis.limits))
+                events=analysis.events, player=analysis.player_report, limits_hit=dict(analysis.limits))
