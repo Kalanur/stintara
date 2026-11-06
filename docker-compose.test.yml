@@ -1,0 +1,18 @@
+# Disposable synthetic tests only. These public credentials are NOT deployment secrets.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: stintara_tests
+      POSTGRES_USER: stintara_test
+      POSTGRES_PASSWORD: local-test-only
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stintara_test -d stintara_tests"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    # Compose creates an isolated project network; never join the application network.
