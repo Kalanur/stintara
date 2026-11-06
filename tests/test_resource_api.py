@@ -120,3 +120,50 @@ async def test_timed_pace_excludes_only_identified_pit_context(db):
         await conn.execute('UPDATE laps SET in_pits=true WHERE lap_number>=22 AND session_participant_id=$1', pid)
     p = await main.api_participant_strategy(sid, pid, 32)
     assert p['finish_projection']['kind'] == 'unavailable'  # Only two eligible laps remain.
+
+
+async def checkpoints_for(db, pid, levels, start=1, **extra):
+    async with db.acquire() as conn:
+        await conn.execute('DELETE FROM laps WHERE session_participant_id=$1', pid)
+        for lap, level in enumerate(levels, start):
+            await conn.execute('''INSERT INTO laps(id,session_participant_id,lap_number,lap_time,fuel_remaining_l,
+                energy_remaining_fraction) VALUES($1,$2,$3,100,$4,$5)''', uuid7(), pid, lap, 100 - lap * 2.8, level)
+
+
+async def test_real_world_null_ve_history_uses_lap_checkpoint_energy(db):
+    """Pitwall ve_history is null in real captures: VE consumption must come from lap checkpoints."""
+    agent, sid, pid = await prepared(db)
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE strategy_samples SET energy_history='[]'::jsonb")
+    p = await main.api_participant_strategy(sid, pid, 32)
+    assert p['status'] == 'collecting_or_stale' and p['provider_pit_settings'] is None
+    assert p['resources'][1]['current'] == .63 and p['resources'][1]['state'] == 'collecting'
+    await checkpoints_for(db, pid, [.9, .86, .83, .79, .76, .72])
+    p = await main.api_participant_strategy(sid, pid, 32)
+    energy = p['resources'][1]
+    assert energy['state'] == 'ready' and energy['consumption_per_lap'] == pytest.approx(.04)
+    assert p['diagnostics']['energy']['source'] == 'lap_checkpoints'
+    assert p['provider_pit_settings']['energy_kind'] == 'VIRTUAL_ENERGY'
+
+
+async def test_lap_snapshot_stores_fresh_scoring_ve_only(db):
+    from tests.test_pit_finish import snapshot
+    agent, sid, _ = await prepared_scoring(db)
+    await snapshot(agent, lap=11)
+    stale_state = main.runtime[str(agent['id'])]
+    stale_state['last_scoring_at'] -= 30
+    await snapshot(agent, lap=12)
+    stale_state['last_scoring_at'] += 30
+    stale_state['scoring']['vehicles'][0]['energy_current_fraction'] = None  # Unknown level is stored as NULL.
+    await snapshot(agent, lap=13)
+    async with db.acquire() as conn:
+        rows = {r['lap_number']: r['energy_remaining_fraction']
+                for r in await conn.fetch('SELECT lap_number,energy_remaining_fraction FROM laps')}
+    assert rows == {11: pytest.approx(.63), 12: None, 13: None}
+
+
+async def prepared_scoring(db):
+    agent, sid, scoring = await setup_field(db)
+    scoring['vehicles'][0]['energy_current_fraction'] = .63
+    await main.handle_message(agent, 'lmu', 'scoring', scoring)
+    return agent, sid, scoring

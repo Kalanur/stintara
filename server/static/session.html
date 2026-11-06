@@ -400,9 +400,16 @@ function strategyWidget(d) {
     ${settings.capacity_feasible===null?'<p class="muted">Tank capacity unknown · feasibility unverified</p>':''}
     ${settings.additional_stop_required?'<p class="strategy-danger">ADDITIONAL STOP REQUIRED</p>':''}</div>` : '';
   return `<p class="${tone}"><strong>${esc(statuses[d.status] || 'Resource strategy unavailable')}</strong></p>
-    <div class="resource-grid">${(d.resources || []).map(r=>`<article><h3>${r.resource_kind==='fuel'?'Fuel':ve?'Virtual Energy':'Energy'} ${d.limiting_resource===r.resource_kind?'<span class="strategy-attention">LIMIT</span>':''}</h3>
-    <strong>${amount(r.resource_kind,r.current)}</strong> · ${amount(r.resource_kind,r.consumption_per_lap)}/lap
-    <p>${r.available?fuelNumber(r.range_laps,' laps',1):'—'} · ${esc(r.sample_count)} samples${r.fresh?'':' · stale / unavailable'}</p></article>`).join('')}</div>
+    <div class="resource-grid">${(d.resources || []).map(r=>{
+      const name=r.resource_kind==='fuel'?'Fuel':ve?'Virtual Energy':'Energy';
+      const state=r.state??(r.fresh===false?'stale':r.available?'ready':'collecting');
+      const unknown=state==='no_current_value';
+      const current=unknown?'UNKNOWN':amount(r.resource_kind,r.current);
+      const rate=r.consumption_per_lap===null||r.consumption_per_lap===undefined?'consumption unknown':`${amount(r.resource_kind,r.consumption_per_lap)}/lap`;
+      const note={no_current_value:'No valid current value',stale:'Stale · not live',collecting:r.resource_kind==='energy'?`Collecting laps · ${esc(r.sample_count)}/3 valid`:'Collecting laps',ready:`${esc(r.sample_count)} samples`}[state]||'';
+      return `<article><h3>${name} ${d.limiting_resource===r.resource_kind?'<span class="strategy-attention">LIMIT</span>':''}</h3>
+    <strong class="${unknown||state==='stale'?'muted':''}">${current}</strong> · ${rate}
+    <p>${r.available?fuelNumber(r.range_laps,' laps',1):'range —'} · ${note}</p></article>`;}).join('')}</div>
     <div class="resource-plan"><p>${finish.kind==='timed_estimate'?'Projected finish ≈':'Finish'} ${lap(finish.finish_lap)}</p>
     <p>Latest resource-safe stop ${lap(d.latest_safe_stop_lap)}</p>
     <p>Plan: ${esc(d.plan_source)} ${lap(d.planned_stop_lap)}</p><p>Reserve ${fuelNumber(d.reserve_laps,' lap',1)}${d.balanced?' · BALANCED':''}</p></div>

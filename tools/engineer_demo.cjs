@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const epoch = '2026-01-01T12:00:00.000Z';
 const id = n => `00000000-0000-7000-8000-${String(n).padStart(12,'0')}`;
 
-function engineerDemo() {
+function engineerDemo(scenario='ready') {
   const participants = Array.from({length:40}, (_,i) => ({
     id:id(i+1),local_vehicle_id:i,display_name:`Synthetic Driver ${String(i+1).padStart(2,'0')}`,
     vehicle_class:'GT3',entry_name:`Synthetic Entry ${i+1}`,team_name:'Synthetic Team',car_number:null,
@@ -28,10 +28,10 @@ function engineerDemo() {
     }};
   const strategy={session_id:session.id,participant_id:id(3),simulator_provider:'lmu',status:'stop_required',
     completed_laps:28,finish_projection:{kind:'exact',finish_lap:38},reserve_laps:1,plan_source:'manual',
-    resources:[{resource_kind:'fuel',current:70,capacity:100,consumption_per_lap:8.6,range_laps:70/8.6,
+    resources:[{resource_kind:'fuel',current:70,capacity:100,consumption_per_lap:8.6,range_laps:70/8.6,state:'ready',
       fresh:true,available:true,sample_count:5,units:'L',pit_service_mode:'TARGET_LEVEL'},
       {resource_kind:'energy',energy_kind:'VIRTUAL_ENERGY',current:.63,capacity:1,consumption_per_lap:.102,
-        range_laps:.63/.102,fresh:true,available:true,sample_count:5,units:'fraction',pit_service_mode:'TARGET_LEVEL'}],
+        range_laps:.63/.102,state:'ready',fresh:true,available:true,sample_count:5,units:'fraction',pit_service_mode:'TARGET_LEVEL'}],
     limiting_resource:'energy',effective_range_laps:.63/.102,latest_safe_stop_lap:33,planned_stop_lap:32,
     planned_stop_safe:true,shortfall:[],additional_stop_required:false,
     at_pit:[{resource_kind:'fuel',amount:35.6},{resource_kind:'energy',amount:.222}],
@@ -39,6 +39,14 @@ function engineerDemo() {
     provider_pit_settings:{provider:'lmu',fuel_service_mode:'TARGET_LEVEL',energy_kind:'VIRTUAL_ENERGY',
       ve_target_percent:72,measured_fuel_ratio_l_per_percent_ve:8.6/10.2,fuel_ratio_l_per_percent_ve:.85,
       resulting_fuel_target_l:61.2,projected_fuel_out_l:61.2,expected_fuel_added_l:25.6,capacity_feasible:true,additional_stop_required:false}};
+  if(scenario==='ve-collecting') {
+    // Real LMU captures: ve_history is null, so VE is live but no completed-lap consumption exists yet.
+    Object.assign(strategy,{status:'collecting_or_stale',limiting_resource:null,effective_range_laps:null,
+      latest_safe_stop_lap:null,planned_stop_lap:null,planned_stop_safe:null,at_pit:[],next_stint_requirements:[],
+      provider_pit_settings:null});
+    Object.assign(strategy.resources[0],{state:'ready'});
+    Object.assign(strategy.resources[1],{state:'collecting',consumption_per_lap:null,range_laps:null,available:false,sample_count:2});
+  }
   return {strategy,focus:id(3),data:{live:true,session,participants,timing:{configured_laps:38,elapsed_seconds:2880}},
     fuel:{session_id:session.id,participant_id:id(3),
       estimate:{status:'ready',consumption_l_per_lap:2.8,sample_count:5,estimated_range_laps:15},
@@ -128,9 +136,45 @@ async function screenshot(channel) {
   } finally { await browser.close(); }
 }
 
+async function screenshotVeCollecting(channel) {
+  const {chromium} = require('playwright');
+  const repo = path.resolve(__dirname,'..'), output = path.join(repo,'build');
+  fs.mkdirSync(output,{recursive:true});
+  const demo=engineerDemo('ve-collecting');
+  const html=fs.readFileSync(path.join(repo,'server/static/session.html'),'utf8')
+    .replace('__SESSION_ID__',JSON.stringify(demo.data.session.id))
+    .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+    .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
+  const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
+  try {
+    const page=await browser.newPage({viewport:{width:1920,height:1080},reducedMotion:'reduce'});
+    await page.addInitScript(({epoch})=>{Date.now=()=>Date.parse(epoch);},{epoch});
+    await page.route('**/*',route=>route.fulfill(route.request().url().includes('/api/') ?
+      {json:route.request().url().includes('/strategy')?demo.strategy:demo.data} : {contentType:'text/html',body:html}));
+    await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
+    await page.locator('.resource-grid article').nth(1).waitFor();
+    for (const [width,height] of [[1920,1080],[1920,900]]) {
+      await page.setViewportSize({width,height});
+      const panel=await page.locator('.fuel-panel').evaluate(el=>{const r=el.getBoundingClientRect();
+        return {text:el.innerText,bottom:r.bottom,scrollOverflow:el.scrollHeight>el.clientHeight+1,
+          pageWidth:document.documentElement.scrollWidth};});
+      assert.match(panel.text,/Collecting samples/i);
+      assert.match(panel.text,/Virtual Energy[\s\S]*63\.0%[\s\S]*consumption unknown[\s\S]*Collecting laps · 2\/3 valid/);
+      assert.doesNotMatch(panel.text,/SET (VE|FUEL) TO/,'No pit settings without VE consumption');
+      assert.ok(panel.pageWidth<=width && panel.bottom<=height,JSON.stringify(panel));
+      const file=path.join(output,`engineer-ve-collecting-${width}x${height}.png`);
+      await page.screenshot({path:file,fullPage:true});
+      console.log(JSON.stringify({file,bottom:panel.bottom,scrollOverflow:panel.scrollOverflow}));
+    }
+  } finally { await browser.close(); }
+}
+
 module.exports={engineerDemo};
 if(require.main===module) {
-  if(process.argv.includes('--screenshot')) {
+  if(process.argv.includes('--screenshot') && process.argv.includes('--ve-collecting')) {
+    const index=process.argv.indexOf('--browser');
+    screenshotVeCollecting(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
+  } else if(process.argv.includes('--screenshot')) {
     const index=process.argv.indexOf('--browser');
     screenshot(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
   } else if(process.argv.includes('--json')) console.log(JSON.stringify(engineerDemo(),null,2));
