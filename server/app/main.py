@@ -27,7 +27,8 @@ from .migrations import migrate_sample_ids
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
 from .resource_strategy import finish_projection, fraction, plan_resources
 from .secrets import read_secret
-from .timing import newest_scoring, project_timing, session_timing
+from .timing import newest_scoring, newest_state, project_timing, session_timing
+from .trackmap import TrackStore, attach_track, feed_race_control, feed_scoring, track_map_payload
 from .uuid7 import uuid7
 from .weather import normalize_weather
 
@@ -89,6 +90,7 @@ pool: asyncpg.Pool | None = None
 
 # Per-agent runtime state. PostgreSQL remains the source of persisted history.
 runtime: dict[str, dict[str, Any]] = {}
+track_store = TrackStore()  # learned geometry survives sessions of the same track, never across tracks
 
 
 def token_hash(token: str) -> str:
@@ -330,10 +332,12 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     live = data.pop("live")
     now = time.monotonic()
     states = list(runtime.values())
+    projected = spectator_participants(participants, session_id, live, states, now, data.get("session_type"))
     return {"session": data, "live": live,
             "timing": session_timing(data, newest_scoring(session_id, live, states, now)),
-            "participants": spectator_participants(participants, session_id, live, states, now,
-                                                    data.get("session_type"))}
+            "participants": projected,
+            # Read-only runtime state of the newest fresh observation; nothing here is persisted.
+            "track_map": track_map_payload(newest_state(session_id, live, states, now), projected, now)}
 
 
 @app.get("/api/sessions/{session_id}/participants/{participant_id}/fuel")
@@ -655,6 +659,7 @@ async def handle_message(agent, provider, kind, payload):
         state.update(track_name=payload["track_name"], track_length_m=payload.get("track_length"),
                      session_laps=payload.get("session_laps"), session_minutes=payload.get("session_minutes"),
                      weather_json=json.dumps(payload.get("weather", {})))
+        attach_track(state, track_store, provider, payload["track_name"], payload.get("track_length"))
         if state.get("session_id") and state.get("persisted_track") == payload["track_name"]:
             async with pool.acquire() as conn:
                 await conn.execute("""UPDATE sessions SET track_length_m=$2,session_laps=$3,
@@ -682,9 +687,14 @@ async def handle_message(agent, provider, kind, payload):
                 await conn.execute("UPDATE agents SET last_seen_at=now() WHERE id=$1", agent["id"])
         state["scoring"] = payload
         state["last_scoring_at"] = now
+        feed_scoring(state, payload, reset=changed)
         pending = state.pop("pending_laps", None)
         if pending:
             await handle_message(agent, provider, "lap_snapshots", pending)
+        return
+    if kind == "race_control":
+        # Live-only state; valid before any session row exists and never persisted.
+        feed_race_control(state, payload, time.monotonic())
         return
     session_id = state.get("session_id")
     if not session_id:
@@ -750,7 +760,7 @@ async def ingest(ws: WebSocket):
             except ValidationError as exc:
                 # Only authenticated, recognized provider data can be dropped.
                 # A rolling budget cannot be reset by interleaving good messages.
-                if kind not in ("scoring", "telemetry", "lap_snapshots"):
+                if kind not in ("scoring", "telemetry", "lap_snapshots", "race_control"):
                     raise
                 now = time.monotonic()
                 while invalid_payloads and now - invalid_payloads[0] >= INVALID_PAYLOAD_WINDOW_SECONDS:

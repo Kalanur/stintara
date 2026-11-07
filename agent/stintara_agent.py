@@ -29,7 +29,7 @@ async def forward(pitwall, uplink):
             continue
         kind, payload = normalized
         now = monotonic()
-        interval = {"scoring": 0.2, "telemetry": 1.0}.get(kind, 0.0)
+        interval = {"scoring": 0.2, "telemetry": 1.0, "race_control": 0.1}.get(kind, 0.0)
         if kind in last_sent and now - last_sent[kind] < interval:
             continue
         await uplink.send(json.dumps({

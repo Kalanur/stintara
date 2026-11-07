@@ -7,7 +7,43 @@ const assert = require('node:assert/strict');
 const epoch = '2026-01-01T12:00:00.000Z';
 const id = n => `00000000-0000-7000-8000-${String(n).padStart(12,'0')}`;
 
-function engineerDemo(scenario='ready') {
+// Synthetic stadium-shaped circuit (no real track data). Lap distance in metres, world plane (x, z).
+const TRACK_LENGTH = 3000;
+function circuitPoint(distance) {
+  const d = ((distance % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+  const straight = TRACK_LENGTH * 0.3, radius = TRACK_LENGTH * 0.2 / Math.PI, arc = Math.PI * radius;
+  if (d < straight) return [d, -radius];
+  if (d < straight + arc) { const a = -Math.PI / 2 + (d - straight) / radius; return [straight + radius * Math.cos(a), radius * Math.sin(a)]; }
+  if (d < 2 * straight + arc) return [straight - (d - straight - arc), radius];
+  const a = Math.PI / 2 + (d - 2 * straight - arc) / radius;
+  return [radius * Math.cos(a), radius * Math.sin(a)];
+}
+function syntheticTrackMap(participants, trackScenario = 'green') {
+  const learning = trackScenario === 'learning';
+  const step = 25, distances = [];
+  for (let d = 0; d < TRACK_LENGTH * (learning ? 0.63 : 1) - 1; d += step) distances.push(d);
+  const flags = {green: ['clear', 'clear', 'clear'], yellow: ['clear', 'local_yellow', 'clear'],
+    learning: ['clear', 'local_yellow', 'clear'], fcy: ['clear', 'clear', 'clear']}[trackScenario];
+  const vehicles = participants.map((p, i) => {
+    // Traffic is clustered inside S2 for the yellow scenarios so the highlighted sector is meaningful.
+    const distance = trackScenario === 'yellow' || trackScenario === 'learning' ? 1100 + (i * 23) % 800 : 2850 - i * 71;
+    const [x, z] = circuitPoint(distance);
+    return {participant_id: p.id, x: Number(x.toFixed(1)), z: Number(z.toFixed(1)), in_pits: p.in_pits === true,
+      position: p.position, name: p.display_name};
+  });
+  return {
+    geometry: {state: learning ? 'learning' : 'complete', complete: !learning, closed: !learning,
+      progress: learning ? 0.63 : null, length_m: TRACK_LENGTH,
+      points: distances.map(d => circuitPoint(d).map(v => Number(v.toFixed(1)))),
+      point_sectors: learning ? null : distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3),
+      sector_boundaries_m: learning ? null : [1000, 2000]},
+    vehicles, vehicles_age_s: 0.2, vehicles_fresh: true,
+    race_control: {phase: trackScenario === 'fcy' ? 'full_course_yellow' : 'green', sector_flags: flags,
+      safety_car_active: trackScenario === 'fcy', player_sector: 2, diagnostics: {}, age_s: 0.2, fresh: true},
+  };
+}
+
+function engineerDemo(scenario = 'ready', trackScenario = 'green') {
   const participants = Array.from({length:40}, (_,i) => ({
     id:id(i+1),local_vehicle_id:i,display_name:`Synthetic Driver ${String(i+1).padStart(2,'0')}`,
     vehicle_class:'GT3',entry_name:`Synthetic Entry ${i+1}`,team_name:'Synthetic Team',car_number:null,
@@ -47,7 +83,8 @@ function engineerDemo(scenario='ready') {
     Object.assign(strategy.resources[0],{state:'ready'});
     Object.assign(strategy.resources[1],{state:'collecting',consumption_per_lap:null,range_laps:null,available:false,sample_count:2});
   }
-  return {strategy,focus:id(3),data:{live:true,session,participants,timing:{configured_laps:38,elapsed_seconds:2880}},
+  return {strategy,focus:id(3),data:{live:true,session,participants,timing:{configured_laps:38,elapsed_seconds:2880},
+      track_map:syntheticTrackMap(participants,trackScenario)},
     fuel:{session_id:session.id,participant_id:id(3),
       estimate:{status:'ready',consumption_l_per_lap:2.8,sample_count:5,estimated_range_laps:15},
       current:{fresh:true,fuel_l:42,capacity_l:100,recorded_at:epoch},provider:{},samples:[]}};
@@ -169,9 +206,65 @@ async function screenshotVeCollecting(channel) {
   } finally { await browser.close(); }
 }
 
+async function screenshotTrackScenarios(channel) {
+  const {chromium} = require('playwright');
+  const repo = path.resolve(__dirname,'..'), output = path.join(repo,'build');
+  fs.mkdirSync(output,{recursive:true});
+  const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
+  try {
+    for (const scenario of ['green','yellow','learning','fcy']) {
+      const demo=engineerDemo('ready',scenario);
+      const html=fs.readFileSync(path.join(repo,'server/static/session.html'),'utf8')
+        .replace('__SESSION_ID__',JSON.stringify(demo.data.session.id))
+        .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+        .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
+      const page=await browser.newPage({viewport:{width:1920,height:1080},reducedMotion:'reduce'});
+      await page.addInitScript(({epoch,sid,pid})=>{Date.now=()=>Date.parse(epoch);
+        localStorage.setItem(`stintara:strategy:v1:${sid}:${pid}`,'32');},{epoch,sid:demo.data.session.id,pid:demo.focus});
+      await page.route('**/*',route=>route.fulfill(route.request().url().includes('/api/') ?
+        {json:route.request().url().includes('/strategy')?demo.strategy:demo.data} : {contentType:'text/html',body:html}));
+      await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
+      await page.locator('.map-area svg').waitFor();
+      for (const [width,height] of [[1920,1080],[1920,900],[1920,800],[2560,1300]]) {
+        await page.setViewportSize({width,height});
+        const result=await page.evaluate(()=>{
+          const area=document.querySelector('.map-area'), svg=area.querySelector('svg'), box=svg.getBoundingClientRect();
+          const panel=document.querySelector('.map-panel').getBoundingClientRect();
+          const settings=document.querySelector('.resource-settings')?.getBoundingClientRect();
+          return {text:document.querySelector('.map-panel').innerText,html:document.querySelector('.map-panel').innerHTML,
+            svgW:box.width,svgH:box.height,areaScroll:area.scrollHeight>area.clientHeight+1||area.scrollWidth>area.clientWidth+1,
+            pageW:document.documentElement.scrollWidth,panelBottom:panel.bottom,panelRight:panel.right,
+            focus:document.querySelectorAll('.trk-focus').length,yellowPaths:document.querySelectorAll('.trk-yellow').length,
+            cars:document.querySelectorAll('.trk-car,.trk-focus').length,
+            settingsVisible:settings?settings.bottom<=window.innerHeight+1&&settings.top>=0:null,
+            scrollH:document.documentElement.scrollHeight};});
+        const where=`${scenario} ${width}x${height}`;
+        assert.doesNotMatch(result.html,/NaN|Infinity|undefined/,where);
+        assert.equal(result.areaScroll,false,`${where}: no scrollbars inside the map`);
+        assert.ok(result.svgW>60&&result.svgH>40,`${where}: map has usable size ${result.svgW}x${result.svgH}`);
+        assert.ok(result.pageW<=width,where);
+        assert.equal(result.focus,1,`${where}: exactly one highlighted focus driver`);
+        assert.equal(result.cars,40,where);
+        if (width>=1800&&height>=800&&height<=1100) assert.ok(result.scrollH<=height,`${where}: no page scroll`);
+        if (width>=1800&&height>=800) assert.equal(result.settingsVisible,true,`${where}: PIT SETTINGS reachable`);
+        if (scenario==='green') { assert.match(result.text,/GREEN/); assert.equal(result.yellowPaths,0); assert.doesNotMatch(result.text,/YELLOW|SAFETY|STOPPED/); }
+        if (scenario==='yellow') { assert.match(result.text,/S2 LOCAL YELLOW/); assert.ok(result.yellowPaths>=1); assert.doesNotMatch(result.text,/S1 LOCAL|S3 LOCAL/); }
+        if (scenario==='learning') { assert.match(result.text,/LEARNING TRACK · 63%/); assert.equal(result.yellowPaths,0); assert.match(result.text,/S2 LOCAL YELLOW/); assert.match(result.text,/flag only/); }
+        if (scenario==='fcy') { assert.match(result.text,/FULL COURSE YELLOW/); assert.match(result.text,/SAFETY CAR ACTIVE/); }
+        await page.screenshot({path:path.join(output,`engineer-trackmap-${scenario}-${width}x${height}.png`),fullPage:true});
+        console.log(JSON.stringify({scenario,width,height,svg:`${Math.round(result.svgW)}x${Math.round(result.svgH)}`,settingsVisible:result.settingsVisible,scrollH:result.scrollH}));
+      }
+      await page.close();
+    }
+  } finally { await browser.close(); }
+}
+
 module.exports={engineerDemo};
 if(require.main===module) {
-  if(process.argv.includes('--screenshot') && process.argv.includes('--ve-collecting')) {
+  if(process.argv.includes('--screenshot') && process.argv.includes('--track-scenarios')) {
+    const index=process.argv.indexOf('--browser');
+    screenshotTrackScenarios(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
+  } else if(process.argv.includes('--screenshot') && process.argv.includes('--ve-collecting')) {
     const index=process.argv.indexOf('--browser');
     screenshotVeCollecting(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
   } else if(process.argv.includes('--screenshot')) {

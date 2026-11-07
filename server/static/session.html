@@ -54,7 +54,24 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .disqualified{color:var(--best)}
 .focus{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus);transition:background-color .15s,border-color .15s}
 
-.map-panel{grid-column:2;grid-row:2;display:flex;flex-direction:column}
+.map-panel{grid-column:2;grid-row:2;display:flex;flex-direction:column;overflow:hidden}
+.map-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px;min-height:24px}
+.map-head h2{margin:0}
+.rc-badges{display:flex;flex-wrap:wrap;gap:4px 6px;margin-left:auto;justify-content:flex-end}
+.rc-badge{font-size:12px;font-weight:750;letter-spacing:.04em;border:1px solid currentColor;padding:1px 6px;border-radius:4px;white-space:nowrap}
+.rc-ok{color:var(--ok)}.rc-muted{color:var(--muted)}.rc-warn{color:var(--attention)}.rc-danger{color:var(--live)}
+.rc-active{background:rgba(244,206,99,.14);animation:rc-pulse 1.4s ease-in-out infinite}
+@keyframes rc-pulse{50%{opacity:.55}}
+.map-area{flex:1;min-height:0;min-width:0;margin-top:6px;position:relative;display:flex}
+.map-area svg{flex:1;width:100%;height:100%;min-height:0;display:block}
+.map-note{color:var(--muted);font-size:12px;margin:4px 0 0}
+.trk-base{fill:none;stroke:#52677c;stroke-width:5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.trk-yellow{fill:none;stroke:var(--attention);stroke-width:9;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;opacity:.95}
+.trk-car{fill:#9fb3c8;stroke:#0b1017;stroke-width:1;vector-effect:non-scaling-stroke}
+.trk-car.pit{fill:none;stroke:var(--pit);stroke-width:1.5;opacity:.7}
+.trk-car.stale{fill:none;stroke:var(--muted);opacity:.6}
+.trk-focus{fill:var(--focus);stroke:#fff;stroke-width:2;vector-effect:non-scaling-stroke}
+.trk-focus-ring{fill:none;stroke:var(--focus);stroke-width:2;vector-effect:non-scaling-stroke;opacity:.7}
 .placeholder{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--muted);border:1px dashed var(--line);border-radius:4px;margin-top:8px;min-height:30px}
 .future-status{color:var(--muted);font-size:12px}
 .focus-panel{grid-column:2;grid-row:3;border-left:3px solid var(--focus)}
@@ -110,7 +127,15 @@ summary{cursor:pointer;color:var(--muted)}
 footer{font-size:11px;color:var(--muted);text-align:right;padding-top:4px;overflow-wrap:anywhere}
 
 @media(min-width:1200px) and (min-height:951px),(min-width:1800px) and (min-height:800px){body{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
-.dashboard{height:100%;overflow:hidden}
+.dashboard{height:100%;overflow:hidden;grid-template-rows:auto auto minmax(100px,1fr) auto 150px}
+/* The map takes the height the former right-column Focus panel used; Focus becomes a slim strip above the field. */
+.focus-panel{grid-column:1;grid-row:2;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);column-gap:18px;align-items:start;padding-top:8px;padding-bottom:8px}
+.focus-panel>h2{grid-column:1/-1;margin:0 0 2px}
+.focus-panel .focus-status{grid-column:1;margin:2px 0}
+.focus-panel>section{grid-column:2;grid-row:2}
+.focus-panel .sector-context{margin:2px 0}
+.standings-panel{grid-row:3/5}
+.map-panel{grid-row:2/4}
 }
 
 /* Compact desktop uses available CSS viewport height, not monitor dimensions. */
@@ -422,6 +447,90 @@ function strategyWidget(d) {
     ${d.diagnostics?.fuel?fuelWidget(d.diagnostics.fuel):''}</details>`;
 }
 
+function mapNumber(value) { return typeof value === 'number' && Number.isFinite(value) ? value : null; }
+const SECTOR_NAMES = ['S1', 'S2', 'S3'];
+function raceControlBadges(rc) {
+  if (!rc) return '<span class="rc-badge rc-muted">RACE CONTROL · NO DATA</span>';
+  if (!rc.fresh) return '<span class="rc-badge rc-muted">RACE CONTROL · STALE</span>';
+  const badges = [];
+  const phases = {green:['GREEN','rc-ok'], formation:['FORMATION','rc-muted'], pre_session:['PRE-SESSION','rc-muted'],
+    session_over:['SESSION OVER','rc-muted'], session_stopped:['SESSION STOPPED','rc-danger rc-active'],
+    full_course_yellow:['FULL COURSE YELLOW','rc-warn rc-active']};
+  const phase = phases[rc.phase];
+  badges.push(phase ? `<span class="rc-badge ${phase[1]}">${phase[0]}</span>` : '<span class="rc-badge rc-muted">STATE UNKNOWN</span>');
+  if (rc.safety_car_active === true) badges.push('<span class="rc-badge rc-warn rc-active">SAFETY CAR ACTIVE</span>');
+  (rc.sector_flags || []).forEach((state, index) => {
+    if (state === 'local_yellow' && SECTOR_NAMES[index]) badges.push(`<span class="rc-badge rc-warn rc-active">${SECTOR_NAMES[index]} LOCAL YELLOW</span>`);
+  });
+  const unknown = (rc.sector_flags || []).map((state, index) => state === 'unknown' ? SECTOR_NAMES[index] : null).filter(Boolean);
+  if (unknown.length && rc.phase !== 'session_over') badges.push(`<span class="rc-badge rc-muted" title="Provider flag value not interpreted">${unknown.join('/')} FLAG UNRECOGNIZED</span>`);
+  return badges.join('');
+}
+function learningLabel(geometry) {
+  if (!geometry || geometry.state === 'unknown') return 'TRACK UNKNOWN';
+  if (geometry.complete) return '';
+  const progress = mapNumber(geometry.progress);
+  return progress === null ? 'LEARNING TRACK' : `LEARNING TRACK · ${Math.round(progress * 100)}%`;
+}
+function trackMapSvg(track, focusId) {
+  const geometry = track?.geometry || {};
+  const points = (geometry.points || []).filter(p => Array.isArray(p) && mapNumber(p[0]) !== null && mapNumber(p[1]) !== null);
+  const vehicles = (track?.vehicles || []).filter(v => mapNumber(v.x) !== null && mapNumber(v.z) !== null);
+  const all = points.concat(vehicles.map(v => [v.x, v.z]));
+  if (!all.length) return '<div class="placeholder"><span>Waiting for position data</span></div>';
+  // Horizontal world plane only (x, z); elevation never distorts the 2D outline. Screen y = -z.
+  const xs = all.map(p => p[0]), ys = all.map(p => -p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const span = Math.max(maxX - minX, maxY - minY, 50);
+  const pad = span * 0.06;
+  const fmt = n => n.toFixed(1);
+  const path = list => list.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0])} ${fmt(-p[1])}`).join('');
+  const sectors = Array.isArray(geometry.point_sectors) && geometry.point_sectors.length === points.length ? geometry.point_sectors : null;
+  const rc = track?.race_control;
+  const yellow = rc && rc.fresh ? (rc.sector_flags || []).map(state => state === 'local_yellow') : [];
+  let base = '', overlay = '';
+  if (points.length > 1) {
+    // A closing edge exists only when the server learned and verified a closed lap.
+    const ring = geometry.closed ? points.concat([points[0]]) : points;
+    base = `<path class="trk-base" d="${path(ring)}"/>`;
+    if (sectors && yellow.some(Boolean)) {
+      const tags = geometry.closed ? sectors.concat([sectors[0]]) : sectors;
+      let run = [];
+      const flush = () => { if (run.length > 1) overlay += `<path class="trk-yellow" d="${path(run)}"/>`; run = []; };
+      ring.forEach((point, index) => {
+        if (yellow[tags[index] - 1] === true) {
+          if (!run.length && index) run.push(ring[index - 1]);
+          run.push(point);
+        } else flush();
+      });
+      flush();
+    }
+  }
+  const radius = span / 70;
+  const fresh = track?.vehicles_fresh === true;
+  const ordered = vehicles.slice().sort((a, b) => (a.participant_id === focusId) - (b.participant_id === focusId));
+  const cars = ordered.map(v => {
+    const focus = Boolean(focusId) && v.participant_id === focusId;
+    const label = `${v.position ?? '—'} · ${v.name ?? 'Unknown'}${v.in_pits ? ' · pit' : ''}${fresh ? '' : ' · stale'}`;
+    const cx = fmt(v.x), cy = fmt(-v.z);
+    if (focus && fresh) return `<g><circle class="trk-focus-ring" cx="${cx}" cy="${cy}" r="${fmt(radius * 2.1)}"/><circle class="trk-focus" cx="${cx}" cy="${cy}" r="${fmt(radius * 1.35)}"><title>${esc(label)} · focus</title></circle></g>`;
+    return `<circle class="trk-car${v.in_pits ? ' pit' : ''}${fresh ? '' : ' stale'}" cx="${cx}" cy="${cy}" r="${fmt(radius)}"><title>${esc(label)}</title></circle>`;
+  }).join('');
+  return `<svg viewBox="${fmt(minX - pad)} ${fmt(minY - pad)} ${fmt(maxX - minX + 2 * pad)} ${fmt(maxY - minY + 2 * pad)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Track map">${base}${overlay}${cars}</svg>`;
+}
+function trackMapPanel(d, focusId) {
+  const track = d.track_map || {};
+  const geometry = track.geometry;
+  const rc = track.race_control;
+  const learning = learningLabel(geometry);
+  const stale = track.vehicles_fresh === false && (track.vehicles || []).length ? '<span class="rc-badge rc-muted">POSITIONS STALE</span>' : '';
+  const flagOnly = rc && rc.fresh && (rc.sector_flags || []).includes('local_yellow') && geometry && !geometry.point_sectors
+    ? '<p class="map-note">Yellow sector shown by flag only · sector layer not yet known</p>' : '';
+  return `<section class="panel map-panel" aria-label="Track map and race control"><div class="map-head"><h2>Track Map</h2>
+    ${learning ? `<span class="rc-badge rc-muted">${esc(learning)}</span>` : ''}${stale}
+    <div class="rc-badges">${raceControlBadges(rc)}</div></div>
+    <div class="map-area">${trackMapSvg(track, focusId)}</div>${flagOnly}</section>`;
+}
 const sessionId = __SESSION_ID__;
 const selector = document.querySelector('#focus');
 let focusId = null;
@@ -511,9 +620,7 @@ function renderSession(d) {
       <p>${esc(d.session.simulator_provider)} · ${esc(d.session.session_type)} · ${hideClass ? esc(fieldClass)+' · ' : ''}${d.participants.length} participants</p>
       ${sessionContext(d)}</div><div>${feedIndicator(d.live)}
       <p class="status">${esc(feedStatus(d, Date.now()))}</p></div></header>
-      <section class="panel map-panel" aria-label="Future track map"><h2>Track Map <span class="muted">· next pass</span></h2>
-      <div class="placeholder"><span>Track geometry not available yet</span></div>
-      <p class="future-status">Flags / Race Control / Car Status · not available yet</p></section>
+      ${trackMapPanel(d, focusId)}
       <section class="panel focus-panel" aria-label="Focus driver"><h2>Focus driver</h2>${focusStatus(d.participants, focusId, race) || '<p class="muted">Choose a participant using the focus selector.</p>'}
       ${focusTiming(d.participants, focusId)}</section>
       <div id="weather-panel" class="panel weather-panel">${engineerWeather(d.session.weather, d.live)}</div>

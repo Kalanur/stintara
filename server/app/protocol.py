@@ -54,6 +54,11 @@ class Vehicle(BaseModel):
     time_behind_leader: FiniteFloat | None = None
     laps_behind_leader: int | None = None
     in_pits: bool = False
+    # Optional spatial state (additive; older agents omit it). Metres in provider world coordinates.
+    lap_dist: FiniteFloat | None = None
+    pos_x: FiniteFloat | None = None
+    pos_y: FiniteFloat | None = None
+    pos_z: FiniteFloat | None = None
 
 
 class Scoring(BaseModel):
@@ -106,6 +111,17 @@ class Telemetry(BaseModel):
     tires: list[Wheel] = Field(default_factory=list, max_length=4)
 
 
+class RaceControl(BaseModel):
+    """Simulator-neutral race-control state. Unknown provider values arrive as "unknown"."""
+    phase: Literal["pre_session", "formation", "green", "full_course_yellow", "session_stopped",
+                   "session_over", "unknown"] = "unknown"
+    sector_flags: list[Literal["clear", "local_yellow", "unknown"]] = Field(
+        default_factory=lambda: ["unknown"] * 3, min_length=3, max_length=3)
+    safety_car_active: StrictBool | None = None
+    player_sector: Literal[1, 2, 3] | None = None
+    diagnostics: dict[str, int | bool | list[int | None] | None] = Field(default_factory=dict, max_length=16)
+
+
 class Hello(BaseModel):
     type: Literal["agent_hello"]
     protocol: Literal["stintara-agent-v1"]
@@ -114,4 +130,4 @@ class Hello(BaseModel):
 
 
 PAYLOADS = {"connection": Connection, "session_info": SessionInfo, "scoring": Scoring,
-            "lap_snapshots": LapSnapshots, "telemetry": Telemetry}
+            "lap_snapshots": LapSnapshots, "telemetry": Telemetry, "race_control": RaceControl}
