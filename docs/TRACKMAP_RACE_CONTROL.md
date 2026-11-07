@@ -16,10 +16,13 @@ LMU-specific interpretation lives in `agent/pitwall.py`.
 
 ## API
 
-`GET /api/sessions/{id}/live` gains a `track_map` object (nothing persisted, no new polling loop):
+`GET /api/sessions/{id}/live` gains a `track_map` object (no new polling loop; only the closed geometry is persisted, see
+"Persistent geometry"):
 `geometry` (`state`, `complete`, `closed`, `progress`, `points`, `point_sectors`, `sector_boundaries_m`),
 `vehicles` (position, pit flag, participant id), `vehicles_age_s`/`vehicles_fresh` (5 s) and `race_control`
-(with `age_s`/`fresh`, 5 s). State is held in bounded runtime memory per agent; nothing is written to PostgreSQL.
+(with `age_s`/`fresh`, 5 s). Vehicles and race control are held in bounded runtime memory per agent and are never
+written to PostgreSQL. `geometry.source` is `learned` or `stored`; `static_only: true` marks a session without a fresh
+observation whose payload contains the persisted geometry only (no vehicles, no race control).
 
 ## Geometry learning rules (`server/app/trackmap.py`)
 
@@ -34,9 +37,41 @@ before the lap end, the restart point shortly after the line, all point gaps are
 last and first point is consistent with the small arc between them. Otherwise nothing is connected; the panel
 shows `LEARNING TRACK` and the next clean lap is used. A partial outline never carries a closing edge.
 
-A learned outline is kept per (provider, track name, rounded length) in a bounded in-memory store, so it
-survives Practice → Qualifying → Race and simulator reconnects while the server process runs. It is lost on
-server restart and never reused for another track.
+A learned outline is kept per (provider, track name, rounded length) in a bounded in-memory hot cache, so it
+survives Practice → Qualifying → Race and simulator reconnects. It is never reused for another track.
+
+## Persistent geometry (V0.2, `server/app/track_repo.py`)
+
+PostgreSQL table `track_geometries` is the durable source; `TrackStore` stays the hot cache and is filled lazily when a
+known track is attached (no global preload).
+
+- **Identity:** `UNIQUE(provider, track_name, track_length_key)` where the key is the rounded track length, i.e. exactly
+  the in-memory key. Names are never matched fuzzily; a missing or non-finite length means no persistence and no reuse.
+- **Stored:** raw simulator `(x, z)` points, matching lap distances, `length_m`, observed sector observations and derived
+  boundaries, `schema_version` (currently `1`), `learned_at`, `updated_at`. Never rotated, never vehicle positions,
+  never race-control history.
+- **When:** only after the learner accepted a closed, plausible lap. Incomplete or rejected attempts (pit, backwards,
+  lap-distance reset, gap, teleport, incomplete arc) are never written.
+- **Concurrency:** `INSERT .. ON CONFLICT DO NOTHING`; the first closed lap is canonical and a losing writer adopts the
+  stored geometry. Persistence inside a process is serialised by a lock. Sector data may be refreshed afterwards
+  (`UPDATE` of the sector columns only).
+- **Loading is fail-closed:** the row is re-validated with the learner's rules (finite values, equal counts, point count,
+  length plausibility and agreement with the key, strictly increasing distances, gap/teleport/closure checks, known
+  schema version). A rejected row is ignored and the track is learned again; a corrupt row of the current schema version
+  is replaced by the next closed lap, a row of an unknown (newer) schema version is left untouched. Corrupt sector data
+  drops only the sector layer.
+- **Resolution:** accepted geometry is quantised to the persisted 0.1 m resolution *before* it is judged; a point whose
+  rounded distance reaches the track length or does not advance is dropped, and `save_geometry` re-validates the record
+  with `validate_record` so nothing is written that a reload would reject.
+- **Database errors** never break ingest: the geometry stays in memory and persistence is retried after 30 s. A row of
+  another schema version (or a model that fails its own validation) is a stable `persist_blocked` state: no further
+  database work per message, live geometry keeps working, the row is never overwritten. A concurrent change is only a
+  short backoff (5 s), not a block. The block lasts until the model leaves the in-memory store (restart).
+- **Historical sessions:** without a fresh observation the session payload is `static_only` with the geometry read from
+  PostgreSQL and validated; a complete geometry that only exists in the hot cache (unsaved or blocked) is never shown as
+  stored.
+  The UI shows `STORED TRACK` and `POSITIONS UNAVAILABLE`; it never shows vehicles, flags or a race-control state.
+  An unknown track stays unknown.
 
 Sector boundaries are medians of observed forward transitions S1→S2 and S2→S3 of the learning vehicle. At least two
 agreeing observations and a majority of consistent ones are required; otherwise the sector layer is unknown and
@@ -66,8 +101,20 @@ classification is made.
 SVG without external libraries, fitted with preserved aspect ratio. World plane (x, z); elevation is ignored.
 Focus vehicle in cyan, pit vehicles hollow and dimmed, stale positions hollow gray with `POSITIONS STALE`.
 Local-yellow sectors are highlighted on the outline; without a known sector layer the yellow sector is reported by
-badge and a note only. On desktop the Focus panel moved above the Full Field as a slim strip so the map can use
+badge and a note only. A complete centerline can be shown `Orientation: AUTO` (default) or `ORIGINAL`, chosen per track
+name in `localStorage` (`stintara:trackmap:orientation:v1`; no server preference). AUTO is presentation only: it takes the
+principal axis of the centerline points (centroid and covariance, eigenvector angle `½·atan2(2·sxy, sxx−syy)` in the screen
+plane `(x, −z)`) and applies one proper rotation (no mirroring) to centerline, sector overlays, vehicles, focus and pit
+markers. Fewer than 8 valid points, no spread, a near-isotropic shape (minor/major standard deviation ≥ 0.9), a rotation
+below 0.5° or a partial/open geometry fall back to ORIGINAL. The remaining 180° ambiguity is not resolved. On desktop the Focus panel moved above the Full Field as a slim strip so the map can use
 the freed height; the stacked fallback is unchanged.
+
+`node tools/engineer_demo.cjs --viewports --browser msedge` measures the real browser viewports recorded on 2026-11-07,
+1920×911 (1080p display, compact desktop path) and 2560×1271 (1440p display, normal desktop path), plus the stress
+sizes 1920×900, 1920×800 and 2560×1300, for a horizontal, a vertically encoded and a stored-only scenario (no document
+scrolling, no overlapping panels, Head-to-Head/Weather not clipped, PIT settings visible, AUTO orientation, ORIGINAL
+toggle and its persistence). It needs Playwright and Edge/Chrome locally and is not part of CI;
+`tests/ui.test.cjs` only proves which CSS layout path a viewport takes.
 
 `node tools/engineer_demo.cjs --screenshot --track-scenarios --browser msedge` renders synthetic Green, Local Yellow,
 Learning and FCY/SC scenarios at 1920×1080, 1920×900, 1920×800 and 2560×1300 into the ignored `build/` folder.
@@ -77,5 +124,8 @@ Learning and FCY/SC scenarios at 1920×1080, 1920×900, 1920×800 and 2560×1300
 - Screen orientation (north-up, y = −z) is an assumption; a mirrored map is possible and unverified.
 - Full course yellow and session stopped are mapped from the documented enum only (never observed).
 - Local yellow does not say whether a car is stopped. Not in scope.
-- Geometry is not persisted; a server restart relearns it on the first clean lap.
+- A stored geometry is canonical: a wrong but plausible lap that was stored first is not replaced automatically (there is
+  no editor or invalidation tool yet; delete the row to relearn).
+- At 1920×911 the Strategy panel scrolls internally by about 46 px with the PIT settings kept sticky and visible.
+- Per-track orientation lives in the browser only.
 - Not yet verified in a live LMU session.

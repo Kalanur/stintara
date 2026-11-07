@@ -123,7 +123,7 @@ function helpers() {
   return context;
 }
 async function sessionHarness(data, query='', fuelReply=null) {
-  const root = {innerHTML:'',textContent:''};
+  const root = {innerHTML:'',textContent:'',addEventListener(name, listener) { this[name] = listener; }};
   const selector = {innerHTML:'',value:'',addEventListener(name, listener) { this[name] = listener; }};
   const scrolls = {'#full-scroll':{scrollLeft:31,scrollTop:400,focus() {this.focused=true;}},
     '#relative-scroll':{scrollLeft:17,scrollTop:20},'#comparison-panel':{scrollTop:12},'#weather-panel':{scrollTop:5},
@@ -687,7 +687,7 @@ test('desktop height modes use CSS viewport bounds without shrinking primary tex
   assert.ok(css.includes('@media(min-width:1200px) and (min-height:951px),(min-width:1800px) and (min-height:800px)'));
   const compact=css.split('/* Compact desktop')[1].split('@media(max-width:1199px)')[0];
   assert.match(compact,/max-height:950px/);
-  assert.match(compact,/max-height:clamp\(180px,calc\(100dvh - 580px\),350px\)/);
+  assert.match(compact,/max-height:clamp\(180px,calc\(100dvh - 540px\),400px\)/);
   assert.doesNotMatch(compact,/font-size|display:none/);
   assert.ok(css.includes('@media(max-width:1199px),(max-height:799px),(max-width:1799px) and (max-height:950px)'));
 });
@@ -903,4 +903,213 @@ test('TARGET_LEVEL distinguishes setting target, retained excess fuel and expect
     assert.match(infeasible,/Projected fuel out ≈ —/);
     assert.doesNotMatch(infeasible,/Projected fuel out ≈ (43.0|51.6)/);
   }
+});
+
+
+// --- Track Map V0.2: orientation (presentation only), stored track and real viewport paths ---------------------
+
+function helpersWith(extra = {}) {
+  const context = vm.createContext({URL, ...extra});
+  vm.runInContext(spectatorScript().split('const sessionId =')[0], context);
+  return context;
+}
+const memoryStorage = () => { const map = new Map(); return {map, getItem: k => map.has(k) ? map.get(k) : null, setItem: (k, v) => map.set(k, String(v))}; };
+const ellipse = (rx, rz, tilt = 0, count = 60) => Array.from({length: count}, (_, i) => {
+  const a = i / count * 2 * Math.PI, x = rx * Math.cos(a), z = rz * Math.sin(a);
+  return [Math.round((x * Math.cos(tilt) - z * Math.sin(tilt)) * 10) / 10, Math.round((x * Math.sin(tilt) + z * Math.cos(tilt)) * 10) / 10];
+});
+const closedGeometry = points => ({state: 'complete', complete: true, closed: true, progress: null, points, point_sectors: null,
+  sector_boundaries_m: null, length_m: 3000, source: 'learned'});
+function projectedSpread(h, geometry, mode = 'auto') {
+  const {project} = h.trackProjection(geometry, mode), pts = geometry.points.map(project);
+  const n = pts.length, cx = pts.reduce((a, p) => a + p[0], 0) / n, cy = pts.reduce((a, p) => a + p[1], 0) / n;
+  let xx = 0, yy = 0, xy = 0;
+  for (const p of pts) { xx += (p[0] - cx) ** 2; yy += (p[1] - cy) ** 2; xy += (p[0] - cx) * (p[1] - cy); }
+  return {xx: xx / n, yy: yy / n, xy: xy / n, width: Math.max(...pts.map(p => p[0])) - Math.min(...pts.map(p => p[0])),
+    height: Math.max(...pts.map(p => p[1])) - Math.min(...pts.map(p => p[1]))};
+}
+
+test('AUTO leaves a horizontal track alone and lays vertical and diagonal tracks horizontally', () => {
+  const h = helpersWith();
+  const horizontal = closedGeometry(ellipse(600, 250));
+  assert.equal(h.principalRotation(horizontal.points), null);
+  assert.equal(h.trackProjection(horizontal, 'auto').angle, 0);
+  const vertical = closedGeometry(ellipse(250, 600));
+  const v = projectedSpread(h, vertical);
+  assert.ok(v.width > v.height * 2, `vertical track made horizontal ${JSON.stringify(v)}`);
+  assert.ok(Math.abs(v.xy) < 1e-6 * v.xx);
+  for (const degrees of [20, 35, 45, 60, 100, 135, -30, -75]) {
+    const diagonal = closedGeometry(ellipse(600, 250, degrees * Math.PI / 180));
+    const spread = projectedSpread(h, diagonal);
+    assert.ok(spread.xx > spread.yy * 4 && Math.abs(spread.xy) < 0.01 * spread.xx, `${degrees} deg ${JSON.stringify(spread)}`);
+    assert.ok(spread.width > spread.height * 2);
+  }
+});
+
+test('AUTO falls back to the original orientation for degenerate or ambiguous data', () => {
+  const h = helpersWith();
+  const isOriginal = geometry => {
+    const t = h.trackProjection(geometry, 'auto');
+    return t.angle === 0 && t.project([3, 4]).join() === '3,-4';
+  };
+  assert.equal(h.principalRotation([]), null);
+  assert.equal(h.principalRotation(undefined), null);
+  assert.equal(h.principalRotation(Array.from({length: 20}, () => [5, 5])), null);          // no spread
+  assert.equal(h.principalRotation(ellipse(500, 500)), null);                               // circle: no dominant axis
+  assert.equal(h.principalRotation(ellipse(600, 250).slice(0, 5)), null);                    // too few points
+  assert.equal(h.principalRotation(Array.from({length: 20}, (_, i) => [i % 4 ? NaN : i, i])), null);
+  assert.ok(isOriginal(closedGeometry(ellipse(500, 500))));
+  assert.ok(isOriginal({...closedGeometry(ellipse(250, 600)), complete: false}));            // partial learning never rotates
+  assert.ok(isOriginal({...closedGeometry(ellipse(250, 600)), closed: false}));
+  assert.ok(isOriginal(undefined));
+  assert.equal(isOriginal(closedGeometry(ellipse(250, 600))), false);
+  const original = h.trackProjection(closedGeometry(ellipse(250, 600)), 'original');
+  assert.equal(original.angle, 0);
+  assert.deepEqual(Array.from(original.project([3, 4])), [3, -4]);
+});
+
+test('AUTO rotation never mirrors and preserves every distance', () => {
+  const h = helpersWith();
+  // Asymmetric outline: a mirrored result would flip the sign of the signed area.
+  const shape = [[0, 0], [400, 0], [400, 150], [250, 150], [250, 500], [0, 500], [0, 420], [-100, 250], [0, 120], [40, 60]];
+  const area = pts => pts.reduce((a, p, i) => a + (p[0] * pts[(i + 1) % pts.length][1] - pts[(i + 1) % pts.length][0] * p[1]), 0) / 2;
+  const geometry = closedGeometry(shape.concat(shape.map(p => [p[0] + 1, p[1] + 1])));
+  const screen = geometry.points.map(p => [p[0], -p[1]]);
+  const {project, angle} = h.trackProjection(geometry, 'auto');
+  assert.notEqual(angle, 0);
+  const out = geometry.points.map(project);
+  assert.equal(Math.sign(area(out)), Math.sign(area(screen)));
+  assert.ok(Math.abs(Math.abs(area(out)) - Math.abs(area(screen))) < 1e-6 * Math.abs(area(screen)));
+  for (let i = 0; i < screen.length; i++) for (let j = i + 1; j < screen.length; j++) {
+    const before = Math.hypot(screen[i][0] - screen[j][0], screen[i][1] - screen[j][1]);
+    assert.ok(Math.abs(before - Math.hypot(out[i][0] - out[j][0], out[i][1] - out[j][1])) < 1e-6);
+  }
+});
+
+const circlesOf = html => [...html.matchAll(/<circle class="(trk-[a-z ]+?)" cx="(-?[\d.]+)" cy="(-?[\d.]+)"/g)].map(m => [m[1], +m[2], +m[3]]);
+const vertices = d => [...d.matchAll(/[ML](-?[\d.]+) (-?[\d.]+)/g)].map(m => [+m[1], +m[2]]);
+const baseVertices = html => vertices(html.match(/class="trk-base" d="([^"]+)"/)[1]);
+
+test('centerline, sectors, vehicles, focus and pit markers share one transformation; ORIGINAL changes nothing', () => {
+  const h = helpersWith();
+  const points = ellipse(250, 600, 0.4, 40);
+  const geometry = {...closedGeometry(points), point_sectors: points.map((_, i) => i < 13 ? 1 : i < 27 ? 2 : 3)};
+  const vehicles = [{participant_id: 'focus', x: points[5][0], z: points[5][1], in_pits: false, position: 1, name: 'A'},
+    {participant_id: 'pit', x: points[20][0], z: points[20][1], in_pits: true, position: 2, name: 'B'}];
+  const track = {geometry, vehicles, vehicles_fresh: true, vehicles_age_s: .1,
+    race_control: {phase: 'green', sector_flags: ['clear', 'local_yellow', 'clear'], fresh: true, age_s: .1}};
+  const snapshot = JSON.stringify(track);
+  const auto = h.trackMapPanel({track_map: track, session: {track_name: 'T'}}, 'focus', 'auto');
+  const original = h.trackMapPanel({track_map: track, session: {track_name: 'T'}}, 'focus', 'original');
+  assert.equal(JSON.stringify(track), snapshot, 'raw geometry is never modified');
+  const base = baseVertices(auto), cars = circlesOf(auto);
+  const focus = cars.find(c => c[0] === 'trk-focus'), pit = cars.find(c => c[0].startsWith('trk-car'));
+  assert.deepEqual(focus.slice(1), base[5]);
+  assert.deepEqual(pit.slice(1), base[20]);
+  const yellow = vertices(auto.match(/class="trk-yellow" d="([^"]+)"/)[1]);
+  assert.ok(yellow.length > 2 && yellow.every(p => base.some(b => b[0] === p[0] && b[1] === p[1])));
+  const raw = baseVertices(original);
+  assert.deepEqual(raw.slice(0, 40), points.map(p => [+p[0].toFixed(1), +(-p[1]).toFixed(1)]));
+  assert.deepEqual(circlesOf(original).find(c => c[0] === 'trk-focus').slice(1), raw[5]);
+  assert.notDeepEqual(base[0], raw[0]);
+  const extent = (pts, i) => Math.max(...pts.map(p => p[i])) - Math.min(...pts.map(p => p[i]));
+  assert.ok(extent(base, 0) > extent(base, 1) * 2 && extent(raw, 1) > extent(raw, 0));
+  assert.match(auto, /Orientation: AUTO/);
+  assert.match(original, /Orientation: ORIGINAL/);
+});
+
+test('orientation choice is stored per track, defaults to AUTO and survives blocked or corrupt storage', () => {
+  const storage = memoryStorage(), h = helpersWith({localStorage: storage});
+  assert.equal(h.trackOrientation('Synthetic A'), 'auto');
+  assert.ok(h.saveTrackOrientation('Synthetic A', 'original'));
+  assert.equal(h.trackOrientation('Synthetic A'), 'original');
+  assert.equal(h.trackOrientation('Synthetic B'), 'auto');
+  assert.deepEqual(JSON.parse(storage.map.get('stintara:trackmap:orientation:v1')), {'Synthetic A': 'original'});
+  assert.equal(h.saveTrackOrientation('Synthetic A', 'rotated'), false);
+  assert.equal(h.saveTrackOrientation('', 'auto'), false);
+  for (const bad of ['{', '[]', '"x"', '{"Synthetic C":"north-up"}']) {
+    const broken = memoryStorage(); broken.map.set('stintara:trackmap:orientation:v1', bad);
+    assert.equal(helpersWith({localStorage: broken}).trackOrientation('Synthetic C'), 'auto');
+  }
+  const blocked = helpersWith({localStorage: {getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); }}});
+  assert.equal(blocked.trackOrientation('Synthetic A'), 'auto');
+  assert.equal(blocked.saveTrackOrientation('Synthetic A', 'original'), false);
+  assert.equal(blocked.trackOrientation('Synthetic A'), 'original');   // still honoured for this page
+  assert.equal(helpersWith().trackOrientation('Synthetic A'), 'auto');  // no storage object at all
+});
+
+test('toggle button switches orientation, persists per track and survives polling', async () => {
+  const field = syntheticField(2);
+  const track = trackFixture({track: {geometry: closedGeometry(ellipse(250, 600, 0.3, 40))}});
+  const page = await sessionHarness({...sessionData(field), track_map: track});
+  assert.match(page.root.innerHTML, /Orientation: AUTO/);
+  const press = () => page.root.click({target: {closest: selector => selector === '#orientation-toggle' ? {} : null}});
+  press();
+  assert.match(page.root.innerHTML, /Orientation: ORIGINAL/);
+  assert.equal(JSON.parse(page.storage.get('stintara:trackmap:orientation:v1'))['Synthetic Track'], 'original');
+  await page.poll({...sessionData(field), track_map: track});
+  assert.match(page.root.innerHTML, /Orientation: ORIGINAL/, 'choice survives polling');
+  page.root.click({target: {closest: () => null}});                       // unrelated clicks do nothing
+  assert.match(page.root.innerHTML, /Orientation: ORIGINAL/);
+  press();
+  assert.match(page.root.innerHTML, /Orientation: AUTO/);
+});
+
+test('orientation control appears only for a complete centerline', () => {
+  const h = helpersWith();
+  const learning = trackFixture({track: {geometry: {state: 'learning', complete: false, closed: false, progress: .3, points: ellipse(250, 600, 0, 20), point_sectors: null}}});
+  assert.doesNotMatch(h.trackMapPanel({track_map: learning}, 'focus'), /orientation-toggle/);
+  assert.doesNotMatch(h.trackMapPanel({track_map: undefined}, 'focus'), /orientation-toggle/);
+  assert.match(h.trackMapPanel({track_map: trackFixture()}, 'focus'), /orientation-toggle/);
+});
+
+test('a stored track without live state shows only geometry, never vehicles, flags or a fake green state', () => {
+  const h = helpersWith();
+  const stored = {geometry: {...closedGeometry(ellipse(500, 300, 0, 40)), source: 'stored'}, vehicles: [], vehicles_age_s: null,
+    vehicles_fresh: false, race_control: null, static_only: true};
+  const html = h.trackMapPanel({track_map: stored, session: {track_name: 'T'}}, 'focus');
+  assert.match(html, /STORED TRACK/);
+  assert.match(html, /POSITIONS UNAVAILABLE/);
+  assert.match(html, /class="trk-base"/);
+  assert.doesNotMatch(html, /trk-car|trk-focus|GREEN|YELLOW|SAFETY|RACE CONTROL|POSITIONS STALE|Waiting for position data|LEARNING|NaN|undefined/);
+  const unknown = h.trackMapPanel({track_map: {geometry: {state: 'unknown', complete: false, points: []}, vehicles: [], race_control: null, static_only: false}}, 'focus');
+  assert.doesNotMatch(unknown, /STORED TRACK|trk-base|orientation-toggle/);
+  assert.match(unknown, /Waiting for position data/);
+  assert.match(unknown, /TRACK UNKNOWN/);
+  assert.doesNotMatch(h.trackMapPanel({track_map: {...stored, static_only: false}}, 'focus'), /STORED TRACK/);
+});
+
+// A tiny media-query evaluator proves which layout path each real browser viewport takes. It does not prove pixels;
+// the measured browser run (tools/engineer_demo.cjs --screenshot --viewports) does.
+function layoutPaths(width, height) {
+  const css = readFileSync(path.join(__dirname, '../server/static/session.html'), 'utf8').match(/<style>([\s\S]*?)<\/style>/)[1];
+  const queries = [...css.matchAll(/@media([^{]+)\{/g)].map(m => m[1].trim());
+  const matches = query => query.split(',').some(group => group.split(/\s+and\s+/).every(feature => {
+    const m = feature.trim().match(/^\((min|max)-(width|height):(\d+)px\)$/);
+    if (!m) return false;
+    const value = m[2] === 'width' ? width : height;
+    return m[1] === 'min' ? value >= +m[3] : value <= +m[3];
+  }));
+  const find = prefix => { const q = queries.find(query => query.startsWith(prefix)); assert.ok(q, prefix); return q; };
+  return {grid: matches(find('(min-width:1200px) and (min-height:951px)')),
+    compact: matches(find('(min-width:1800px) and (min-height:800px) and (max-height:950px)')),
+    stacked: matches(find('(max-width:1199px)'))};
+}
+
+test('real browser viewports take the intended layout paths', () => {
+  assert.deepEqual(layoutPaths(1920, 911), {grid: true, compact: true, stacked: false});     // 1080p display, measured 2026-11-07
+  assert.deepEqual(layoutPaths(2560, 1271), {grid: true, compact: false, stacked: false});   // 1440p display, measured 2026-11-07
+  for (const [w, h] of [[1920, 800], [1920, 900], [1800, 800]]) assert.deepEqual(layoutPaths(w, h), {grid: true, compact: true, stacked: false}, `${w}x${h}`);
+  for (const [w, h] of [[2560, 1300], [1920, 1080]]) assert.deepEqual(layoutPaths(w, h), {grid: true, compact: false, stacked: false}, `${w}x${h}`);
+  for (const [w, h] of [[1920, 799], [1200, 760], [900, 900]]) assert.equal(layoutPaths(w, h).stacked, true, `${w}x${h}`);
+});
+
+test('desktop layouts reserve room for Head-to-Head, Weather and Strategy without shrinking text', () => {
+  const css = readFileSync(path.join(__dirname, '../server/static/session.html'), 'utf8').match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.match(css, /grid-template-rows:auto auto minmax\(100px,1fr\) auto 180px/);
+  assert.match(css, /\.dashboard\{gap:8px;grid-template-rows:auto auto minmax\(100px,1fr\) auto 172px\}/);
+  assert.match(css, /\.fuel-panel\{max-height:clamp\(390px,calc\(100dvh - 760px\),470px\)\}/);
+  assert.match(css, /\.h2h dl\{grid-template-columns:1fr auto 1fr auto/);
+  assert.equal((css.match(/body\{[^}]*font:14px/g) || []).length, 1);                 // base font size unchanged
+  for (const block of css.split('@media').slice(1)) assert.doesNotMatch(block.split('\n}\n')[0], /body\{[^}]*font(-size)?:/);
 });

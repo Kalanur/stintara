@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
+from . import track_repo
 from .build import APP_VERSION, build_info, inject_build_label
 from .domain import sample_due
 from .fuel import fuel_report
@@ -28,7 +29,16 @@ from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
 from .resource_strategy import finish_projection, fraction, plan_resources
 from .secrets import read_secret
 from .timing import newest_scoring, newest_state, project_timing, session_timing
-from .trackmap import TrackStore, attach_track, feed_race_control, feed_scoring, track_map_payload
+from .trackmap import (
+    TrackModel,
+    TrackStore,
+    attach_track,
+    feed_race_control,
+    feed_scoring,
+    static_track_map_payload,
+    track_key,
+    track_map_payload,
+)
 from .uuid7 import uuid7
 from .weather import normalize_weather
 
@@ -90,7 +100,70 @@ pool: asyncpg.Pool | None = None
 
 # Per-agent runtime state. PostgreSQL remains the source of persisted history.
 runtime: dict[str, dict[str, Any]] = {}
-track_store = TrackStore()  # learned geometry survives sessions of the same track, never across tracks
+track_store = TrackStore()  # hot cache of learned geometry; PostgreSQL (track_geometries) is the durable source
+track_lock = asyncio.Lock()  # serialises persistence of shared track models within this process
+TRACK_STORE_RETRY_SECONDS = 30.0
+TRACK_STORE_CONFLICT_RETRY_SECONDS = 5.0
+
+
+async def sync_track_store(state):
+    """Lazily load a known track from PostgreSQL and persist a closed one. Never raises into message handling."""
+    model, key = state.get("track_model"), state.get("track_key")
+    if pool is None or model is None or key is None or model.persist_blocked:
+        return
+    sector_stale = (model.complete and model.stored and model.sector_boundaries() is not None
+                    and model.sector_snapshot() != model.stored_sectors)
+    if model.store_checked and not (model.complete and not model.stored) and not sector_stale:
+        return
+    now = time.monotonic()
+    if now < model.store_retry_at:
+        return
+    async with track_lock:
+        try:
+            async with pool.acquire() as conn:
+                if not model.store_checked:
+                    record = await track_repo.load_geometry(conn, key)
+                    if record is not None and not model.complete:
+                        model.adopt(record)
+                    model.store_checked = True
+                if model.complete and not model.stored:
+                    outcome, canonical = await track_repo.save_geometry(conn, key, model)
+                    if outcome in (track_repo.SAVED, track_repo.EXISTING):
+                        if canonical["points"] != model.points:   # another writer's lap is canonical
+                            model.adopt(canonical)
+                        model.stored, model.stored_sectors = True, model.sector_snapshot()
+                    elif outcome == track_repo.INCOMPATIBLE:
+                        model.persist_blocked = "schema"        # stable: never overwritten, never retried per message
+                    elif outcome == track_repo.INVALID:
+                        model.persist_blocked = "invalid"
+                    else:                                       # concurrent change: a later attempt may succeed
+                        model.store_retry_at = now + TRACK_STORE_CONFLICT_RETRY_SECONDS
+                elif (model.complete and model.sector_boundaries() is not None
+                      and model.sector_snapshot() != model.stored_sectors):
+                    if await track_repo.save_sectors(conn, key, model):
+                        model.stored_sectors = model.sector_snapshot()
+                    else:                                       # row gone or of another schema: no per-message retries
+                        model.store_retry_at = now + TRACK_STORE_RETRY_SECONDS
+        except Exception as exc:
+            model.store_retry_at = now + TRACK_STORE_RETRY_SECONDS
+            logger.warning(json.dumps({"event": "track_geometry_sync_failed", "error_class": type(exc).__name__}))
+
+
+async def stored_track_model(conn, provider, name, length):
+    """Static geometry for a session without live runtime state. Read-only; unknown stays unknown.
+
+    Only what PostgreSQL holds and validates counts: a complete geometry that merely exists in the hot cache (not
+    saved, or blocked by an incompatible schema) is never presented as a stored track.
+    """
+    key = track_key(provider, name, length)
+    if key is None:
+        return None
+    record = await track_repo.load_geometry(conn, key)
+    if record is None:
+        return None
+    model = TrackModel(record["length_m"])
+    model.adopt(record)
+    return model
 
 
 def token_hash(token: str) -> str:
@@ -299,7 +372,7 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     async with pool.acquire() as conn:
         session = await conn.fetchrow(f"""SELECT s.id, s.track_name, s.session_type,
             s.simulator_provider, s.started_at, s.last_seen_at, s.status,
-            s.session_laps, s.session_minutes, s.weather, ({SESSION_LIVE_SQL}) AS live
+            s.session_laps, s.session_minutes, s.weather, s.track_length_m, ({SESSION_LIVE_SQL}) AS live
             FROM sessions s WHERE s.id=$1""", session_id)
         if not session:
             raise HTTPException(404, "session not found")
@@ -330,14 +403,23 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     data = dict(session)
     data["weather"] = normalize_weather(data.get("weather"), data.get("simulator_provider"))
     live = data.pop("live")
+    track_length = data.pop("track_length_m", None)
     now = time.monotonic()
     states = list(runtime.values())
     projected = spectator_participants(participants, session_id, live, states, now, data.get("session_type"))
+    state = newest_state(session_id, live, states, now)
+    if state:
+        track_map = track_map_payload(state, projected, now)
+    else:
+        # No fresh observation: only the static, persisted geometry can be shown; never positions or flags.
+        async with pool.acquire() as conn:
+            stored = await stored_track_model(conn, data.get("simulator_provider"), data.get("track_name"), track_length)
+        track_map = static_track_map_payload(stored)
     return {"session": data, "live": live,
             "timing": session_timing(data, newest_scoring(session_id, live, states, now)),
             "participants": projected,
-            # Read-only runtime state of the newest fresh observation; nothing here is persisted.
-            "track_map": track_map_payload(newest_state(session_id, live, states, now), projected, now)}
+            # Dynamic state is read-only runtime state of the newest fresh observation and never persisted.
+            "track_map": track_map}
 
 
 @app.get("/api/sessions/{session_id}/participants/{participant_id}/fuel")
@@ -660,6 +742,7 @@ async def handle_message(agent, provider, kind, payload):
                      session_laps=payload.get("session_laps"), session_minutes=payload.get("session_minutes"),
                      weather_json=json.dumps(payload.get("weather", {})))
         attach_track(state, track_store, provider, payload["track_name"], payload.get("track_length"))
+        await sync_track_store(state)
         if state.get("session_id") and state.get("persisted_track") == payload["track_name"]:
             async with pool.acquire() as conn:
                 await conn.execute("""UPDATE sessions SET track_length_m=$2,session_laps=$3,
@@ -688,6 +771,7 @@ async def handle_message(agent, provider, kind, payload):
         state["scoring"] = payload
         state["last_scoring_at"] = now
         feed_scoring(state, payload, reset=changed)
+        await sync_track_store(state)
         pending = state.pop("pending_laps", None)
         if pending:
             await handle_message(agent, provider, "lap_snapshots", pending)
@@ -695,6 +779,7 @@ async def handle_message(agent, provider, kind, payload):
     if kind == "race_control":
         # Live-only state; valid before any session row exists and never persisted.
         feed_race_control(state, payload, time.monotonic())
+        await sync_track_store(state)
         return
     session_id = state.get("session_id")
     if not session_id:
