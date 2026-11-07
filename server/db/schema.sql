@@ -187,6 +187,7 @@ ALTER TABLE session_observations ADD COLUMN IF NOT EXISTS last_seen_at timestamp
 ALTER TABLE session_observations ADD COLUMN IF NOT EXISTS last_session_time double precision;
 ALTER TABLE laps ADD COLUMN IF NOT EXISTS tyre_snapshot jsonb;
 ALTER TABLE laps ADD COLUMN IF NOT EXISTS damage jsonb;
+ALTER TABLE laps ADD COLUMN IF NOT EXISTS energy_remaining_fraction double precision;
 CREATE INDEX IF NOT EXISTS ix_observations_agent ON session_observations(agent_id);
 CREATE INDEX IF NOT EXISTS ix_observations_active ON session_observations(last_seen_at) WHERE ended_at IS NULL;
 ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_temp_inner_fl_c double precision;

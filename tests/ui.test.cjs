@@ -769,6 +769,22 @@ test('unknown capability and unavailable values render safely without provider s
   assert.doesNotMatch(html,/<img|NaN|Infinity|undefined|SET VE/);
 });
 
+test('VE states distinguish unknown, stale, collecting and ready without a fuel-only fallback', () => {
+  const render=(state,patch)=>{
+    const d=strategyDemo();d.status='collecting_or_stale';d.provider_pit_settings=null;d.at_pit=[];
+    Object.assign(d.resources[1],{state,...patch});
+    return helpers().strategyWidget(d);
+  };
+  const collecting=render('collecting',{consumption_per_lap:null,range_laps:null,available:false,sample_count:2});
+  assert.match(collecting,/63\.0%/);assert.match(collecting,/consumption unknown/);assert.match(collecting,/Collecting laps · 2\/3 valid/);
+  const unknown=render('no_current_value',{current:null,consumption_per_lap:null,range_laps:null,available:false});
+  assert.match(unknown,/UNKNOWN/);assert.match(unknown,/No valid current value/);
+  const stale=render('stale',{fresh:false,range_laps:null,available:false});
+  assert.match(stale,/Stale · not live/);
+  for(const html of [collecting,unknown,stale]) assert.doesNotMatch(html,/SET (VE|FUEL) TO|NaN|undefined|Infinity/);
+  assert.match(render('ready',{}),/5 samples/);
+});
+
 test('versioned local plans isolate session and participant and reject malformed storage', () => {
   const h=helpers(),map=new Map(),storage={getItem:k=>map.get(k),setItem:(k,v)=>map.set(k,v),removeItem:k=>map.delete(k)};
   const sid=syntheticId(99),a=syntheticId(1),b=syntheticId(2);

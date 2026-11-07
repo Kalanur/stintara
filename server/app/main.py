@@ -22,10 +22,10 @@ from .build import APP_VERSION, build_info, inject_build_label
 from .domain import sample_due
 from .fuel import fuel_report
 from .lifecycle import end_observation, expire_observations, resolve_session
-from .lmu_resources import lmu_resources, pit_settings
+from .lmu_resources import energy_diagnostics, lmu_resources, pit_settings
 from .migrations import migrate_sample_ids
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
-from .resource_strategy import finish_projection, plan_resources
+from .resource_strategy import finish_projection, fraction, plan_resources
 from .secrets import read_secret
 from .timing import newest_scoring, project_timing, session_timing
 from .uuid7 import uuid7
@@ -40,6 +40,7 @@ POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 SCHEMA_FILE = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
 
+ENERGY_CHECKPOINT_MAX_AGE_SECONDS = 5
 SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_SECONDS", "120"))
 if SESSION_TIMEOUT_SECONDS < 15:
     raise ValueError("SESSION_TIMEOUT_SECONDS must be at least 15")
@@ -366,7 +367,7 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
             WHERE s.id=$1 AND p.id=$2""", session_id, participant_id)
         if not context:
             raise HTTPException(404, "session participant not found")
-        laps = await conn.fetch("""SELECT lap_number,lap_time,fuel_remaining_l,pitstops,in_pits
+        laps = await conn.fetch("""SELECT lap_number,lap_time,fuel_remaining_l,pitstops,in_pits,energy_remaining_fraction
             FROM laps WHERE session_participant_id=$1 ORDER BY lap_number""", participant_id)
         row = await conn.fetchrow("""SELECT * FROM strategy_samples WHERE session_participant_id=$1
             ORDER BY recorded_at DESC,id DESC LIMIT 1""", participant_id)
@@ -382,14 +383,15 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
     pace_times = [r["lap_time"] for r in laps if r["in_pits"] is not True]
     finish = finish_projection(completed, timing, pace_times, context["session_type"] == "Race")
     provider = context["simulator_provider"]
-    resources, known = lmu_resources(fuel, sample) if provider == "lmu" else ([], False)
+    resources, known = lmu_resources(fuel, sample, laps) if provider == "lmu" else ([], False)
     manual = planned_stop_lap if type(planned_stop_lap) is int else None
     result = plan_resources(resources, completed, finish, manual_stop=manual,
                             active=context["live"] and vehicle is not None and context["session_type"] == "Race"
                             and context["finish_status"] == 0, capability_known=known)
     result.update(session_id=session_id, participant_id=participant_id, simulator_provider=provider,
                   provider_pit_settings=pit_settings(result) if provider == "lmu" else None,
-                  diagnostics={"fuel": fuel, "energy_history_samples": len(sample.get("energy_history") or [])})
+                  diagnostics={"fuel": fuel, "energy_history_samples": len(sample.get("energy_history") or []),
+                               "energy": energy_diagnostics(laps, sample)})
     return result
 
 
@@ -519,9 +521,18 @@ async def upsert_participants_on_connection(conn, agent, session_id, payload, pr
     await conn.execute("UPDATE sessions SET last_seen_at=now() WHERE id=$1", session_id)
 
 
+def checkpoint_energy(state: dict[str, Any], local_id: int) -> float | None:
+    """Scoring VE of one vehicle at a lap checkpoint; unknown unless scoring is fresh and valid."""
+    if time.monotonic() - state.get("last_scoring_at", 0) > ENERGY_CHECKPOINT_MAX_AGE_SECONDS:
+        return None
+    vehicle = next((v for v in state.get("scoring", {}).get("vehicles", []) if v.get("id") == local_id), None)
+    return fraction(vehicle.get("energy_current_fraction")) if vehicle else None
+
+
 async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any]) -> None:
     assert pool
     drivers = payload.get("drivers") or []
+    state = runtime.get(str(agent["id"]), {})
     async with pool.acquire() as conn:
         for d in drivers:
             local_id = int(d.get("id", -1))
@@ -550,8 +561,9 @@ async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: d
                 INSERT INTO laps(
                     id,session_participant_id,lap_number,position,lap_time,sector1,sector2,sector3,
                     gap_to_leader,gap_ahead,fuel_remaining_l,fuel_capacity_l,compound_front,compound_rear,
-                    tyre_remaining_fl,tyre_remaining_fr,tyre_remaining_rl,tyre_remaining_rr,in_pits,pitstops,finish_status,has_telemetry,tyre_snapshot,damage)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,$24::jsonb)
+                    tyre_remaining_fl,tyre_remaining_fr,tyre_remaining_rl,tyre_remaining_rr,in_pits,pitstops,finish_status,has_telemetry,tyre_snapshot,damage,
+                    energy_remaining_fraction)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,$24::jsonb,$25)
                 ON CONFLICT(session_participant_id,lap_number) DO NOTHING
                 """,
                 uuid7(), p["id"], lap_no, d.get("position"), d.get("last_lap_time"),
@@ -561,6 +573,7 @@ async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: d
                 wheels[0].get("remaining"), wheels[1].get("remaining"), wheels[2].get("remaining"), wheels[3].get("remaining"),
                 bool(d.get("in_pits", False)), d.get("num_pitstops", 0), d.get("finish_status", 0), has_tel,
                 json.dumps(wheels) if has_tel else None, json.dumps(d.get("damage")) if has_tel else None,
+                checkpoint_energy(state, local_id),
             )
 
 

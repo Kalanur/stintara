@@ -37,13 +37,38 @@ def energy_estimate(history):
                 sample_count=len(window), minimum_samples=3, window_size=5)
 
 
+def energy_checkpoint_estimate(checkpoints):
+    """Consumption from persisted lap-checkpoint levels, using the same exclusions as fuel:
+    consecutive laps, unchanged pit-stop count, no pit context and a strictly positive decrease."""
+    ordered = sorted(checkpoints, key=lambda row: row["lap_number"])
+    samples = []
+    for before, after in zip(ordered, ordered[1:]):
+        a, b = fraction(before.get("energy_remaining_fraction")), fraction(after.get("energy_remaining_fraction"))
+        if (after["lap_number"] == before["lap_number"] + 1 and a is not None and b is not None and a > b
+                and before.get("pitstops") == after.get("pitstops")
+                and not before.get("in_pits") and not after.get("in_pits")):
+            samples.append(a - b)
+    window = samples[-5:]
+    return dict(consumption_per_lap=median(window) if len(window) >= 3 else None,
+                sample_count=len(window), minimum_samples=3, window_size=5)
+
+
+def resource_state(current, fresh, consumption):
+    """Explicit data state so unknown, stale and still-collecting values are never conflated."""
+    if current is None:
+        return "no_current_value"
+    if not fresh:
+        return "stale"
+    return "collecting" if not consumption else "ready"
+
+
 def resource(kind, current, capacity, consumption, fresh, samples, units, **capabilities):
     current, capacity, consumption = map(nonnegative, (current, capacity, consumption))
     distance = current / consumption if fresh and current is not None and consumption else None
     distance = nonnegative(distance)
     return dict(resource_kind=kind, current=current, capacity=capacity, consumption_per_lap=consumption,
                 range_laps=distance, fresh=fresh, sample_count=samples, units=units,
-                available=distance is not None, **capabilities)
+                available=distance is not None, state=resource_state(current, fresh, consumption), **capabilities)
 
 
 def finish_projection(completed, timing, lap_times, race=True):

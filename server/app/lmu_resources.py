@@ -2,7 +2,14 @@
 import math
 from decimal import ROUND_CEILING, Decimal, localcontext
 
-from .resource_strategy import EnergyKind, PitServiceMode, energy_estimate, resource
+from .resource_strategy import (
+    EnergyKind,
+    PitServiceMode,
+    energy_checkpoint_estimate,
+    energy_estimate,
+    fraction,
+    resource,
+)
 
 
 def round_up(value, places=0):
@@ -16,7 +23,24 @@ def round_up(value, places=0):
         return float(number.quantize(Decimal(10) ** -places, rounding=ROUND_CEILING))
 
 
-def lmu_resources(fuel, sample):
+def best_energy_estimate(laps, sample):
+    """Lap-checkpoint VE is primary. Pitwall ve_history (null in real LMU captures) is only a fallback."""
+    estimate = energy_checkpoint_estimate(laps or [])
+    if estimate["consumption_per_lap"] is not None:
+        return estimate, "lap_checkpoints"
+    history = energy_estimate(sample.get("energy_history") or [])
+    if history["consumption_per_lap"] is not None:
+        return history, "provider_history"
+    return estimate, None
+
+
+def energy_diagnostics(laps, sample):
+    estimate, source = best_energy_estimate(laps, sample)
+    return dict(source=source, sample_count=estimate["sample_count"], minimum_samples=estimate["minimum_samples"],
+                checkpoint_laps=sum(1 for lap in laps or [] if fraction(lap.get("energy_remaining_fraction")) is not None))
+
+
+def lmu_resources(fuel, sample, laps=()):
     current, estimate = fuel["current"], fuel["estimate"]
     resources = [resource("fuel", current["fuel_l"], current["capacity_l"],
                           estimate["consumption_l_per_lap"], current["fresh"], estimate["sample_count"], "L",
@@ -24,8 +48,8 @@ def lmu_resources(fuel, sample):
     available = sample.get("energy_available")
     known = type(available) is bool and (not available or sample.get("energy_kind") == EnergyKind.VIRTUAL_ENERGY)
     if available is not False:
-        energy = energy_estimate(sample.get("energy_history") or [])
-        resources.append(resource("energy", sample.get("energy_current_fraction"), 1.0,
+        energy, _ = best_energy_estimate(laps, sample)
+        resources.append(resource("energy", fraction(sample.get("energy_current_fraction")), 1.0,
                                   energy["consumption_per_lap"], current["fresh"] and available is True,
                                   energy["sample_count"], "fraction", energy_kind=EnergyKind.VIRTUAL_ENERGY,
                                   pit_service_mode=PitServiceMode.TARGET_LEVEL))
