@@ -1,5 +1,6 @@
 """Durable track geometry: persistence rules, restart reuse, fail-closed loading and historical sessions (synthetic)."""
 import asyncio
+import collections
 import copy
 import json
 import math
@@ -19,7 +20,7 @@ from server.app.trackmap import (
 )
 from tests.conftest import make_agent
 from tests.test_race_control import drive, scoring, start
-from tests.track_fixtures import LENGTH, lap_samples
+from tests.track_fixtures import LENGTH, circuit, lap_samples
 
 NAME = "Synthetic Circuit"
 KEY = ("lmu", NAME, round(LENGTH))
@@ -266,7 +267,7 @@ async def test_concurrent_writers_converge_on_one_canonical_geometry(db):
 
     async def write(model):
         async with db.acquire() as conn:
-            return await track_repo.save_geometry(conn, KEY, model)
+            return (await track_repo.save_geometry(conn, KEY, model))[1]
 
     results = await asyncio.gather(write(first), write(second), write(first), write(second))
     assert len(await rows(db)) == 1
@@ -365,3 +366,149 @@ async def test_live_runtime_state_still_wins_over_the_static_fallback(db):
     await drive(agent, lap_samples(start=2.0, end=LENGTH + 40))
     track = (await main.api_session_live(await session_of(agent)))["track_map"]
     assert track["static_only"] is False and track["vehicles"] and track["vehicles_fresh"] is True
+
+
+# --- review fixes: rounding edge, strict historical fallback, stable incompatible state -------------------------
+
+def edge_lap():
+    """A valid lap whose last raw distance (2999.98) rounds onto the track length at 0.1 m resolution."""
+    samples = lap_samples(start=2.0, end=LENGTH - 5)
+    return samples + [(2999.98, *circuit(2999.98), False), (5.0, *circuit(5.0), False)]
+
+
+def test_a_lap_ending_on_the_line_is_normalised_so_that_it_survives_reload_validation():
+    model = TrackModel(LENGTH)
+    learner = CenterlineLearner(model)
+    assert [learner.add(*sample) for sample in edge_lap()].count(True) == 1
+    assert model.complete and all(0 <= d < LENGTH for d in model.distances)
+    assert all(b > a for a, b in zip(model.distances, model.distances[1:]))
+    record = validate_record(json.loads(json.dumps(geometry_record(model))), KEY)
+    assert record is not None and record["points"] == model.points and record["distances"] == model.distances
+
+
+def test_sub_resolution_duplicate_end_points_never_break_monotonic_distances():
+    model = TrackModel(LENGTH)
+    learner = CenterlineLearner(model)
+    samples = lap_samples(start=2.0, end=LENGTH - 5)
+    last = samples[-1]
+    samples += [(last[0] + 0.04, *circuit(last[0] + 0.04), False), (5.0, *circuit(5.0), False)]
+    for sample in samples:
+        learner.add(*sample)
+    assert model.complete
+    assert all(b > a for a, b in zip(model.distances, model.distances[1:]))
+    assert validate_record(json.loads(json.dumps(geometry_record(model))), KEY) is not None
+
+
+async def test_edge_lap_is_persisted_and_reloaded_after_a_restart_without_a_new_lap(db):
+    agent = await start(db)
+    await drive(agent, edge_lap())
+    assert model_of(agent).stored is True
+    (row,) = await rows(db)
+    assert all(d < LENGTH for d in json.loads(row["distances"]))
+    restart()
+    again = await connect(db)
+    assert model_of(again).complete and model_of(again).source == "stored"
+    assert model_of(again).points == json.loads(row["points"])
+
+
+async def test_a_model_that_would_fail_reload_validation_is_never_written(db):
+    model = closed_model()
+    model.distances[-1] = model.length                     # the exact defect: a distance equal to the length
+    async with db.acquire() as conn:
+        outcome, record = await track_repo.save_geometry(conn, KEY, model)
+    assert outcome == track_repo.INVALID and record is None
+    assert await rows(db) == []
+
+
+async def test_historical_fallback_uses_a_complete_cached_geometry_only_after_a_successful_save(db):
+    agent = await start(db)
+    await drive(agent, lap_samples(start=2.0, end=LENGTH + 40))
+    sid = await session_of(agent)
+    main.runtime.clear()                                    # the store is deliberately NOT cleared
+    assert main.track_store.models[KEY].complete
+    track = (await main.api_session_live(sid))["track_map"]
+    assert track["static_only"] is True and track["geometry"]["source"] == "stored"
+    assert track["vehicles"] == [] and track["race_control"] is None
+
+
+async def test_historical_fallback_rejects_a_complete_ram_only_geometry_after_a_failed_save(db):
+    agent = await start(db)
+    async with db.acquire() as conn:
+        await conn.execute("ALTER TABLE track_geometries RENAME TO track_geometries_gone")
+    await drive(agent, lap_samples(start=2.0, end=LENGTH + 40))
+    sid = await session_of(agent)
+    model = model_of(agent)
+    assert model.complete and not model.stored
+    async with db.acquire() as conn:
+        await conn.execute("ALTER TABLE track_geometries_gone RENAME TO track_geometries")
+    main.runtime.clear()                                    # cache keeps the RAM-only geometry
+    assert main.track_store.models[KEY] is model and model.complete
+    track = (await main.api_session_live(sid))["track_map"]
+    assert track["static_only"] is False and track["geometry"]["state"] == "unknown"
+    assert track["geometry"]["points"] == [] and track["vehicles"] == []
+
+
+async def test_historical_fallback_cannot_bypass_a_newer_schema_row_via_the_cache(db):
+    agent = await start(db)
+    await drive(agent, lap_samples(start=2.0, end=LENGTH + 40))
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE track_geometries SET schema_version=99")
+    restart()
+    relearn = await connect(db)
+    await drive(relearn, lap_samples(start=2.0, end=LENGTH + 40))
+    sid = await session_of(relearn)
+    assert model_of(relearn).complete and model_of(relearn).persist_blocked == "schema"
+    main.runtime.clear()                                    # cache keeps the complete RAM geometry
+    assert main.track_store.models[KEY].complete
+    track = (await main.api_session_live(sid))["track_map"]
+    assert track["static_only"] is False and track["geometry"]["state"] == "unknown"
+
+
+def count_repo_calls(monkeypatch):
+    calls = collections.Counter()
+    for name in ("load_geometry", "save_geometry", "save_sectors"):
+        original = getattr(track_repo, name)
+
+        def wrap(*args, _original=original, _name=name, **kwargs):
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(track_repo, name, wrap)
+    return calls
+
+
+async def test_a_newer_schema_row_is_a_stable_state_with_no_database_work_per_message(db, monkeypatch):
+    agent = await start(db)
+    await drive(agent, lap_samples(start=2.0, end=LENGTH + 40))
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE track_geometries SET schema_version=99, points='[]'::jsonb")
+    before = await rows(db)
+    restart()
+    calls = count_repo_calls(monkeypatch)
+    again = await connect(db)
+    await drive(again, lap_samples(start=2.0, end=LENGTH + 40), with_sectors=True)
+    await drive(again, lap_samples(start=2.0, end=LENGTH + 40) * 2, with_sectors=True)
+    model = model_of(again)
+    assert model.complete and model.persist_blocked == "schema" and model.stored is False
+    assert calls["load_geometry"] == 1 and calls["save_geometry"] == 1 and calls["save_sectors"] == 0
+    assert await rows(db) == before                                      # never overwritten or downgraded
+    geometry = (await main.api_session_live(await session_of(again)))["track_map"]["geometry"]
+    assert geometry["closed"] is True and geometry["source"] == "learned"   # live geometry stays usable
+
+
+async def test_a_transient_conflict_is_retried_later_and_not_treated_as_blocked(db, monkeypatch):
+    agent = await start(db)
+    original = track_repo.save_geometry
+    attempts = []
+
+    async def flaky(conn, key, model):
+        attempts.append(1)
+        return (track_repo.RETRY, None) if len(attempts) == 1 else await original(conn, key, model)
+
+    monkeypatch.setattr(track_repo, "save_geometry", flaky)
+    await drive(agent, lap_samples(start=2.0, end=LENGTH + 40))
+    model = model_of(agent)
+    assert model.complete and not model.stored and model.persist_blocked is None
+    assert model.store_retry_at > 0 and len(attempts) == 1               # backed off, no per-message hammering
+    model.store_retry_at = 0.0
+    await main.sync_track_store(main.runtime[str(agent["id"])])
+    assert model.stored is True and len(await rows(db)) == 1

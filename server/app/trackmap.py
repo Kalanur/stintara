@@ -63,6 +63,7 @@ class TrackModel:
         self.stored = False           # the closed geometry is known to exist in persisted state
         self.stored_sectors = None    # sector observations as last persisted
         self.store_retry_at = 0.0     # monotonic time before which persistence is not retried after an error
+        self.persist_blocked = None   # stable reason ("schema" / "invalid") why this model is never written; None = may persist
 
     @property
     def complete(self):
@@ -284,17 +285,26 @@ class CenterlineLearner:
         if self.tail is not None and self.tail[0] > self.distances[-1]:
             self.points.append([end[1], end[2]])
             self.distances.append(end[0])
-        first_ld, first_x, first_z = self.start
-        arc = (model.length - self.distances[-1]) + first_ld
-        gaps = [b - a for a, b in zip(self.distances, self.distances[1:])]
-        plausible = (len(self.points) >= MIN_POINTS and arc <= arc_limit(model.length)
-                     and max(gaps, default=MAX_GAP_M + 1) <= MAX_GAP_M
-                     and math.dist(self.points[-1], (first_x, first_z)) <= arc * STEP_FACTOR + STEP_SLACK_M)
+        # Quantise to the persisted resolution first, then judge the result: a point whose rounded distance reaches
+        # the track length or does not advance (sub-resolution duplicate) is dropped, so everything accepted here
+        # passes validate_record unchanged after a reload.
+        points, distances = [], []
+        for (px, pz), d in zip(self.points, self.distances):
+            rounded = round(d, 1)
+            if rounded >= model.length or (distances and rounded <= distances[-1]):
+                continue
+            points.append([round(px, 1), round(pz, 1)])
+            distances.append(rounded)
+        plausible = len(points) >= MIN_POINTS
+        if plausible:
+            arc = (model.length - distances[-1]) + distances[0]
+            gaps = [b - a for a, b in zip(distances, distances[1:])]
+            plausible = (arc <= arc_limit(model.length) and max(gaps) <= MAX_GAP_M
+                         and math.dist(points[-1], points[0]) <= arc * STEP_FACTOR + STEP_SLACK_M)
         if not plausible:
             self._discard("closure_not_plausible")
             return False
-        model.points = [[round(px, 1), round(pz, 1)] for px, pz in self.points]
-        model.distances = [round(d, 1) for d in self.distances]
+        model.points, model.distances = points, distances
         model.generation += 1
         self.reset()
         return True

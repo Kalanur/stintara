@@ -44,16 +44,24 @@ async def load_geometry(conn, key):
     return record
 
 
-async def save_geometry(conn, key, model):
-    """Persist a closed model. Returns the record that is canonical afterwards, or None if nothing is stored.
+SAVED, EXISTING, INCOMPATIBLE, INVALID, RETRY = "saved", "existing", "incompatible", "invalid", "retry"
 
-    Concurrency: INSERT .. ON CONFLICT DO NOTHING makes the first writer win; a loser adopts the stored row.
-    A corrupt row of the current schema version is replaced (optimistically, by updated_at); a row of an
-    unknown (newer) schema version is left untouched.
+
+async def save_geometry(conn, key, model):
+    """Persist a closed model. Returns (outcome, record); record is the canonical geometry for SAVED / EXISTING.
+
+    - SAVED: this model's geometry is now the canonical row.
+    - EXISTING: another valid row won; the caller adopts `record`.
+    - INCOMPATIBLE: a row of another (newer) schema version exists. Stable: it is never overwritten or downgraded.
+    - INVALID: the model itself would not survive reload validation. Stable: it is never written.
+    - RETRY: transient (row vanished or was changed concurrently); trying again later may succeed.
+
+    Concurrency: INSERT .. ON CONFLICT DO NOTHING makes the first writer win. A corrupt row of the current schema
+    version is replaced optimistically (by updated_at).
     """
     record = geometry_record(model)
-    if record is None:
-        return None
+    if record is None or validate_record(json.loads(json.dumps(record)), key) is None:
+        return INVALID, None
     provider, name, length_key = key
     inserted = await conn.fetchval("""INSERT INTO track_geometries(id, provider, track_name, track_length_key,
             schema_version, length_m, points, distances, sector_observations, sector_boundaries_m)
@@ -63,21 +71,21 @@ async def save_geometry(conn, key, model):
         json.dumps(record["points"]), json.dumps(record["distances"]),
         json.dumps(record["sector_observations"]), json.dumps(record["sector_boundaries_m"]))
     if inserted is not None:
-        return record
+        return SAVED, record
     row = await _fetch(conn, key)
     if row is None:
-        return None
+        return RETRY, None
     existing = validate_record(row_to_raw(row), key)
     if existing is not None:
-        return existing
+        return EXISTING, existing
     if row["schema_version"] != GEOMETRY_SCHEMA_VERSION:
-        return None
+        return INCOMPATIBLE, None
     replaced = await conn.fetchval("""UPDATE track_geometries SET length_m=$3, points=$4::jsonb, distances=$5::jsonb,
             sector_observations=$6::jsonb, sector_boundaries_m=$7::jsonb, learned_at=now(), updated_at=now()
         WHERE id=$1 AND updated_at=$2 RETURNING id""", row["id"], row["updated_at"], record["length_m"],
         json.dumps(record["points"]), json.dumps(record["distances"]),
         json.dumps(record["sector_observations"]), json.dumps(record["sector_boundaries_m"]))
-    return record if replaced is not None else None
+    return (SAVED, record) if replaced is not None else (RETRY, None)
 
 
 async def save_sectors(conn, key, model):

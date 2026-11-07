@@ -60,8 +60,16 @@ known track is attached (no global preload).
   schema version). A rejected row is ignored and the track is learned again; a corrupt row of the current schema version
   is replaced by the next closed lap, a row of an unknown (newer) schema version is left untouched. Corrupt sector data
   drops only the sector layer.
-- **Database errors** never break ingest: the geometry stays in memory and persistence is retried after 30 s.
-- **Historical sessions:** without a fresh observation the session payload is `static_only` with the stored geometry.
+- **Resolution:** accepted geometry is quantised to the persisted 0.1 m resolution *before* it is judged; a point whose
+  rounded distance reaches the track length or does not advance is dropped, and `save_geometry` re-validates the record
+  with `validate_record` so nothing is written that a reload would reject.
+- **Database errors** never break ingest: the geometry stays in memory and persistence is retried after 30 s. A row of
+  another schema version (or a model that fails its own validation) is a stable `persist_blocked` state: no further
+  database work per message, live geometry keeps working, the row is never overwritten. A concurrent change is only a
+  short backoff (5 s), not a block. The block lasts until the model leaves the in-memory store (restart).
+- **Historical sessions:** without a fresh observation the session payload is `static_only` with the geometry read from
+  PostgreSQL and validated; a complete geometry that only exists in the hot cache (unsaved or blocked) is never shown as
+  stored.
   The UI shows `STORED TRACK` and `POSITIONS UNAVAILABLE`; it never shows vehicles, flags or a race-control state.
   An unknown track stays unknown.
 

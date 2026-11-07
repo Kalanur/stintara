@@ -103,12 +103,13 @@ runtime: dict[str, dict[str, Any]] = {}
 track_store = TrackStore()  # hot cache of learned geometry; PostgreSQL (track_geometries) is the durable source
 track_lock = asyncio.Lock()  # serialises persistence of shared track models within this process
 TRACK_STORE_RETRY_SECONDS = 30.0
+TRACK_STORE_CONFLICT_RETRY_SECONDS = 5.0
 
 
 async def sync_track_store(state):
     """Lazily load a known track from PostgreSQL and persist a closed one. Never raises into message handling."""
     model, key = state.get("track_model"), state.get("track_key")
-    if pool is None or model is None or key is None:
+    if pool is None or model is None or key is None or model.persist_blocked:
         return
     sector_stale = (model.complete and model.stored and model.sector_boundaries() is not None
                     and model.sector_snapshot() != model.stored_sectors)
@@ -126,28 +127,37 @@ async def sync_track_store(state):
                         model.adopt(record)
                     model.store_checked = True
                 if model.complete and not model.stored:
-                    canonical = await track_repo.save_geometry(conn, key, model)
-                    if canonical is not None:
+                    outcome, canonical = await track_repo.save_geometry(conn, key, model)
+                    if outcome in (track_repo.SAVED, track_repo.EXISTING):
                         if canonical["points"] != model.points:   # another writer's lap is canonical
                             model.adopt(canonical)
                         model.stored, model.stored_sectors = True, model.sector_snapshot()
+                    elif outcome == track_repo.INCOMPATIBLE:
+                        model.persist_blocked = "schema"        # stable: never overwritten, never retried per message
+                    elif outcome == track_repo.INVALID:
+                        model.persist_blocked = "invalid"
+                    else:                                       # concurrent change: a later attempt may succeed
+                        model.store_retry_at = now + TRACK_STORE_CONFLICT_RETRY_SECONDS
                 elif (model.complete and model.sector_boundaries() is not None
                       and model.sector_snapshot() != model.stored_sectors):
                     if await track_repo.save_sectors(conn, key, model):
                         model.stored_sectors = model.sector_snapshot()
+                    else:                                       # row gone or of another schema: no per-message retries
+                        model.store_retry_at = now + TRACK_STORE_RETRY_SECONDS
         except Exception as exc:
             model.store_retry_at = now + TRACK_STORE_RETRY_SECONDS
             logger.warning(json.dumps({"event": "track_geometry_sync_failed", "error_class": type(exc).__name__}))
 
 
 async def stored_track_model(conn, provider, name, length):
-    """Static geometry for a session without live runtime state. Read-only; unknown stays unknown."""
+    """Static geometry for a session without live runtime state. Read-only; unknown stays unknown.
+
+    Only what PostgreSQL holds and validates counts: a complete geometry that merely exists in the hot cache (not
+    saved, or blocked by an incompatible schema) is never presented as a stored track.
+    """
     key = track_key(provider, name, length)
     if key is None:
         return None
-    cached = track_store.models.get(key)
-    if cached is not None and cached.complete:
-        return cached
     record = await track_repo.load_geometry(conn, key)
     if record is None:
         return None
