@@ -357,11 +357,16 @@ async def api_sessions_history(
         track: str | None = Query(None, min_length=1, max_length=256),
         status: str | None = Query(None, pattern="^(live|complete)$"),
         limit: int = Query(history.HISTORY_DEFAULT_LIMIT, ge=1, le=history.HISTORY_MAX_LIMIT),
-        offset: int = Query(0, ge=0)) -> dict[str, Any]:
+        cursor: str | None = Query(None, min_length=1, max_length=512)) -> dict[str, Any]:
     assert pool
+    if cursor is not None:
+        try:
+            history.decode_cursor(cursor)
+        except ValueError:
+            raise HTTPException(422, "invalid cursor") from None
     async with pool.acquire() as conn:
         return await history.query_sessions(conn, session_type=session_type, provider=provider,
-                                            track=track, status=status, limit=limit, offset=offset)
+                                            track=track, status=status, limit=limit, cursor=cursor)
 
 
 @app.get("/api/sessions/history/filters")

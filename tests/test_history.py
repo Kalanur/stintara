@@ -1,4 +1,5 @@
 """Persisted session history / recent results. Synthetic data only."""
+import base64
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -124,25 +125,79 @@ async def test_history_filters_are_parameterised(db):
     assert len((await get("/api/sessions/history")).json()["items"]) == 1
 
 
-async def test_history_limit_offset_bounds_and_pagination(db):
+async def walk(path, limit=2):
+    """Follow next_cursor until exhausted; returns the ids in order."""
+    ids, cursor = [], None
+    while True:
+        url = f"{path}{'&' if '?' in path else '?'}limit={limit}" + (f"&cursor={cursor}" if cursor else "")
+        data = (await get(url)).json()
+        ids += [x["id"] for x in data["items"]]
+        cursor = data["next_cursor"]
+        assert data["has_more"] == (cursor is not None)
+        if not cursor:
+            return ids
+
+
+def b64(raw):
+    return base64.urlsafe_b64encode(raw).decode()
+
+
+async def test_history_limit_cursor_bounds_and_pagination(db):
     sids = [await add_session(db, minutes=i) for i in range(5)]
     newest = [str(s) for s in reversed(sids)]
     page1 = (await get("/api/sessions/history?limit=2")).json()
-    page2 = (await get("/api/sessions/history?limit=2&offset=2")).json()
-    page3 = (await get("/api/sessions/history?limit=2&offset=4")).json()
-    assert [x["id"] for x in page1["items"] + page2["items"] + page3["items"]] == newest
-    assert [page1["has_more"], page2["has_more"], page3["has_more"]] == [True, True, False]
+    assert page1["has_more"] and "offset" not in page1
+    page2 = (await get(f"/api/sessions/history?limit=2&cursor={page1['next_cursor']}")).json()
+    assert [x["id"] for x in page1["items"] + page2["items"]] == newest[:4]
+    assert await walk("/api/sessions/history") == newest
     assert (await get("/api/sessions/history?limit=100")).status_code == 200
-    for bad in ("limit=0", "limit=101", "offset=-1", "status=bogus", "limit=x", "session_type="):
+    forged = [b64(b'["2026-01-01T00:00:00","' + str(uuid7()).encode() + b'"]'),  # naive timestamp
+              b64(b"[1,2]"),
+              b64(b'["2026-01-01T00:00:00+00:00","1; DROP TABLE sessions"]')]
+    for bad in ["limit=0", "limit=101", "status=bogus", "limit=x", "session_type=", "cursor=",
+                "cursor=garbage", "cursor=" + "A" * 600] + ["cursor=" + f for f in forged]:
         assert (await get("/api/sessions/history?" + bad)).status_code == 422, bad
     with pytest.raises(ValueError):
         async with db.acquire() as conn:
             await history.query_sessions(conn, limit=1000)
     assert (await get("/api/sessions/history")).json()["limit"] == 50
+    assert (await get("/api/sessions/recent-results")).json()["next_cursor"] is None
+
+
+async def test_cursor_ties_on_started_at_are_not_skipped_or_duplicated(db):
+    sids = [await add_session(db, minutes=0) for _ in range(5)]  # identical started_at
+    assert await walk("/api/sessions/history") == [str(s) for s in sorted(sids, reverse=True)]
+
+
+async def test_cursor_is_stable_when_session_inserted_between_pages(db):
+    old = [await add_session(db, minutes=i) for i in range(4)]
+    first = (await get("/api/sessions/history?limit=2")).json()
+    seen = [x["id"] for x in first["items"]]
+    inserted = await add_session(db, minutes=1000)  # newer than everything already seen
+    rest = (await get(f"/api/sessions/history?limit=2&cursor={first['next_cursor']}")).json()
+    seen += [x["id"] for x in rest["items"]]
+    assert seen == [str(s) for s in reversed(old)]  # no duplicate, nothing skipped
+    assert str(inserted) not in seen
+    assert (await get("/api/sessions/history?limit=1")).json()["items"][0]["id"] == str(inserted)
+
+
+async def test_cursor_is_stable_when_seen_live_session_completes_between_pages(db):
+    sids = [await add_session(db, minutes=i, status="live", ended=False) for i in range(5)]
+    first = (await get("/api/sessions/history?status=live&limit=2")).json()
+    seen = [x["id"] for x in first["items"]]
+    async with db.acquire() as conn:  # an already-seen live session completes
+        await conn.execute("UPDATE sessions SET status='complete',ended_at=now() WHERE id=$1", sids[4])
+    cursor = first["next_cursor"]
+    while cursor:
+        page = (await get(f"/api/sessions/history?status=live&limit=2&cursor={cursor}")).json()
+        seen += [x["id"] for x in page["items"]]
+        cursor = page["next_cursor"]
+    assert seen == [str(s) for s in reversed(sids)]
+    assert len(seen) == len(set(seen))
 
 
 async def test_history_empty_state_and_pages(db):
-    assert (await get("/api/sessions/history")).json() == {"items": [], "limit": 50, "offset": 0, "has_more": False}
+    assert (await get("/api/sessions/history")).json() == {"items": [], "limit": 50, "has_more": False, "next_cursor": None}
     assert (await get("/api/sessions/recent-results")).json()["items"] == []
     page = await get("/history")
     assert page.status_code == 200 and "SESSION HISTORY" in page.text and "__BUILD_LABEL__" not in page.text

@@ -25,10 +25,13 @@ const PAGE = 20;
 const FINISH = {1:'FIN', 2:'DNF', 3:'DSQ'};
 const when = value => { const d = value ? new Date(value) : null; return d && !isNaN(d) ? d.toLocaleString() : null; };
 const $ = id => document.querySelector(id);
-let offset = 0;
+let cursors = [null];   // cursors[i] = cursor that loads page i; page 1 has none
+let pageIndex = 0;
+let sequence = 0;       // only the newest request may touch the UI
+let controller = null;
 
-async function getJSON(url) {
-  const response = await fetch(url, {cache:'no-store'});
+async function getJSON(url, signal) {
+  const response = await fetch(url, {cache:'no-store', signal});
   if (!response.ok) throw new Error('Session history unavailable.');
   return response.json();
 }
@@ -46,8 +49,9 @@ function card(x) {
     <p><a href="/sessions/${esc(encodeURIComponent(x.id))}/live${focus}">View stored session →</a></p></div>`;
 }
 
-function query() {
-  const params = new URLSearchParams({limit: String(PAGE), offset: String(offset)});
+function query(cursor) {
+  const params = new URLSearchParams({limit: String(PAGE)});
+  if (cursor) params.set('cursor', cursor);
   for (const key of ['type', 'provider', 'track', 'status']) {
     const value = $('#' + key).value;
     if (value) params.set(key === 'type' ? 'session_type' : key, value);
@@ -56,16 +60,28 @@ function query() {
 }
 
 async function load() {
+  const mine = ++sequence;
+  if (controller) controller.abort();
+  controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const index = pageIndex;  // snapshot for this request
   const root = $('#list');
   try {
-    const data = await getJSON('/api/sessions/history?' + query());
+    const data = await getJSON('/api/sessions/history?' + query(cursors[index]), controller && controller.signal);
+    if (mine !== sequence) return;
     root.innerHTML = data.items.length ? data.items.map(card).join('')
       : '<div class="card muted">No stored sessions match these filters.</div>';
-    $('#prev').disabled = offset === 0;
-    $('#next').disabled = !data.has_more;
-    $('#page').textContent = data.items.length ? `${offset + 1}–${offset + data.items.length}` : '';
-  } catch (error) { root.textContent = error.message; }
+    cursors.length = index + 1;
+    if (data.has_more && data.next_cursor) cursors[index + 1] = data.next_cursor;
+    $('#prev').disabled = index === 0;
+    $('#next').disabled = !(data.has_more && data.next_cursor);
+    $('#page').textContent = data.items.length ? `Page ${index + 1}` : '';
+  } catch (error) {
+    if (mine !== sequence) return;
+    root.textContent = error.message;
+  }
 }
+
+function reset() { cursors = [null]; pageIndex = 0; load(); }
 
 async function loadFilters() {
   try {
@@ -78,9 +94,9 @@ async function loadFilters() {
 }
 
 for (const id of ['#type', '#provider', '#track', '#status'])
-  $(id).addEventListener('change', () => { offset = 0; load(); });
-$('#prev').addEventListener('click', () => { offset = Math.max(0, offset - PAGE); load(); });
-$('#next').addEventListener('click', () => { offset += PAGE; load(); });
+  $(id).addEventListener('change', reset);
+$('#prev').addEventListener('click', () => { if (pageIndex > 0) { pageIndex--; load(); } });
+$('#next').addEventListener('click', () => { if (cursors[pageIndex + 1]) { pageIndex++; load(); } });
 loadFilters();
 load();
 </script></body></html>

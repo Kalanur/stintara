@@ -1,7 +1,12 @@
 """Persisted-only session history. Reads PostgreSQL only; never runtime or live overlays."""
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 HISTORY_DEFAULT_LIMIT = 50
 HISTORY_MAX_LIMIT = 100
@@ -37,6 +42,25 @@ RECENT_ORDER = "s.ended_at DESC, s.id DESC"
 HISTORY_ORDER = "s.started_at DESC, s.id DESC"
 
 
+def encode_cursor(started_at: datetime, session_id: UUID) -> str:
+    """Opaque keyset position on (started_at DESC, id DESC); the UI never sees sort semantics."""
+    raw = json.dumps([started_at.isoformat(), str(session_id)], separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
+    try:
+        started, sid = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        if not isinstance(started, str) or not isinstance(sid, str):
+            raise ValueError
+        at = datetime.fromisoformat(started)
+        if at.tzinfo is None:
+            raise ValueError
+        return at, UUID(sid)
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
+        raise ValueError("invalid cursor") from exc
+
+
 def serialize(row) -> dict[str, Any]:
     """Stable response contract. Result fields are only set when persisted data is unambiguous."""
     winner = None
@@ -58,12 +82,12 @@ def serialize(row) -> dict[str, Any]:
 
 
 async def query_sessions(conn, *, session_type=None, provider=None, track=None, status=None,
-                         limit=HISTORY_DEFAULT_LIMIT, offset=0, recent=False) -> dict[str, Any]:
-    """One parameterised query for Home (recent=True) and /history; fetches limit+1 for has_more."""
+                         limit=HISTORY_DEFAULT_LIMIT, cursor=None, recent=False) -> dict[str, Any]:
+    """One parameterised query for Home (recent=True) and /history; keyset pagination, fetches limit+1 for has_more."""
     if status is not None and status not in STATUSES:
         raise ValueError("status must be one of: " + ", ".join(STATUSES))
-    if not 1 <= limit <= HISTORY_MAX_LIMIT or offset < 0:
-        raise ValueError("limit must be 1..%d and offset >= 0" % HISTORY_MAX_LIMIT)
+    if not 1 <= limit <= HISTORY_MAX_LIMIT:
+        raise ValueError("limit must be 1..%d" % HISTORY_MAX_LIMIT)
     where: list[str] = []
     args: list[Any] = []
     if recent:  # completed races with a real completion time; live ones never qualify
@@ -74,13 +98,20 @@ async def query_sessions(conn, *, session_type=None, provider=None, track=None, 
         if value is not None:
             args.append(value)
             where.append(f"{column}=${len(args)}")
-    args.extend([limit + 1, offset])
+    if cursor is not None and not recent:
+        at, sid = decode_cursor(cursor)
+        args.extend([at, sid])
+        where.append(f"(s.started_at, s.id) < (${len(args) - 1}, ${len(args)})")
+    args.append(limit + 1)
     sql = (_SELECT + (" WHERE " + " AND ".join(where) if where else "")
-           + f" ORDER BY {RECENT_ORDER if recent else HISTORY_ORDER}"
-           + f" LIMIT ${len(args) - 1} OFFSET ${len(args)}")
+           + f" ORDER BY {RECENT_ORDER if recent else HISTORY_ORDER} LIMIT ${len(args)}")
     rows = await conn.fetch(sql, *args)
-    return {"items": [serialize(r) for r in rows[:limit]], "limit": limit, "offset": offset,
-            "has_more": len(rows) > limit}
+    items = [serialize(r) for r in rows[:limit]]
+    has_more = len(rows) > limit
+    next_cursor = None
+    if has_more and not recent:
+        next_cursor = encode_cursor(items[-1]["started_at"], items[-1]["id"])
+    return {"items": items, "limit": limit, "has_more": has_more, "next_cursor": next_cursor}
 
 
 async def filter_options(conn) -> dict[str, list[str]]:

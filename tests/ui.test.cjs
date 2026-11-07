@@ -1169,7 +1169,7 @@ async function renderHistory(handler) {
 test('history page lists sessions with filters, escaping and pagination links', async () => {
   const handler = url => url.includes('/filters') ? {providers:['lmu','<x>'], tracks:['Synthetic Ring'], session_types:['Race']}
     : {items:[recentItem({track_name:'<script>x</script>'}), recentItem({id:'live-1', status:'live', ended_at:null})],
-       limit:20, offset:0, has_more:true};
+       limit:20, has_more:true, next_cursor:'c2'};
   const h = await renderHistory(handler);
   const list = h.el('#list').innerHTML;
   assert.match(list, /COMPLETE/); assert.match(list, /LIVE/);
@@ -1182,16 +1182,61 @@ test('history page lists sessions with filters, escaping and pagination links', 
   h.el('#type').value = 'Race'; h.el('#track').value = 'Synthetic Ring';
   await h.fire('#type:change');
   const last = h.urls.at(-1);
-  assert.match(last, /session_type=Race/); assert.match(last, /track=Synthetic\+Ring/); assert.match(last, /offset=0/);
+  assert.match(last, /session_type=Race/); assert.match(last, /track=Synthetic\+Ring/); assert.doesNotMatch(last, /cursor=|offset=/);
   await h.fire('#next:click');
-  assert.match(h.urls.at(-1), /offset=20/);
+  assert.match(h.urls.at(-1), /cursor=c2/); assert.match(h.urls.at(-1), /session_type=Race/);
+  assert.equal(h.el('#prev').disabled, false);
+  assert.match(h.el('#page').textContent, /Page 2/);
   await h.fire('#prev:click');
-  assert.match(h.urls.at(-1), /offset=0/);
+  assert.doesNotMatch(h.urls.at(-1), /cursor=/);
+  assert.equal(h.el('#prev').disabled, true);
 });
 
 test('history page empty state', async () => {
   const h = await renderHistory(url => url.includes('/filters') ? {providers:[], tracks:[], session_types:[]}
-    : {items:[], limit:20, offset:0, has_more:false});
+    : {items:[], limit:20, has_more:false, next_cursor:null});
   assert.match(h.el('#list').innerHTML, /No stored sessions/);
   assert.equal(h.el('#next').disabled, true);
+});
+
+test('history: a stale slower response never overwrites the newest request or pager', async () => {
+  const pending = [];
+  const handler = url => {
+    if (url.includes('/filters')) return {providers:[], tracks:[], session_types:[]};
+    const page = item => ({items:[item], limit:20, has_more:!url.includes('cursor') && !url.includes('session_type'), next_cursor:'c2'});
+    if (url.includes('cursor=c2')) return new Promise(resolve => pending.push(() => resolve(page(recentItem({id:'stale-page-2'})))));
+    if (url.includes('session_type=Race')) return page(recentItem({id:'fresh-filtered'}));
+    return page(recentItem({id:'page-1'}));
+  };
+  const h = await renderHistory(handler);
+  await h.fire('#next:click');                 // page 2 request stays pending
+  assert.match(h.el('#list').innerHTML, /page-1/);
+  h.el('#type').value = 'Race';
+  await h.fire('#type:change');                // newer filtered request resolves first
+  assert.match(h.el('#list').innerHTML, /fresh-filtered/);
+  pending.forEach(release => release());       // stale page-2 answer arrives afterwards
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.match(h.el('#list').innerHTML, /fresh-filtered/);
+  assert.doesNotMatch(h.el('#list').innerHTML, /stale-page-2/);
+  assert.equal(h.el('#prev').disabled, true);  // filter change reset pagination
+  assert.equal(h.el('#next').disabled, true);
+  assert.match(h.el('#page').textContent, /Page 1/);
+});
+
+test('history: a stale failing request cannot replace the current list with an error', async () => {
+  let fail;
+  const handler = url => {
+    if (url.includes('/filters')) return {providers:[], tracks:[], session_types:[]};
+    if (url.includes('cursor=c2')) return new Promise((_, reject) => { fail = reject; });
+    return {items:[recentItem({id: url.includes('session_type') ? 'filtered' : 'page-1'})], limit:20,
+            has_more:!url.includes('session_type'), next_cursor:'c2'};
+  };
+  const h = await renderHistory(handler);
+  await h.fire('#next:click');
+  h.el('#type').value = 'Race';
+  await h.fire('#type:change');
+  fail(new Error('late boom'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.match(h.el('#list').innerHTML, /filtered/);
+  assert.notEqual(h.el('#list').textContent, 'late boom');
 });
