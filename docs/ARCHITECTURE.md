@@ -123,6 +123,10 @@ V0.1 tester distribution uses the existing Python agent packaged as an unsigned 
 
 Operator provisioning is an internal `python -m app.provision_agent` CLI, not an HTTP API. A transaction reuses an explicitly supplied driver slug or creates a UUIDv7 driver, and creates a uniquely named UUIDv7 agent with a fresh 32-byte random token. Only SHA-256 is persisted; plaintext is emitted once on successful CLI completion. Duplicate agent names reject the transaction without implicit rotation. Display names do not establish identity. Each tester receives a distinct agent/token; bootstrap credentials are not shared. Existing database settings and password-file semantics apply, without schema changes. Existing duplicate-connection protection, simulator boundaries and session association rules remain unchanged. Packaging and provisioning enable field-data collection, not automatic cross-agent matching or race/split convergence.
 
+### Agent versioning and release distribution
+
+The Windows agent has its own SemVer (`agent/version.py`, currently 0.2.0), independent of server version/revision; the wire protocol stays `stintara-agent-v1`. Build channel and full git revision are injected at build time into a generated, ignored `_build_info.py` (no runtime `.git` dependency); source runs report `dev`/`unknown`, CI/release builds require a 40-character revision. `--version` prints version, build, revision and protocol without config or network. Releases are component-scoped `agent-vX.Y.Z` tags and produce a draft pre-release with `StintaraAgent-<version>-windows-x64.zip` (EXE, public example config, README) and `SHA256SUMS.txt`; server/GHCR releases are unaffected. The EXE is unsigned. Agent 0.2.0 needs a server with PR #39 or newer (`race_control` message type). Agent 0.1.0 is a retroactive, pre-release baseline built from the original CI artifact, not a rebuild.
+
 ## Maintaining these decisions
 
 Update this document when an architectural decision changes. Keep intended behavior and verified implementation status distinct. For development rules, read [AGENTS.md](../AGENTS.md).

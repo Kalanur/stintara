@@ -25,7 +25,7 @@ Read [AGENTS.md](AGENTS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
 Normal testers do not need Python, Git, a virtual environment or PowerShell:
 
 1. Start LMU Pitwall locally; it must run separately from Stintara.
-2. Download the `StintaraAgent-windows` artifact from the **Build Windows test agent** GitHub Actions run for the operator-approved revision and extract it.
+2. Download `StintaraAgent-<version>-windows-x64.zip` from the GitHub Release tagged `agent-v<version>`, verify it against `SHA256SUMS.txt` and extract it. Run `StintaraAgent.exe --version` to see agent version, build channel, git revision and protocol (no config or network needed).
 3. Place the private `stintara-agent.json` supplied by the operator next to `StintaraAgent.exe`. The included `stintara-agent.example.json` is only a template and cannot authenticate.
 4. Double-click `StintaraAgent.exe` or start it from a console. Expect `Connected to Stintara as ...` and `Connected to LMU Pitwall`. Ctrl+C stops the agent cleanly. If a window closes immediately, start it from a console to read the safe configuration error.
 5. Keep the token/config private. Each tester needs their own agent and token; never share the bootstrap token. The same agent cannot connect twice simultaneously (`agent already connected`).
@@ -47,7 +47,7 @@ py -3.13 -m venv .venv
 .\dist\StintaraAgent.exe --help
 ```
 
-The build script resolves source/output paths from its own location, so it also works from another working directory. It produces `dist/StintaraAgent.exe` using PyInstaller Onefile and copies only the public example config alongside it. Generated specifications and intermediate files stay under ignored `build/`; binaries stay under ignored `dist/`. No operator config is embedded. The bounded dependency versions describe a repeatable build procedure, not a guarantee of byte-identical binaries across dependency updates. CI uses Windows and Python 3.13, runs the help smoke test and uploads only these two distributable files as an Actions artifact; it does not create a release.
+The build script resolves source/output paths from its own location, so it also works from another working directory. It produces `dist/StintaraAgent.exe` using PyInstaller Onefile and copies only the public example config alongside it. Generated specifications and intermediate files stay under ignored `build/`; binaries stay under ignored `dist/`. No operator config is embedded. The bounded dependency versions describe a repeatable build procedure, not a guarantee of byte-identical binaries across dependency updates. CI uses Windows and Python 3.13, injects the checked-out git revision, runs the help smoke test, builds `StintaraAgent-<version>-windows-x64.zip` plus `SHA256SUMS.txt`, verifies `--version`, exact ZIP content (EXE, public example, `README.txt`) and checksum, and uploads those as an Actions artifact. Only pushing an explicit `agent-vX.Y.Z` tag (which must match `AGENT_VERSION` in `agent/version.py`) runs `agent-release.yml`, which creates a *draft pre-release* for manual review; branch pushes never release. Agent versions are independent of the server and recorded in [agent/CHANGELOG.md](agent/CHANGELOG.md). Local runs without injected metadata report `Build: dev` and `Revision: unknown`; CI/release builds refuse an unknown revision. The EXE and ZIP are unsigned.
 
 ### Operator provisioning
 

@@ -11,9 +11,11 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 try:
     from .config import load_config
     from .pitwall import normalize
+    from .version import PROTOCOL, version_text
 except ImportError:  # python agent/stintara_agent.py
     from config import load_config
     from pitwall import normalize
+    from version import PROTOCOL, version_text
 
 
 async def forward(pitwall, uplink):
@@ -33,7 +35,7 @@ async def forward(pitwall, uplink):
         if kind in last_sent and now - last_sent[kind] < interval:
             continue
         await uplink.send(json.dumps({
-            "protocol": "stintara-agent-v1", "message_type": kind,
+            "protocol": PROTOCOL, "message_type": kind,
             "payload": payload,
         }, allow_nan=False, separators=(",", ":")))
         last_sent[kind] = now
@@ -72,7 +74,7 @@ async def run_once(config):
 async def connected_run(config):
     async with websockets.connect(config.server_ws, max_size=1024 * 1024) as uplink:
         await uplink.send(json.dumps({
-            "type": "agent_hello", "protocol": "stintara-agent-v1",
+            "type": "agent_hello", "protocol": PROTOCOL,
             "token": config.token, "simulator": "lmu",
         }))
         welcome = json.loads(await asyncio.wait_for(uplink.recv(), timeout=10))
@@ -110,9 +112,9 @@ class SafeArgumentParser(argparse.ArgumentParser):
 
 
 def cli(argv=None):
-    parser = SafeArgumentParser(description="Stintara test agent; keep your JSON configuration private.")
+    parser = SafeArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter, description="Stintara test agent; keep your JSON configuration private.")
     parser.add_argument("--config", metavar="PATH", help="JSON config (default: beside the executable or agent script)")
-    parser.add_argument("--version", action="version", version="Stintara Agent 0.1.0")
+    parser.add_argument("--version", action="version", version=version_text())
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
