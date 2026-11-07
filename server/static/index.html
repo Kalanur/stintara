@@ -4,10 +4,12 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Stintara</title>
 <style>
-body{font-family:system-ui,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;background:#111;color:#eee}a{color:#fff}.muted{color:#999}.card{border:1px solid #333;border-radius:14px;padding:18px;margin:14px 0;background:#171717}.live{color:#57d68d;font-weight:700}.big{font-size:28px;font-weight:700}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:12px}.metric{background:#202020;padding:12px;border-radius:10px}
+body{font-family:system-ui,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;background:#111;color:#eee}a{color:#fff}.muted{color:#999}.card{border:1px solid #333;border-radius:14px;padding:18px;margin:14px 0;background:#171717}.live{color:#57d68d;font-weight:700}.big{font-size:28px;font-weight:700}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:12px}.metric{background:#202020;padding:12px;border-radius:10px}.complete{color:#9aa7b4;font-weight:700}
 </style>
 </head><body>
 <h1>Stintara</h1><p class="muted">LIVE SESSIONS</p><div id="live">Loading…</div>
+<p class="muted" style="margin-top:32px">RECENT RESULTS</p><div id="recent">Loading…</div>
+<p><a href="/history">View session history →</a></p>
 <footer class="muted" style="margin-top:24px;font-size:12px;overflow-wrap:anywhere">__BUILD_LABEL__</footer>
 <script>
 
@@ -18,7 +20,30 @@ async function getJSON(url) {
   return response.json();
 }
 
+const FINISH = {1:'FIN', 2:'DNF', 3:'DSQ'};
+const when = value => { const d = value ? new Date(value) : null; return d && !isNaN(d) ? d.toLocaleString() : null; };
+function resultCard(x) {
+  const w = x.winner, k = x.stintara_driver, ended = when(x.ended_at);
+  const focus = k ? `?focus=${encodeURIComponent(k.participant_id)}` : '';
+  return `<div class="card"><div class="complete">COMPLETE</div>
+    <h2>${esc(x.session_type)} · ${esc(x.track_name)}</h2>
+    <div>${esc(x.simulator_provider)} · ${esc(x.participant_count)} participants</div>
+    <p class="muted">${ended ? `Finished ${esc(ended)}` : 'Finish time unknown'}
+    ${w ? `<br>Winner: ${esc(w.display_name)}` : ''}
+    ${k ? `<br>Stintara Driver: ${esc(k.display_name)}${k.position != null ? ` · P${esc(k.position)}` : ''}${FINISH[k.finish_status] ? ` · ${FINISH[k.finish_status]}` : ''}` : ''}</p>
+    <p><a href="/sessions/${esc(encodeURIComponent(x.id))}/live${focus}">View stored session →</a></p></div>`;
+}
+async function refreshRecent() {
+  const root = document.querySelector('#recent');
+  try {
+    const data = (await getJSON('/api/sessions/recent-results')).items;
+    root.innerHTML = data.length ? data.map(resultCard).join('')
+      : '<div class="card muted">No completed races stored yet.</div>';
+  } catch (error) { root.textContent = 'Recent results unavailable.'; }
+}
+let ticks = 0;
 async function refresh() {
+  if (++ticks % 30 === 0) refreshRecent();
   const root = document.querySelector('#live');
   try {
     const data = await getJSON('/api/sessions/live');
@@ -31,5 +56,6 @@ async function refresh() {
   } catch (error) { root.textContent = error.message; }
   finally { setTimeout(refresh, 1000); }
 }
+refreshRecent();
 refresh();
 </script></body></html>

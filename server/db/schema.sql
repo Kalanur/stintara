@@ -78,6 +78,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_live ON sessions(status, started_at DESC);
+-- History browser (newest start first) and Home "recent results" (completed races by completion time).
+CREATE INDEX IF NOT EXISTS ix_sessions_history ON sessions(started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ix_sessions_recent_races ON sessions(ended_at DESC, id DESC)
+    WHERE status='complete' AND session_type='Race' AND ended_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS session_observations (
     id uuid PRIMARY KEY,

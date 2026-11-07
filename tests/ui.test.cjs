@@ -12,17 +12,20 @@ async function render(file, data, ok=true, status=200) {
   const html = readFileSync(path.join(__dirname, '../server/static', file), 'utf8');
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1].replace('__WEATHER_UI__', weatherScript()).replace('__DRIVER_SLUG__', '"driver"').replace('__SESSION_ID__', '"session"');
   const root = {innerHTML: '', textContent: ''};
+  const recent = {innerHTML: '', textContent: ''};
   const selector = {innerHTML:'', value:'', addEventListener() {}};
   const fuel = {innerHTML:'',textContent:''};
   let finish;
   const done = new Promise(resolve => { finish = resolve; });
   vm.runInNewContext(script, {
-    document: {querySelector: value => value === '#focus' ? selector : value === '#fuel' ? fuel : root},
+    document: {querySelector: value => value === '#focus' ? selector : value === '#fuel' ? fuel : value === '#recent' ? recent : root},
     URL, location:{href:'http://localhost/sessions/session/live'}, history:{replaceState() {}},
-    fetch: async () => ({ok, status, json: async () => data}),
+    fetch: async url => ({ok, status, json: async () => typeof data === 'function' ? data(url) : data}),
     setTimeout: finish,
   });
   await done;
+  await new Promise(resolve => setImmediate(resolve));
+  root.recent = recent;
   return root;
 }
 
@@ -1112,4 +1115,128 @@ test('desktop layouts reserve room for Head-to-Head, Weather and Strategy withou
   assert.match(css, /\.h2h dl\{grid-template-columns:1fr auto 1fr auto/);
   assert.equal((css.match(/body\{[^}]*font:14px/g) || []).length, 1);                 // base font size unchanged
   for (const block of css.split('@media').slice(1)) assert.doesNotMatch(block.split('\n}\n')[0], /body\{[^}]*font(-size)?:/);
+});
+
+const recentItem = (over={}) => ({id:'sess-1', simulator_provider:'lmu', session_type:'Race', track_name:'Synthetic Ring',
+  status:'complete', started_at:'2026-11-07T10:00:00Z', ended_at:'2026-11-07T11:00:00Z', participant_count:38,
+  winner:null, stintara_driver:null, ...over});
+const homeData = items => url => url.includes('recent-results') ? {items} : [];
+
+test('frontpage shows recent results, history link and keeps live sessions', async () => {
+  const html = readFileSync(path.join(__dirname, '../server/static/index.html'), 'utf8');
+  assert.match(html, /RECENT RESULTS/);
+  assert.match(html, /href="\/history"/);
+  const root = await render('index.html', homeData([recentItem({
+    track_name:'<img onerror=alert(1)>',
+    winner:{participant_id:'w', display_name:'<b>Winner</b>', position:1, finish_status:1},
+    stintara_driver:{participant_id:'k 1', display_name:'Synthetic', position:7, finish_status:1}})]));
+  assert.match(root.innerHTML, /No live sessions/);
+  const r = root.recent.innerHTML;
+  assert.match(r, /38 participants/);
+  assert.match(r, /Winner: &lt;b&gt;Winner/);
+  assert.match(r, /Stintara Driver: Synthetic · P7 · FIN/);
+  assert.match(r, /\/sessions\/sess-1\/live\?focus=k%201/);
+  assert.match(r, /Finished /);
+  assert.doesNotMatch(r, /<img|<b>/);
+});
+
+test('recent results: empty state, unknown winner is not invented, error is contained', async () => {
+  assert.match((await render('index.html', homeData([]))).recent.innerHTML, /No completed races/);
+  const r = (await render('index.html', homeData([recentItem({ended_at:null})]))).recent.innerHTML;
+  assert.doesNotMatch(r, /Winner|Stintara Driver/);
+  assert.match(r, /Finish time unknown/);
+  const root = await render('index.html', url => { if (url.includes('recent')) throw new Error('x'); return []; });
+  assert.match(root.innerHTML, /No live sessions/);
+});
+
+async function renderHistory(handler) {
+  const html = readFileSync(path.join(__dirname, '../server/static/history.html'), 'utf8');
+  assert.match(html, /SESSION HISTORY/);
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const els = {};
+  const listeners = {};
+  const el = id => els[id] ??= {innerHTML:'', textContent:'', value:'', disabled:false,
+    addEventListener(type, fn) { listeners[id + ':' + type] = fn; }};
+  const urls = [];
+  const ctx = {document:{querySelector: el}, URLSearchParams, setTimeout, fetch: async url => {
+    urls.push(url); return {ok:true, json: async () => handler(url)}; }};
+  vm.runInNewContext(script, ctx);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  await settle();
+  return {el, urls, settle, fire: async id => { listeners[id](); await settle(); }};
+}
+
+test('history page lists sessions with filters, escaping and pagination links', async () => {
+  const handler = url => url.includes('/filters') ? {providers:['lmu','<x>'], tracks:['Synthetic Ring'], session_types:['Race']}
+    : {items:[recentItem({track_name:'<script>x</script>'}), recentItem({id:'live-1', status:'live', ended_at:null})],
+       limit:20, has_more:true, next_cursor:'c2'};
+  const h = await renderHistory(handler);
+  const list = h.el('#list').innerHTML;
+  assert.match(list, /COMPLETE/); assert.match(list, /LIVE/);
+  assert.match(list, /&lt;script&gt;/); assert.doesNotMatch(list, /<script>/);
+  assert.match(list, /\/sessions\/live-1\/live/);
+  assert.doesNotMatch(list, /Winner/);
+  assert.match(h.el('#provider').innerHTML, /&lt;x&gt;/);
+  assert.equal(h.el('#prev').disabled, true);
+  assert.equal(h.el('#next').disabled, false);
+  h.el('#type').value = 'Race'; h.el('#track').value = 'Synthetic Ring';
+  await h.fire('#type:change');
+  const last = h.urls.at(-1);
+  assert.match(last, /session_type=Race/); assert.match(last, /track=Synthetic\+Ring/); assert.doesNotMatch(last, /cursor=|offset=/);
+  await h.fire('#next:click');
+  assert.match(h.urls.at(-1), /cursor=c2/); assert.match(h.urls.at(-1), /session_type=Race/);
+  assert.equal(h.el('#prev').disabled, false);
+  assert.match(h.el('#page').textContent, /Page 2/);
+  await h.fire('#prev:click');
+  assert.doesNotMatch(h.urls.at(-1), /cursor=/);
+  assert.equal(h.el('#prev').disabled, true);
+});
+
+test('history page empty state', async () => {
+  const h = await renderHistory(url => url.includes('/filters') ? {providers:[], tracks:[], session_types:[]}
+    : {items:[], limit:20, has_more:false, next_cursor:null});
+  assert.match(h.el('#list').innerHTML, /No stored sessions/);
+  assert.equal(h.el('#next').disabled, true);
+});
+
+test('history: a stale slower response never overwrites the newest request or pager', async () => {
+  const pending = [];
+  const handler = url => {
+    if (url.includes('/filters')) return {providers:[], tracks:[], session_types:[]};
+    const page = item => ({items:[item], limit:20, has_more:!url.includes('cursor') && !url.includes('session_type'), next_cursor:'c2'});
+    if (url.includes('cursor=c2')) return new Promise(resolve => pending.push(() => resolve(page(recentItem({id:'stale-page-2'})))));
+    if (url.includes('session_type=Race')) return page(recentItem({id:'fresh-filtered'}));
+    return page(recentItem({id:'page-1'}));
+  };
+  const h = await renderHistory(handler);
+  await h.fire('#next:click');                 // page 2 request stays pending
+  assert.match(h.el('#list').innerHTML, /page-1/);
+  h.el('#type').value = 'Race';
+  await h.fire('#type:change');                // newer filtered request resolves first
+  assert.match(h.el('#list').innerHTML, /fresh-filtered/);
+  pending.forEach(release => release());       // stale page-2 answer arrives afterwards
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.match(h.el('#list').innerHTML, /fresh-filtered/);
+  assert.doesNotMatch(h.el('#list').innerHTML, /stale-page-2/);
+  assert.equal(h.el('#prev').disabled, true);  // filter change reset pagination
+  assert.equal(h.el('#next').disabled, true);
+  assert.match(h.el('#page').textContent, /Page 1/);
+});
+
+test('history: a stale failing request cannot replace the current list with an error', async () => {
+  let fail;
+  const handler = url => {
+    if (url.includes('/filters')) return {providers:[], tracks:[], session_types:[]};
+    if (url.includes('cursor=c2')) return new Promise((_, reject) => { fail = reject; });
+    return {items:[recentItem({id: url.includes('session_type') ? 'filtered' : 'page-1'})], limit:20,
+            has_more:!url.includes('session_type'), next_cursor:'c2'};
+  };
+  const h = await renderHistory(handler);
+  await h.fire('#next:click');
+  h.el('#type').value = 'Race';
+  await h.fire('#type:change');
+  fail(new Error('late boom'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.match(h.el('#list').innerHTML, /filtered/);
+  assert.notEqual(h.el('#list').textContent, 'late boom');
 });
