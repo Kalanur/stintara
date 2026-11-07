@@ -64,6 +64,8 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 @keyframes rc-pulse{50%{opacity:.55}}
 .map-area{flex:1;min-height:0;min-width:0;margin-top:6px;position:relative;display:flex}
 .map-area svg{flex:1;width:100%;height:100%;min-height:0;display:block}
+.orient-toggle{font:inherit;font-size:12px;background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:1px 8px;cursor:pointer}
+.orient-toggle:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .map-note{color:var(--muted);font-size:12px;margin:4px 0 0}
 .trk-base{fill:none;stroke:#52677c;stroke-width:5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .trk-yellow{fill:none;stroke:var(--attention);stroke-width:9;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;opacity:.95}
@@ -127,7 +129,7 @@ summary{cursor:pointer;color:var(--muted)}
 footer{font-size:11px;color:var(--muted);text-align:right;padding-top:4px;overflow-wrap:anywhere}
 
 @media(min-width:1200px) and (min-height:951px),(min-width:1800px) and (min-height:800px){body{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
-.dashboard{height:100%;overflow:hidden;grid-template-rows:auto auto minmax(100px,1fr) auto 150px}
+.dashboard{height:100%;overflow:hidden;grid-template-rows:auto auto minmax(100px,1fr) auto 180px}
 /* The map takes the height the former right-column Focus panel used; Focus becomes a slim strip above the field. */
 .focus-panel{grid-column:1;grid-row:2;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);column-gap:18px;align-items:start;padding-top:8px;padding-bottom:8px}
 .focus-panel>h2{grid-column:1/-1;margin:0 0 2px}
@@ -136,20 +138,29 @@ footer{font-size:11px;color:var(--muted);text-align:right;padding-top:4px;overfl
 .focus-panel .sector-context{margin:2px 0}
 .standings-panel{grid-row:3/5}
 .map-panel{grid-row:2/4}
+/* Title, provider line and distance share one row; Head-to-Head cards use two label/value pairs per row. */
+.session-header .context{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:18px}
+.session-header .context p{margin:2px 0}
+.comparison-panel h2,.comparison-note{display:inline}
+.comparison-note{margin-left:12px}
+.h2h{margin-top:4px}
+.h2h dl{grid-template-columns:1fr auto 1fr auto;column-gap:10px}
+.h2h dd{white-space:nowrap}
+.fuel-panel{max-height:clamp(390px,calc(100dvh - 760px),470px)}
 }
 
 /* Compact desktop uses available CSS viewport height, not monitor dimensions. */
 @media(min-width:1800px) and (min-height:800px) and (max-height:950px){
 body{padding-top:8px}
 .toolbar{padding-bottom:6px}
-.dashboard{gap:8px}
+.dashboard{gap:8px;grid-template-rows:auto auto minmax(100px,1fr) auto 172px}
 .panel,.session-header{padding-top:8px;padding-bottom:8px}
 .standings-panel{padding:0}
 .panel-heading{padding:8px 12px}
 .session-header p{margin:3px 0}
 .focus-status{margin:3px 0;gap:4px 12px}
 .sector-context{margin-top:4px}
-.fuel-panel{max-height:clamp(180px,calc(100dvh - 580px),350px)}
+.fuel-panel{max-height:clamp(180px,calc(100dvh - 540px),400px)}
 .fuel-panel .resource-settings{position:sticky;bottom:0;z-index:1;background:var(--raised);box-shadow:0 8px 0 var(--panel)}
 .resource-grid{margin:4px 0;gap:6px}
 .plan-control{margin:4px 0}
@@ -472,26 +483,82 @@ function learningLabel(geometry) {
   const progress = mapNumber(geometry.progress);
   return progress === null ? 'LEARNING TRACK' : `LEARNING TRACK · ${Math.round(progress * 100)}%`;
 }
-function trackMapSvg(track, focusId) {
+// --- Orientation: presentation only. Raw coordinates, track identity and lap distance are never changed. ---
+const ORIENTATION_KEY = 'stintara:trackmap:orientation:v1';
+const ORIENTATION_MODES = ['auto', 'original'];
+const MIN_AXIS_RATIO = 0.9;   // sqrt(minor/major variance) at or above this: no meaningful dominant axis
+function orientationStore() { try { return typeof localStorage === 'undefined' ? null : localStorage; } catch { return null; } }
+function readOrientations() {
+  try {
+    const raw = JSON.parse(orientationStore()?.getItem(ORIENTATION_KEY) || '{}');
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch { return {}; }
+}
+const orientationMemory = new Map();   // keeps the choice for this page even when storage is blocked
+function trackOrientation(trackName) {
+  const mode = typeof trackName === 'string' ? orientationMemory.get(trackName) ?? readOrientations()[trackName] : null;
+  return ORIENTATION_MODES.includes(mode) ? mode : 'auto';
+}
+function saveTrackOrientation(trackName, mode) {
+  if (typeof trackName !== 'string' || !trackName || !ORIENTATION_MODES.includes(mode)) return false;
+  orientationMemory.set(trackName, mode);
+  try {
+    const all = Object.fromEntries(Object.entries(readOrientations()).filter(([, value]) => ORIENTATION_MODES.includes(value)).slice(-63));
+    delete all[trackName]; all[trackName] = mode;
+    orientationStore().setItem(ORIENTATION_KEY, JSON.stringify(all));
+    return true;
+  } catch { return false; }
+}
+// Screen plane: x right, y = -z (north-up of the simulator frame). Returns the rotation (radians) that lays the
+// principal axis of the points horizontally, or null when the data cannot support it (too few points, no spread,
+// near-isotropic shape). A rotation never mirrors: the determinant of the applied matrix is +1.
+function principalRotation(points) {
+  const pts = (points || []).filter(p => Array.isArray(p) && mapNumber(p[0]) !== null && mapNumber(p[1]) !== null);
+  if (pts.length < 8) return null;
+  const n = pts.length;
+  const cx = pts.reduce((a, p) => a + p[0], 0) / n, cy = pts.reduce((a, p) => a - p[1], 0) / n;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const p of pts) { const dx = p[0] - cx, dy = -p[1] - cy; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  sxx /= n; syy /= n; sxy /= n;
+  const half = (sxx - syy) / 2, root = Math.hypot(half, sxy), major = (sxx + syy) / 2 + root, minor = (sxx + syy) / 2 - root;
+  if (!(major > 1e-6) || !(minor >= 0) || Math.sqrt(minor / major) >= MIN_AXIS_RATIO) return null;
+  const theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  return Math.abs(theta) < 0.00873 ? null : { theta, cx, cy };   // under 0.5°: already horizontal
+}
+// Projection of one world (x, z) point to the screen plane. One instance serves every visual element.
+function trackProjection(geometry, mode) {
+  const identity = p => [p[0], -p[1]];
+  if (mode !== 'auto' || !geometry || geometry.complete !== true || geometry.closed !== true) return { project: identity, angle: 0 };
+  const rotation = principalRotation(geometry.points);
+  if (!rotation) return { project: identity, angle: 0 };
+  const cos = Math.cos(rotation.theta), sin = Math.sin(rotation.theta);
+  return { angle: -rotation.theta, project: p => {
+    const dx = p[0] - rotation.cx, dy = -p[1] - rotation.cy;
+    return [cos * dx + sin * dy + rotation.cx, -sin * dx + cos * dy + rotation.cy];
+  } };
+}
+function trackMapSvg(track, focusId, mode = 'auto') {
   const geometry = track?.geometry || {};
   const points = (geometry.points || []).filter(p => Array.isArray(p) && mapNumber(p[0]) !== null && mapNumber(p[1]) !== null);
   const vehicles = (track?.vehicles || []).filter(v => mapNumber(v.x) !== null && mapNumber(v.z) !== null);
-  const all = points.concat(vehicles.map(v => [v.x, v.z]));
+  const { project } = trackProjection(geometry, mode);
+  const screenPoints = points.map(project);
+  const screenVehicles = vehicles.map(v => ({ v, at: project([v.x, v.z]) }));
+  const all = screenPoints.concat(screenVehicles.map(c => c.at));
   if (!all.length) return '<div class="placeholder"><span>Waiting for position data</span></div>';
-  // Horizontal world plane only (x, z); elevation never distorts the 2D outline. Screen y = -z.
-  const xs = all.map(p => p[0]), ys = all.map(p => -p[1]);
+  const xs = all.map(p => p[0]), ys = all.map(p => p[1]);
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
   const span = Math.max(maxX - minX, maxY - minY, 50);
   const pad = span * 0.06;
   const fmt = n => n.toFixed(1);
-  const path = list => list.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0])} ${fmt(-p[1])}`).join('');
+  const path = list => list.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0])} ${fmt(p[1])}`).join('');
   const sectors = Array.isArray(geometry.point_sectors) && geometry.point_sectors.length === points.length ? geometry.point_sectors : null;
   const rc = track?.race_control;
   const yellow = rc && rc.fresh ? (rc.sector_flags || []).map(state => state === 'local_yellow') : [];
   let base = '', overlay = '';
   if (points.length > 1) {
     // A closing edge exists only when the server learned and verified a closed lap.
-    const ring = geometry.closed ? points.concat([points[0]]) : points;
+    const ring = geometry.closed ? screenPoints.concat([screenPoints[0]]) : screenPoints;
     base = `<path class="trk-base" d="${path(ring)}"/>`;
     if (sectors && yellow.some(Boolean)) {
       const tags = geometry.closed ? sectors.concat([sectors[0]]) : sectors;
@@ -508,28 +575,34 @@ function trackMapSvg(track, focusId) {
   }
   const radius = span / 70;
   const fresh = track?.vehicles_fresh === true;
-  const ordered = vehicles.slice().sort((a, b) => (a.participant_id === focusId) - (b.participant_id === focusId));
-  const cars = ordered.map(v => {
+  const ordered = screenVehicles.slice().sort((a, b) => (a.v.participant_id === focusId) - (b.v.participant_id === focusId));
+  const cars = ordered.map(({ v, at }) => {
     const focus = Boolean(focusId) && v.participant_id === focusId;
     const label = `${v.position ?? '—'} · ${v.name ?? 'Unknown'}${v.in_pits ? ' · pit' : ''}${fresh ? '' : ' · stale'}`;
-    const cx = fmt(v.x), cy = fmt(-v.z);
+    const cx = fmt(at[0]), cy = fmt(at[1]);
     if (focus && fresh) return `<g><circle class="trk-focus-ring" cx="${cx}" cy="${cy}" r="${fmt(radius * 2.1)}"/><circle class="trk-focus" cx="${cx}" cy="${cy}" r="${fmt(radius * 1.35)}"><title>${esc(label)} · focus</title></circle></g>`;
     return `<circle class="trk-car${v.in_pits ? ' pit' : ''}${fresh ? '' : ' stale'}" cx="${cx}" cy="${cy}" r="${fmt(radius)}"><title>${esc(label)}</title></circle>`;
   }).join('');
   return `<svg viewBox="${fmt(minX - pad)} ${fmt(minY - pad)} ${fmt(maxX - minX + 2 * pad)} ${fmt(maxY - minY + 2 * pad)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Track map">${base}${overlay}${cars}</svg>`;
 }
-function trackMapPanel(d, focusId) {
+function trackMapPanel(d, focusId, mode) {
   const track = d.track_map || {};
   const geometry = track.geometry;
   const rc = track.race_control;
-  const learning = learningLabel(geometry);
-  const stale = track.vehicles_fresh === false && (track.vehicles || []).length ? '<span class="rc-badge rc-muted">POSITIONS STALE</span>' : '';
-  const flagOnly = rc && rc.fresh && (rc.sector_flags || []).includes('local_yellow') && geometry && !geometry.point_sectors
+  const orientation = ORIENTATION_MODES.includes(mode) ? mode : trackOrientation(d.session?.track_name);
+  // A session without live runtime state shows the persisted track only: no vehicles, no race control, no flags.
+  const storedOnly = track.static_only === true && geometry?.complete === true;
+  const learning = storedOnly ? '' : learningLabel(geometry);
+  const stale = !storedOnly && track.vehicles_fresh === false && (track.vehicles || []).length ? '<span class="rc-badge rc-muted">POSITIONS STALE</span>' : '';
+  const storedBadges = storedOnly ? '<span class="rc-badge rc-muted" title="Persisted track geometry">STORED TRACK</span><span class="rc-badge rc-muted" title="No live observation of this session">POSITIONS UNAVAILABLE</span>' : '';
+  const flagOnly = !storedOnly && rc && rc.fresh && (rc.sector_flags || []).includes('local_yellow') && geometry && !geometry.point_sectors
     ? '<p class="map-note">Yellow sector shown by flag only · sector layer not yet known</p>' : '';
+  const toggle = geometry?.complete === true && (geometry.points || []).length > 1
+    ? `<button type="button" id="orientation-toggle" class="orient-toggle" title="Presentation only; stored coordinates are never rotated. Click to switch to ${orientation === 'auto' ? 'ORIGINAL' : 'AUTO'}.">Orientation: ${orientation === 'auto' ? 'AUTO' : 'ORIGINAL'}</button>` : '';
   return `<section class="panel map-panel" aria-label="Track map and race control"><div class="map-head"><h2>Track Map</h2>
-    ${learning ? `<span class="rc-badge rc-muted">${esc(learning)}</span>` : ''}${stale}
-    <div class="rc-badges">${raceControlBadges(rc)}</div></div>
-    <div class="map-area">${trackMapSvg(track, focusId)}</div>${flagOnly}</section>`;
+    ${learning ? `<span class="rc-badge rc-muted">${esc(learning)}</span>` : ''}${storedBadges}${stale}${toggle}
+    <div class="rc-badges">${storedOnly ? '' : raceControlBadges(rc)}</div></div>
+    <div class="map-area">${trackMapSvg(track, focusId, orientation)}</div>${flagOnly}</section>`;
 }
 const sessionId = __SESSION_ID__;
 const selector = document.querySelector('#focus');
@@ -609,7 +682,7 @@ function renderSession(d) {
     const element = document.querySelector('#'+id);
     return [id, element?.scrollLeft || 0, element?.scrollTop || 0];
   });
-  const activeId = ['full-scroll', 'relative-scroll', 'relative-toggle', 'weather-toggle'].includes(document.activeElement?.id) ? document.activeElement.id : null;
+  const activeId = ['full-scroll', 'relative-scroll', 'relative-toggle', 'weather-toggle', 'orientation-toggle'].includes(document.activeElement?.id) ? document.activeElement.id : null;
   const weatherOpen = document.querySelector('#weather-details')?.open || false;
   const relativeOpen = document.querySelector('#relative-details')?.open || false;
   const options = '<option value="">Choose a participant</option>' + d.participants.map(p =>
@@ -649,6 +722,12 @@ function renderSession(d) {
     if (element) { element.scrollLeft = left; element.scrollTop = top; }
   }
 }
+document.querySelector('#root')?.addEventListener?.('click', event => {
+  if (!event.target?.closest?.('#orientation-toggle') || !latestData) return;
+  const name = latestData.session?.track_name;
+  saveTrackOrientation(name, trackOrientation(name) === 'auto' ? 'original' : 'auto');
+  renderSession(latestData);
+});
 selector.addEventListener('change', () => {
   if (!latestData) return;
   focusId = resolveFocus(latestData.participants, selector.value);

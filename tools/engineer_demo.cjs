@@ -1,6 +1,7 @@
 // Wholly synthetic API presentation fixture. No real captures or production demo endpoint.
 // Run: node tools/engineer_demo.cjs --json
 // Optional browser check: node tools/engineer_demo.cjs --screenshot --browser msedge
+// Real-viewport / orientation check: node tools/engineer_demo.cjs --viewports --browser msedge
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -23,18 +24,27 @@ function syntheticTrackMap(participants, trackScenario = 'green') {
   const step = 25, distances = [];
   for (let d = 0; d < TRACK_LENGTH * (learning ? 0.63 : 1) - 1; d += step) distances.push(d);
   const flags = {green: ['clear', 'clear', 'clear'], yellow: ['clear', 'local_yellow', 'clear'],
-    learning: ['clear', 'local_yellow', 'clear'], fcy: ['clear', 'clear', 'clear']}[trackScenario];
+    learning: ['clear', 'local_yellow', 'clear'], fcy: ['clear', 'clear', 'clear'], vertical: ['clear', 'clear', 'clear'],
+    stored: ['clear', 'clear', 'clear']}[trackScenario];
+  // 'vertical' encodes the same circuit rotated by 90 degrees in the simulator frame; 'stored' is a session without
+  // live runtime state (persisted geometry only).
+  const turn = ([x, z]) => trackScenario === 'vertical' ? [-z, x] : [x, z];
   const vehicles = participants.map((p, i) => {
     // Traffic is clustered inside S2 for the yellow scenarios so the highlighted sector is meaningful.
     const distance = trackScenario === 'yellow' || trackScenario === 'learning' ? 1100 + (i * 23) % 800 : 2850 - i * 71;
-    const [x, z] = circuitPoint(distance);
+    const [x, z] = turn(circuitPoint(distance));
     return {participant_id: p.id, x: Number(x.toFixed(1)), z: Number(z.toFixed(1)), in_pits: p.in_pits === true,
       position: p.position, name: p.display_name};
   });
+  if (trackScenario === 'stored') return {
+    geometry: {state: 'complete', complete: true, closed: true, progress: null, length_m: TRACK_LENGTH, source: 'stored',
+      points: distances.map(d => circuitPoint(d).map(v => Number(v.toFixed(1)))),
+      point_sectors: distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3), sector_boundaries_m: [1000, 2000]},
+    vehicles: [], vehicles_age_s: null, vehicles_fresh: false, race_control: null, static_only: true};
   return {
     geometry: {state: learning ? 'learning' : 'complete', complete: !learning, closed: !learning,
       progress: learning ? 0.63 : null, length_m: TRACK_LENGTH,
-      points: distances.map(d => circuitPoint(d).map(v => Number(v.toFixed(1)))),
+      points: distances.map(d => turn(circuitPoint(d)).map(v => Number(v.toFixed(1)))),
       point_sectors: learning ? null : distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3),
       sector_boundaries_m: learning ? null : [1000, 2000]},
     vehicles, vehicles_age_s: 0.2, vehicles_fresh: true,
@@ -259,9 +269,92 @@ async function screenshotTrackScenarios(channel) {
   } finally { await browser.close(); }
 }
 
+// Real browser viewports measured on 2026-11-07 (CSS px, DPR 1) plus stress sizes. Developer tooling only.
+const REAL_VIEWPORTS = [[1920, 911, 'real 1080p display'], [2560, 1271, 'real 1440p display'],
+  [1920, 900, 'stress'], [1920, 800, 'stress'], [2560, 1300, 'stress']];
+async function verifyViewports(channel) {
+  const {chromium} = require('playwright');
+  const repo = path.resolve(__dirname,'..'), output = path.join(repo,'build');
+  fs.mkdirSync(output,{recursive:true});
+  const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
+  try {
+    for (const scenario of ['green','vertical','stored']) {
+      const demo=engineerDemo('ready',scenario);
+      const html=fs.readFileSync(path.join(repo,'server/static/session.html'),'utf8')
+        .replace('__SESSION_ID__',JSON.stringify(demo.data.session.id))
+        .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+        .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
+      const page=await browser.newPage({viewport:{width:1920,height:911},reducedMotion:'reduce'});
+      await page.addInitScript(({epoch,sid,pid})=>{Date.now=()=>Date.parse(epoch);
+        localStorage.setItem(`stintara:strategy:v1:${sid}:${pid}`,'32');},{epoch,sid:demo.data.session.id,pid:demo.focus});
+      await page.route('**/*',route=>route.fulfill(route.request().url().includes('/api/') ?
+        {json:route.request().url().includes('/strategy')?demo.strategy:demo.data} : {contentType:'text/html',body:html}));
+      await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
+      await page.locator('.map-area svg').waitFor();
+      await page.locator('#fuel strong').first().waitFor();
+      for (const [width,height,label] of REAL_VIEWPORTS) {
+        await page.setViewportSize({width,height});
+        const m=await page.evaluate(()=>{
+          const rect=sel=>{const e=document.querySelector(sel);if(!e)return null;const r=e.getBoundingClientRect();
+            return {height:r.height,width:r.width,clipped:e.scrollHeight>e.clientHeight+1,hidden:Math.max(0,e.scrollHeight-e.clientHeight)};};
+          const field=document.querySelector('#full-scroll'),f=field.getBoundingClientRect(),head=field.querySelector('thead').getBoundingClientRect();
+          const rows=[...field.querySelectorAll('tbody tr')].filter(row=>{const r=row.getBoundingClientRect();return r.top>=head.bottom-1&&r.bottom<=f.bottom+1;}).length;
+          const box=document.querySelector('.map-area svg').getBoundingClientRect();
+          const base=document.querySelector('.trk-base').getBBox();
+          const names=['.session-header','.focus-panel','.standings-panel','.map-panel','.fuel-panel','#weather-panel','#comparison-panel'];
+          const boxes=names.map(n=>[n,document.querySelector(n).getBoundingClientRect()]);
+          const overlaps=[];
+          for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++){const a=boxes[i][1],b=boxes[j][1];
+            if(a.left<b.right-1&&b.left<a.right-1&&a.top<b.bottom-1&&b.top<a.bottom-1)overlaps.push(boxes[i][0]+' x '+boxes[j][0]);}
+          const settings=document.querySelector('.resource-settings')?.getBoundingClientRect();
+          const toggle=document.querySelector('#orientation-toggle');
+          return {docW:document.documentElement.scrollWidth,docH:document.documentElement.scrollHeight,rows,
+            h2h:rect('#comparison-panel'),weather:rect('#weather-panel'),strategy:rect('.fuel-panel'),map:rect('.map-panel'),
+            svg:{w:box.width,h:box.height},trackAspect:base.width/base.height,overlaps,
+            settingsInside:settings?settings.top>=0&&settings.bottom<=innerHeight+1:null,
+            toggle:toggle?toggle.getBoundingClientRect().right<=document.querySelector('.map-panel').getBoundingClientRect().right:null,
+            text:document.querySelector('.map-panel').innerText};});
+        const where=`${scenario} ${width}x${height} (${label})`;
+        assert.ok(m.docW<=width,`${where}: no horizontal scrolling`);
+        assert.ok(m.docH<=height,`${where}: no document scrolling (${m.docH}>${height})`);
+        assert.deepEqual(m.overlaps,[],`${where}: panels overlap`);
+        assert.ok(m.rows>=(height>=1200?14:height>=900?7:5),`${where}: Full Field shows ${m.rows} rows`);
+        assert.ok(m.h2h.hidden<=8,`${where}: Head-to-Head cut by ${m.h2h.hidden}px`);
+        assert.equal(m.weather.clipped,false,`${where}: Weather clipped`);
+        assert.equal(m.settingsInside,true,`${where}: PIT SETTINGS visible`);
+        assert.ok(m.svg.w>300&&m.svg.h>120,`${where}: map size`);
+        assert.ok(m.map.height<=Math.max(height*0.45,200),`${where}: map not oversized (${Math.round(m.map.height)}px)`);
+        if (width>=2560) assert.equal(m.strategy.clipped,false,`${where}: Strategy fully visible`);
+        if (scenario==='stored') {
+          assert.match(m.text,/STORED TRACK/); assert.match(m.text,/POSITIONS UNAVAILABLE/);
+          assert.doesNotMatch(m.text,/GREEN|RACE CONTROL/);
+        } else assert.equal(m.toggle,true,`${where}: orientation control inside the panel`);
+        assert.ok(m.trackAspect>1,`${where}: circuit is laid out horizontally (${m.trackAspect.toFixed(2)})`);
+        console.log(JSON.stringify({where,rows:m.rows,docH:m.docH,map:Math.round(m.map.height),svg:`${Math.round(m.svg.w)}x${Math.round(m.svg.h)}`,
+          strategyHidden:Math.round(m.strategy.hidden),h2hHidden:Math.round(m.h2h.hidden),aspect:Number(m.trackAspect.toFixed(2))}));
+        await page.screenshot({path:path.join(output,`engineer-v02-${scenario}-${width}x${height}.png`),fullPage:true});
+      }
+      if (scenario==='vertical') {
+        await page.setViewportSize({width:1920,height:911});
+        await page.locator('#orientation-toggle').click();
+        assert.match(await page.locator('#orientation-toggle').innerText(),/ORIGINAL/);
+        const original=await page.evaluate(()=>{const b=document.querySelector('.trk-base').getBBox();return b.width/b.height;});
+        assert.ok(original<1,`ORIGINAL keeps the simulator orientation (aspect ${original.toFixed(2)})`);
+        await page.reload(); await page.locator('.map-area svg').waitFor();
+        assert.match(await page.locator('#orientation-toggle').innerText(),/ORIGINAL/,'per-track choice persists across reloads');
+        await page.locator('#orientation-toggle').click();
+      }
+      await page.close();
+    }
+  } finally { await browser.close(); }
+}
+
 module.exports={engineerDemo};
 if(require.main===module) {
-  if(process.argv.includes('--screenshot') && process.argv.includes('--track-scenarios')) {
+  if(process.argv.includes('--viewports')) {
+    const index=process.argv.indexOf('--browser');
+    verifyViewports(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
+  } else if(process.argv.includes('--screenshot') && process.argv.includes('--track-scenarios')) {
     const index=process.argv.indexOf('--browser');
     screenshotTrackScenarios(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
   } else if(process.argv.includes('--screenshot') && process.argv.includes('--ve-collecting')) {

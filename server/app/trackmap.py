@@ -19,6 +19,8 @@ STEP_FACTOR, STEP_SLACK_M = 1.5, 10.0   # euclidean step <= travelled * factor +
 SECTOR_MIN_OBSERVATIONS = 2
 SECTOR_MAX_SPREAD_M = 60.0
 MAX_TRACKS = 16
+GEOMETRY_SCHEMA_VERSION = 1    # persisted track_geometries layout; unknown versions are never interpreted
+MIN_TRACK_LENGTH_M, MAX_TRACK_LENGTH_M = 200.0, 60000.0
 
 
 def finite(value):
@@ -33,6 +35,12 @@ def normalize_lap_distance(lap_dist, length):
     if lap_dist < -tolerance or lap_dist >= length + tolerance:
         return None
     return lap_dist % length
+
+
+def arc_limit(length):
+    """Largest start/finish closing arc accepted for a track (shared by the learner and persisted validation)."""
+    spacing = max(8.0, length / 500)
+    return max(2 * spacing, 40.0) + 40.0
 
 
 def track_key(provider, name, length):
@@ -50,6 +58,11 @@ class TrackModel:
         self.distances = None         # lap distance per point
         self.sector_observations = {1: [], 2: []}   # boundary S1|S2 and S2|S3, metres
         self.generation = 0
+        self.source = "learned"       # "stored" once the closed geometry came from persisted state
+        self.store_checked = False    # persisted state was consulted (found, absent or rejected)
+        self.stored = False           # the closed geometry is known to exist in persisted state
+        self.stored_sectors = None    # sector observations as last persisted
+        self.store_retry_at = 0.0     # monotonic time before which persistence is not retried after an error
 
     @property
     def complete(self):
@@ -69,6 +82,21 @@ class TrackModel:
             result.append(median(agreeing))
         return result if 0 < result[0] < result[1] < self.length else None
 
+    def sector_snapshot(self):
+        return {1: list(self.sector_observations[1]), 2: list(self.sector_observations[2])}
+
+    def adopt(self, record):
+        """Take over a validated persisted record (see validate_record) as this track's closed geometry."""
+        self.points, self.distances = record["points"], record["distances"]
+        self.length = record["length_m"]
+        stored = record["sector_observations"] or {1: [], 2: []}
+        for key in (1, 2):   # keep observations made while the geometry was still being learned
+            extra = [o for o in self.sector_observations[key] if o not in stored[key]]
+            self.sector_observations[key] = (stored[key] + extra)[-7:]
+        self.source, self.stored = "stored", True
+        self.stored_sectors = {1: list(stored[1]), 2: list(stored[2])}
+        self.generation += 1
+
     def record_sector_boundary(self, boundary, lap_dist):
         distance = normalize_lap_distance(lap_dist, self.length)
         if boundary in self.sector_observations and distance is not None:
@@ -83,6 +111,67 @@ class TrackModel:
         if boundaries is None or distances is None:
             return None
         return [1 if d < boundaries[0] else 2 if d < boundaries[1] else 3 for d in distances]
+
+
+def geometry_record(model):
+    """Simulator-neutral persistable form of a closed model: raw coordinates, never rotated or normalised."""
+    if model is None or not model.complete:
+        return None
+    return dict(schema_version=GEOMETRY_SCHEMA_VERSION, length_m=model.length,
+                points=[list(p) for p in model.points], distances=list(model.distances),
+                sector_observations={str(k): list(v) for k, v in model.sector_observations.items()},
+                sector_boundaries_m=model.sector_boundaries())
+
+
+def validate_record(raw, key=None):
+    """Re-check persisted geometry with the learner's plausibility rules. Returns a clean record or None.
+
+    Fail closed: anything malformed, non-finite, implausible or of an unknown schema version is rejected as a
+    whole and the track is simply learned again. Only the optional sector data is dropped on its own.
+    """
+    try:
+        if not isinstance(raw, dict) or raw.get("schema_version") != GEOMETRY_SCHEMA_VERSION:
+            return None
+        length = raw.get("length_m")
+        if not finite(length) or not MIN_TRACK_LENGTH_M <= length <= MAX_TRACK_LENGTH_M:
+            return None
+        if key is not None and round(length) != key[2]:
+            return None
+        points, distances = raw.get("points"), raw.get("distances")
+        if not isinstance(points, list) or not isinstance(distances, list) or len(points) != len(distances):
+            return None
+        if not MIN_POINTS <= len(points) <= MAX_POINTS:
+            return None
+        if any(not isinstance(p, (list, tuple)) or len(p) != 2 or not finite(p[0]) or not finite(p[1]) for p in points):
+            return None
+        if any(not finite(d) or not 0 <= d < length for d in distances):
+            return None
+        gaps = [b - a for a, b in zip(distances, distances[1:])]
+        if min(gaps) <= 0 or max(gaps) > MAX_GAP_M:
+            return None
+        if any(math.dist(a, b) > gap * STEP_FACTOR + STEP_SLACK_M for a, b, gap in zip(points, points[1:], gaps)):
+            return None
+        arc = (length - distances[-1]) + distances[0]
+        if arc > arc_limit(length) or math.dist(points[-1], points[0]) > arc * STEP_FACTOR + STEP_SLACK_M:
+            return None
+        return dict(length_m=float(length), points=[[float(x), float(z)] for x, z in points],
+                    distances=[float(d) for d in distances],
+                    sector_observations=_valid_sector_observations(raw.get("sector_observations"), length))
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _valid_sector_observations(raw, length):
+    if not isinstance(raw, dict):
+        return None
+    result = {}
+    for key in (1, 2):
+        values = raw.get(str(key))
+        if (not isinstance(values, list) or len(values) > 7
+                or any(not finite(v) or not 0 < v < length for v in values)):
+            return None
+        result[key] = [float(v) for v in values]
+    return result
 
 
 class TrackStore:
@@ -191,7 +280,6 @@ class CenterlineLearner:
 
     def _close(self, distance, x, z):
         model = self.model
-        spacing = self._spacing()
         end = self.tail or self.last
         if self.tail is not None and self.tail[0] > self.distances[-1]:
             self.points.append([end[1], end[2]])
@@ -199,7 +287,7 @@ class CenterlineLearner:
         first_ld, first_x, first_z = self.start
         arc = (model.length - self.distances[-1]) + first_ld
         gaps = [b - a for a, b in zip(self.distances, self.distances[1:])]
-        plausible = (len(self.points) >= MIN_POINTS and arc <= max(2 * spacing, 40.0) + 40.0
+        plausible = (len(self.points) >= MIN_POINTS and arc <= arc_limit(model.length)
                      and max(gaps, default=MAX_GAP_M + 1) <= MAX_GAP_M
                      and math.dist(self.points[-1], (first_x, first_z)) <= arc * STEP_FACTOR + STEP_SLACK_M)
         if not plausible:
@@ -228,11 +316,18 @@ class SectorTracker:
             self.model.record_sector_boundary(previous, lap_dist)
 
 
+def static_track_map_payload(model):
+    """Stored geometry for a session without live runtime state: no vehicles, no race control, ever."""
+    geometry = public_geometry(model if model is not None and model.complete else None)
+    return dict(geometry=geometry, vehicles=[], vehicles_age_s=None, vehicles_fresh=False, race_control=None,
+                static_only=geometry["state"] == "complete")
+
+
 def public_geometry(model, learner=None):
     """Compact read-only representation. Closed polylines are explicit; partials never carry a closing edge."""
     if model is None:
         return dict(state="unknown", complete=False, closed=False, progress=None, points=[], point_sectors=None,
-                    sector_boundaries_m=None, length_m=None)
+                    sector_boundaries_m=None, length_m=None, source=None)
     complete = model.complete
     points = model.points if complete else (learner.points if learner and learner.active else [])
     distances = model.distances if complete else (learner.distances if learner and learner.active else [])
@@ -241,10 +336,10 @@ def public_geometry(model, learner=None):
                 progress=None if complete else (learner.progress() if learner else None),
                 points=[list(p) for p in points], length_m=model.length,
                 point_sectors=model.point_sectors(distances, boundaries) if points else None,
-                sector_boundaries_m=boundaries)
+                sector_boundaries_m=boundaries, source=model.source if complete else None)
 
 
-# --- runtime glue (per agent state dict; bounded, nothing here is persisted) --------------------------
+# --- runtime glue (per agent state dict; bounded; persistence lives in track_repo) --------------------------
 
 VEHICLE_FRESH_SECONDS = 5.0
 RACE_CONTROL_FRESH_SECONDS = 5.0
@@ -306,7 +401,7 @@ def track_map_payload(state, participants, now):
     """Read-only current spatial state for the Engineer. Stale vehicles are flagged, never presented as live."""
     if not state:
         return dict(geometry=public_geometry(None), vehicles=[], vehicles_age_s=None, vehicles_fresh=False,
-                    race_control=None)
+                    race_control=None, static_only=False)
     age = now - state.get("last_scoring_at", 0)
     by_local = {p.get("local_vehicle_id"): p for p in participants}
     vehicles = []
@@ -319,4 +414,4 @@ def track_map_payload(state, participants, now):
                              position=v.get("position"), name=p.get("display_name")))
     return dict(geometry=public_geometry(state.get("track_model"), state.get("track_learner")),
                 vehicles=vehicles, vehicles_age_s=round(age, 2), vehicles_fresh=0 <= age <= VEHICLE_FRESH_SECONDS,
-                race_control=public_race_control(state, now))
+                race_control=public_race_control(state, now), static_only=False)

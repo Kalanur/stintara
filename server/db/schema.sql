@@ -206,3 +206,22 @@ ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_temp_inner_rr_c doubl
 ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_temp_mid_rr_c double precision;
 ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_temp_outer_rr_c double precision;
 ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_brake_temp_rr_c double precision;
+
+-- Learned track centerlines (simulator-neutral). Only fully accepted, closed geometry is stored; raw simulator
+-- coordinates are kept unrotated. Identity is (provider, track name, rounded track length) and never fuzzy.
+-- No vehicle positions and no race-control history are persisted here.
+CREATE TABLE IF NOT EXISTS track_geometries (
+    id uuid PRIMARY KEY,
+    provider text NOT NULL,
+    track_name text NOT NULL,
+    track_length_key integer NOT NULL,
+    schema_version integer NOT NULL,
+    length_m double precision NOT NULL,
+    points jsonb NOT NULL,
+    distances jsonb NOT NULL,
+    sector_observations jsonb,
+    sector_boundaries_m jsonb,
+    learned_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(provider, track_name, track_length_key)
+);
