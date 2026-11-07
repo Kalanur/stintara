@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
-from . import track_repo
+from . import history, track_repo
 from .build import APP_VERSION, build_info, inject_build_label
 from .domain import sample_due
 from .fuel import fuel_report
@@ -273,6 +273,11 @@ async def frontpage() -> HTMLResponse:
     return HTMLResponse(inject_build_label((STATIC_DIR / "index.html").read_text(encoding="utf-8")))
 
 
+@app.get("/history", response_class=HTMLResponse)
+async def history_page() -> HTMLResponse:
+    return HTMLResponse(inject_build_label((STATIC_DIR / "history.html").read_text(encoding="utf-8")))
+
+
 @app.get("/drivers/{slug}/live", response_class=HTMLResponse)
 async def driver_live_page(slug: str) -> HTMLResponse:
     html = (STATIC_DIR / "live.html").read_text(encoding="utf-8")
@@ -343,6 +348,34 @@ async def api_live_sessions() -> list[dict[str, Any]]:
             FROM sessions s WHERE {SESSION_LIVE_SQL} ORDER BY s.started_at DESC, s.id
         """)
     return [dict(row) for row in rows]
+
+
+@app.get("/api/sessions/history")
+async def api_sessions_history(
+        session_type: str | None = Query(None, min_length=1, max_length=128),
+        provider: str | None = Query(None, min_length=1, max_length=64),
+        track: str | None = Query(None, min_length=1, max_length=256),
+        status: str | None = Query(None, pattern="^(live|complete)$"),
+        limit: int = Query(history.HISTORY_DEFAULT_LIMIT, ge=1, le=history.HISTORY_MAX_LIMIT),
+        offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    assert pool
+    async with pool.acquire() as conn:
+        return await history.query_sessions(conn, session_type=session_type, provider=provider,
+                                            track=track, status=status, limit=limit, offset=offset)
+
+
+@app.get("/api/sessions/history/filters")
+async def api_sessions_history_filters() -> dict[str, list[str]]:
+    assert pool
+    async with pool.acquire() as conn:
+        return await history.filter_options(conn)
+
+
+@app.get("/api/sessions/recent-results")
+async def api_recent_results() -> dict[str, Any]:
+    assert pool
+    async with pool.acquire() as conn:
+        return await history.query_sessions(conn, limit=history.RECENT_RESULTS_LIMIT, recent=True)
 
 
 def spectator_participants(rows, session_id, live, states, now, session_type=None):
