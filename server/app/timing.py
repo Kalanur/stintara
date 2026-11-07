@@ -16,10 +16,14 @@ def position(value):
     return type(value) is int and value > 0
 
 
-def newest_scoring(session_id, live, states, now):
+def newest_state(session_id, live, states, now):
     candidates = [s for s in states if live and s.get("session_id") == session_id
                   and 0 <= now - s.get("last_scoring_at", 0) < 15 and s.get("scoring")]
-    return max(candidates, key=lambda s: s["last_scoring_at"], default={}).get("scoring", {})
+    return max(candidates, key=lambda s: s["last_scoring_at"], default={})
+
+
+def newest_scoring(session_id, live, states, now):
+    return newest_state(session_id, live, states, now).get("scoring", {})
 
 
 def race_gap(participant, race):

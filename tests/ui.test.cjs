@@ -611,7 +611,7 @@ test('engineer dashboard keeps live and stored cues explicit alongside existing 
   assert.match(html,/class="live-dot" aria-hidden="true"/);
   assert.match(html,/>LIVE<\/span>/);
   for(const text of ['50 participants','Full field','Focus status','Head-to-Head','Relative standings',
-    'Current conditions','Track geometry not available yet','Flags / Race Control / Car Status · not available yet']) assert.ok(html.includes(text),text);
+    'Current conditions','Track Map','TRACK UNKNOWN','RACE CONTROL · NO DATA','Waiting for position data']) assert.ok(html.includes(text),text);
   assert.match(page.fuel.innerHTML,/Current fuel: <strong>42.00 L/);
   await page.poll({...data,live:false});
   assert.match(page.root.innerHTML,/class="feed feed-stale"/);
@@ -783,6 +783,78 @@ test('VE states distinguish unknown, stale, collecting and ready without a fuel-
   assert.match(stale,/Stale · not live/);
   for(const html of [collecting,unknown,stale]) assert.doesNotMatch(html,/SET (VE|FUEL) TO|NaN|undefined|Infinity/);
   assert.match(render('ready',{}),/5 samples/);
+});
+
+function trackFixture(over = {}) {
+  const ring = Array.from({length: 40}, (_, i) => [Math.round(500 * Math.cos(i / 40 * 2 * Math.PI)), Math.round(300 * Math.sin(i / 40 * 2 * Math.PI))]);
+  return {geometry: {state: 'complete', complete: true, closed: true, progress: null, points: ring,
+      point_sectors: ring.map((_, i) => i < 13 ? 1 : i < 27 ? 2 : 3), sector_boundaries_m: [1000, 2000], length_m: 3000},
+    vehicles: [{participant_id: 'focus', x: 500, z: 0, in_pits: false, position: 1, name: 'Synthetic A'},
+      {participant_id: 'other', x: -500, z: 0, in_pits: false, position: 2, name: 'Synthetic B'},
+      {participant_id: 'pitter', x: 0, z: 300, in_pits: true, position: 3, name: 'Synthetic C'}],
+    vehicles_age_s: .2, vehicles_fresh: true,
+    race_control: {phase: 'green', sector_flags: ['clear', 'clear', 'clear'], safety_car_active: false, fresh: true, age_s: .2, ...over.race_control},
+    ...over.track};
+}
+
+test('track map highlights focus, marks yellow sector and shows no alarm in the green state', () => {
+  const h = helpers();
+  const green = h.trackMapPanel({track_map: trackFixture()}, 'focus');
+  assert.equal((green.match(/class="trk-focus"/g) || []).length, 1);
+  assert.match(green, />GREEN</);
+  assert.doesNotMatch(green, /YELLOW|SAFETY|STOPPED|trk-yellow|FLAG UNRECOGNIZED|LEARNING/);
+  assert.doesNotMatch(green, /NaN|Infinity|undefined/);
+  const yellow = h.trackMapPanel({track_map: trackFixture({race_control: {sector_flags: ['clear', 'local_yellow', 'clear']}})}, 'focus');
+  assert.match(yellow, /S2 LOCAL YELLOW/);
+  assert.match(yellow, /class="trk-yellow"/);
+  assert.doesNotMatch(yellow, /S1 LOCAL|S3 LOCAL/);
+});
+
+test('pit vehicles are dimmed and never rendered as incidents', () => {
+  const html = helpers().trackMapPanel({track_map: trackFixture()}, 'focus');
+  assert.match(html, /trk-car pit/);
+  assert.doesNotMatch(html, /STOPPED|INCIDENT|CAR STOPPED/);
+  assert.match(html, /3 · Synthetic C · pit/);
+});
+
+test('track learning, flag-only yellow and race control without geometry stay readable', () => {
+  const h = helpers();
+  const learning = trackFixture({track: {geometry: {state: 'learning', complete: false, closed: false, progress: .63,
+    points: [[0, 0], [100, 20], [200, 30]], point_sectors: null, sector_boundaries_m: null}},
+    race_control: {sector_flags: ['clear', 'local_yellow', 'clear']}});
+  const html = h.trackMapPanel({track_map: learning}, 'focus');
+  assert.match(html, /LEARNING TRACK · 63%/);
+  assert.match(html, /S2 LOCAL YELLOW/);
+  assert.match(html, /flag only/);
+  assert.doesNotMatch(html, /trk-yellow/);
+  const unknownProgress = h.trackMapPanel({track_map: trackFixture({track: {geometry: {state: 'learning', complete: false,
+    progress: null, points: [], point_sectors: null}}})}, 'focus');
+  assert.match(unknownProgress, /LEARNING TRACK</);
+  assert.doesNotMatch(unknownProgress, /LEARNING TRACK · /);
+  const open = h.trackMapPanel({track_map: learning}, 'focus');
+  assert.equal(((open.match(/class="trk-base" d="([^"]+)"/) || [])[1].match(/M/g) || []).length, 1);
+});
+
+test('stale, missing and malformed track data degrade without false warnings or NaN', () => {
+  const h = helpers();
+  const stale = h.trackMapPanel({track_map: trackFixture({track: {vehicles_fresh: false, vehicles_age_s: 30},
+    race_control: {fresh: false}})}, 'focus');
+  assert.match(stale, /POSITIONS STALE/);
+  assert.match(stale, /RACE CONTROL · STALE/);
+  assert.doesNotMatch(stale, />GREEN</);
+  assert.doesNotMatch(stale, /class="trk-focus"/);
+  for (const bad of [undefined, {}, {geometry: {points: [[NaN, 1], ['x', 2], null]}, vehicles: [{x: NaN, z: 1}, {x: Infinity, z: 0}]}]) {
+    const html = h.trackMapPanel({track_map: bad}, 'focus');
+    assert.doesNotMatch(html, /NaN|Infinity|undefined|>GREEN</);
+    assert.match(html, /RACE CONTROL · NO DATA/);
+  }
+  const fcy = h.trackMapPanel({track_map: trackFixture({race_control: {phase: 'full_course_yellow', safety_car_active: true}})}, 'focus');
+  assert.match(fcy, /FULL COURSE YELLOW/);
+  assert.match(fcy, /SAFETY CAR ACTIVE/);
+  const unknown = h.trackMapPanel({track_map: trackFixture({race_control: {phase: 'unknown', sector_flags: ['unknown', 'clear', 'clear']}})}, 'focus');
+  assert.match(unknown, /STATE UNKNOWN/);
+  assert.match(unknown, /S1 FLAG UNRECOGNIZED/);
+  assert.doesNotMatch(unknown, /LOCAL YELLOW|trk-yellow/);
 });
 
 test('versioned local plans isolate session and participant and reject malformed storage', () => {
