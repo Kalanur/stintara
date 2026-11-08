@@ -359,8 +359,8 @@ function tyreText(p) {
 function damageText(p) {
   const n = p.damage_regions;
   if (!Number.isSafeInteger(n) || n < 0) return '—';
-  if (n === 0) return '<span title="No body damage reported">OK</span>';
-  return `<span class="dmg" title="${esc(`${n} body region(s) with damage · max provider severity ${p.damage_max}`)}">${esc(n)}</span>`;
+  const title = `${n} body region(s) reported damaged · max provider severity ${p.damage_max} · experimental, not validated in-game`;
+  return n === 0 ? `<span title="${esc(title)}">0</span>` : `<span class="dmg" title="${esc(title)}">${esc(n)}</span>`;
 }
 function focusStatus(participants, focusId, race) {
   const p = participantById(participants, focusId);
@@ -733,8 +733,8 @@ function renderSession(d) {
       <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p></details></section>
       <section class="panel standings-panel" aria-label="Full field"><div class="panel-heading"><h2>Full field</h2><span class="muted">${d.participants.length} entries · provider order</span></div>
       <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
-      <caption>Provider positions and lap times. S1–S3 are the sectors of the last completed lap. Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
-      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col" class="num" title="Completed laps">Laps</th><th scope="col" class="num" title="Sector 1, last completed lap">S1</th><th scope="col" class="num" title="Sector 2, last completed lap">S2</th><th scope="col" class="num" title="Sector 3, last completed lap">S3</th><th scope="col" class="num">Last</th><th scope="col" class="num">Best</th><th scope="col" class="num">Gap</th><th scope="col" class="num">Interval</th><th scope="col" title="Compound and remaining tyre of the worst corner (1.0 new, 0 destroyed). Live while snapshots are fresh, otherwise as of the last completed lap.">Tyre</th><th scope="col" title="Body regions with damage; OK = none reported.">Dmg</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
+      <caption>Provider positions and lap times. S1–S3 are the sectors of the last timed lap (the last lap with a valid lap time; it can be older than Laps after pit laps). Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
+      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col" class="num" title="Completed laps">Laps</th><th scope="col" class="num" title="Sector 1 of the last timed lap">S1</th><th scope="col" class="num" title="Sector 2 of the last timed lap">S2</th><th scope="col" class="num" title="Sector 3 of the last timed lap">S3</th><th scope="col" class="num">Last</th><th scope="col" class="num">Best</th><th scope="col" class="num">Gap</th><th scope="col" class="num">Interval</th><th scope="col" title="Compound and remaining tyre of the worst corner (1.0 new, 0 destroyed). Live while snapshots are fresh, otherwise as of the last timed lap.">Tyre</th><th scope="col" title="Experimental: number of body regions the provider reports as damaged (0 = none reported). Not validated in-game.">Dmg</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
       <tbody>${d.participants.map(p => {
         const vehicle = vehicleLabel(p);
         const entry = vehicle.label && !(hideClass && vehicle.label === 'Class') ? `${vehicle.label}: ${vehicle.value}` : 'Entry: —';

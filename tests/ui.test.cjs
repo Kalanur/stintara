@@ -1267,7 +1267,7 @@ test('history and home link only an existing previous session (#43)', async () =
 });
 
 
-test('full field V2: Laps, S1-S3 from last completed lap, tyre and damage; unknown stays dash', async () => {
+test('full field V2: Laps, S1-S3 from last timed lap, tyre and damage; unknown stays dash', async () => {
   const known = {sector1:36.931, sector2:50.6, sector3:35.432, last_lap_time:122.963, best_lap_time:121,
     tyre_compound:'Medium', tyre_remaining_min:0.874, damage_regions:0, damage_max:0};
   const damaged = {...known, damage_regions:3, damage_max:1, tyre_compound:'<b>Wet</b>'};
@@ -1282,7 +1282,8 @@ test('full field V2: Laps, S1-S3 from last completed lap, tyre and damage; unkno
   for (const label of ['S1', 'S2', 'S3', 'Tyre', 'Dmg']) assert.match(table, new RegExp(`<th[^>]*>${label}</th>`));
   const rows = table.split('<tr').slice(2);
   assert.equal(rows.length, 4);
-  for (const value of ['36.931', '50.600', '35.432', '>M 87%<', '>OK<']) assert.ok(rows[0].includes(value), value);
+  for (const value of ['36.931', '50.600', '35.432', '>M 87%<', '>0<']) assert.ok(rows[0].includes(value), value);
+  assert.doesNotMatch(rows[0], />OK</);
   assert.match(rows[1], /class="dmg"[^>]*>3</);
   assert.doesNotMatch(table, /<b>Wet/);
   for (const row of rows.slice(2)) {
@@ -1298,5 +1299,11 @@ test('full field V2: Laps, S1-S3 from last completed lap, tyre and damage; unkno
   assert.equal(h.sectorFmt(61.5), '1:01.500');
   for (const bad of [null, undefined, -1, 0, NaN, '36.9']) assert.equal(h.sectorFmt(bad), '—');
   assert.equal(context.api.tyreText({}), '—');
-  assert.equal(context.api.damageText({damage_regions:-1}), '—');
+  for (const bad of [-1, null, undefined, NaN, 1.5, '2']) assert.equal(context.api.damageText({damage_regions:bad}), '—', String(bad));
+  assert.equal(context.api.damageText({}), '—');
+  assert.match(context.api.damageText({damage_regions:0, damage_max:0}), /^<span title="[^"]*not validated in-game[^"]*">0<\/span>$/);
+  assert.match(context.api.damageText({damage_regions:2, damage_max:1}), /class="dmg"[^>]*>2</);
+  assert.match(table, /<th[^>]*title="[^"]*last timed lap/);
+  assert.match(table, /Experimental: number of body regions the provider reports as damaged/);
+  assert.doesNotMatch(table, /last completed lap/);
 });

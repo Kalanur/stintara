@@ -276,10 +276,10 @@ Full Field columns: `P | Driver / entry | Laps | S1 | S2 | S3 | Last | Best | Ga
 
 | Item | Raw source (Pitwall) | Server field | Semantics |
 | --- | --- | --- | --- |
-| S1/S2/S3 | `AllDriversUpdate.last_sector1/2/3` (S2 is cumulative in the raw data; the adapter converts it) | `sector1..3` from the newest persisted completed-lap row | Sectors of the last completed lap, ~5 s snapshot cadence. Unknown stays `—`. Raw: sum equals `last_lap_time` in all 18,844 known rows checked. |
+| S1/S2/S3 | `AllDriversUpdate.last_sector1/2/3` (S2 is cumulative in the raw data; the adapter converts it) | `sector1..3` from the newest persisted lap row | Sectors of the last timed lap (last lap with a valid lap time); after pit laps this can be older than `Laps`. ~5 s snapshot cadence. Unknown stays `—`. Raw: sum equals `last_lap_time` in all 18,844 known rows checked. |
 | Tyre compound | `tire_compound_front_name` | `tyre_compound` | Front compound name. |
 | Tyre remaining | `wheels[].wear` (mWear, 1.0 new) | `tyre_remaining_min` (worst corner) | Only trusted if a wheel has a real sensor value. For all cars except the player, Pitwall sends wear 1.0 with sentinel temperatures, so it is shown as unknown. |
-| Damage | `dent_severity[8]` | `damage_regions`, `damage_max` | Count of body regions with severity > 0. Only values 0 and 1 were observed. Rises on track and drops in the pit in the captures, so it behaves like real damage. |
+| Damage (experimental) | `dent_severity[8]` | `damage_regions`, `damage_max` | Count of body regions the provider reports as damaged (`0` = none reported, unknown `—`). Not validated in-game. Only values 0 and 1 were observed. Rises on track and drops in the pit in the captures, so it behaves like real damage. |
 
 Tyre and damage use the live snapshot while it is under 30 s old, otherwise the last completed-lap checkpoint. They are never persisted beyond the existing lap rows.
 
