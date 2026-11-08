@@ -16,6 +16,8 @@ async def prepared(db, available=True):
     scoring['vehicles'][0]['energy_current_fraction'] = .63
     await main.handle_message(agent, 'lmu', 'scoring', scoring)
     await main.handle_message(agent, 'lmu', 'session_info', dict(track_name='Synthetic Circuit', session_laps=38))
+    async with db.acquire() as conn:  # limits are captured at INSERT and immutable; this fixture sets the lap limit
+        await conn.execute('UPDATE sessions SET session_laps=38 WHERE id=$1', sid)
     kind, payload = normalize(dict(type='TelemetryUpdate', current_et=100, fuel=42, fuel_capacity=100,
                                    ve_available=available, ve_history=[1, .898, .796, .694, .592, .49, .4]))
     await main.handle_message(agent, 'lmu', kind, Telemetry.model_validate(payload).model_dump())

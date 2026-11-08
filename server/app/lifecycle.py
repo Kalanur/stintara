@@ -11,6 +11,30 @@ from .convergence import (
 from .domain import same_session
 from .uuid7 import uuid7
 
+# Provider "empty session" state (clock at zero, nobody has a lap) that LMU reports after a race is over.
+IDLE_CLOCK_SECONDS = 1.0
+
+
+def idle_reset(scoring):
+    vehicles = scoring.get("vehicles") or []
+    clock = scoring.get("session_time")
+    return bool(vehicles) and finite(clock) and 0 <= clock <= IDLE_CLOCK_SECONDS and all(
+        type(v.get("total_laps")) is int and v["total_laps"] == 0 for v in vehicles)
+
+
+async def race_ran_its_course(conn, previous):
+    """The Race clock/laps reached the configured limit, so a later empty state is not a restart."""
+    clock = previous["last_session_time"]
+    if previous["session_type"] != "Race" or not finite(clock):
+        return False
+    minutes, laps = previous["session_minutes"], previous["session_laps"]
+    if minutes and minutes > 0 and clock >= minutes * 60:
+        return True
+    if laps and laps > 0:
+        done = await conn.fetchval("SELECT max(total_laps) FROM session_participants WHERE session_id=$1", previous["id"])
+        return done is not None and done >= laps
+    return False
+
 
 async def complete_if_unobserved(conn, session_id):
     await conn.execute("""
@@ -113,6 +137,22 @@ async def resolve_session(conn, agent, state, scoring, timeout_seconds):
                          and previous["session_type"] == scoring["session_type"]
                          and clock_reset(scoring.get("session_time"), previous["last_session_time"])
                          for previous in rows)
+    # #46: after a finished Race the provider reports an empty session (clock 0, no laps for anyone).
+    # That is not a new race and must not become a second Race row. Complete the finished session
+    # now (ended_at stays the moment of the reset) and create nothing until the state shows progress.
+    held = state.get("post_finish_idle")
+    if held:
+        if held == namespace and idle_reset(scoring):
+            return None
+        state.pop("post_finish_idle", None)
+    elif reset and idle_reset(scoring):
+        finished = [p for p in rows if p["simulator_provider"] == provider and p["track_name"] == track
+                    and p["session_type"] == scoring["session_type"] and await race_ran_its_course(conn, p)]
+        if finished:
+            for previous in rows:
+                await end_observation(conn, previous["id"], agent["id"])
+            state["post_finish_idle"] = namespace
+            return None
     if pending:
         invalidated = (invalidated or pending["namespace"] != namespace
                        or not 0 <= (now - pending["started_at"]).total_seconds() < TRANSITION_GRACE_SECONDS

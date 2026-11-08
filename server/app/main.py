@@ -599,7 +599,18 @@ async def current_or_create_session(agent, payload):
         session_id = await resolve_session(conn, agent, resolution_state, payload, SESSION_TIMEOUT_SECONDS)
         if session_id:
             await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
-    for key in ("pending_convergence", "convergence_invalidated"):
+            if state.get("session_meta_pending"):
+                # SessionInfo carries no session identity, so a scoring frame resolving to A does not prove the
+                # preceding SessionInfo describes A. session_minutes/session_laps are therefore captured at INSERT
+                # only and never updated afterwards (not even unknown -> known). Weather is mutable; track length
+                # is only filled in while unknown.
+                await conn.execute("""UPDATE sessions SET
+                    track_length_m=CASE WHEN track_length_m IS NULL OR track_length_m<=0 THEN $2 ELSE track_length_m END,
+                    weather=$3::jsonb WHERE id=$1 AND status='live'""",
+                    session_id, state.get("track_length_m"), state.get("weather_json", "{}"))
+    if session_id:
+        state.pop("session_meta_pending", None)
+    for key in ("pending_convergence", "convergence_invalidated", "post_finish_idle"):
         state.pop(key, None)
         if key in resolution_state:
             state[key] = resolution_state[key]
@@ -781,12 +792,10 @@ async def handle_message(agent, provider, kind, payload):
                      weather_json=json.dumps(payload.get("weather", {})))
         attach_track(state, track_store, provider, payload["track_name"], payload.get("track_length"))
         await sync_track_store(state)
-        if state.get("session_id") and state.get("persisted_track") == payload["track_name"]:
-            async with pool.acquire() as conn:
-                await conn.execute("""UPDATE sessions SET track_length_m=$2,session_laps=$3,
-                    session_minutes=$4,weather=$5::jsonb WHERE id=$1 AND status='live'""",
-                    state["session_id"], state.get("track_length_m"), state.get("session_laps"),
-                    state.get("session_minutes"), state["weather_json"])
+        # Runtime context is current immediately. The persisted session row is only touched after scoring has
+        # resolved the target session (current_or_create_session): a SessionInfo may already describe the next,
+        # still unconfirmed session while the live row belongs to the previous one (#46).
+        state["session_meta_pending"] = True
         return
     if state.get("game_connected") is False:
         return
@@ -798,7 +807,7 @@ async def handle_message(agent, provider, kind, payload):
                    or state.get("persisted_track") != state.get("track_name")
                    or (previous.get("session_time") is not None and payload.get("session_time") is not None
                        and payload["session_time"] < previous["session_time"] - 2))
-        if state.get("pending_convergence") or changed or sample_due(state.get("last_persisted_scoring"), now):
+        if state.get("pending_convergence") or state.get("session_meta_pending") or changed or sample_due(state.get("last_persisted_scoring"), now):
             session_id = await current_or_create_session(agent, payload)
             if not session_id:
                 return
