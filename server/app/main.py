@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from . import history, track_repo
 from .build import APP_VERSION, build_info, inject_build_label
+from .chain import CHAIN_COLUMNS, CHAIN_JOINS, pop_chain
 from .domain import sample_due
 from .fuel import fuel_report
 from .lifecycle import end_observation, expire_observations, resolve_session
@@ -410,8 +411,9 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     async with pool.acquire() as conn:
         session = await conn.fetchrow(f"""SELECT s.id, s.track_name, s.session_type,
             s.simulator_provider, s.started_at, s.last_seen_at, s.status,
-            s.session_laps, s.session_minutes, s.weather, s.track_length_m, ({SESSION_LIVE_SQL}) AS live
-            FROM sessions s WHERE s.id=$1""", session_id)
+            s.session_laps, s.session_minutes, s.weather, s.track_length_m, ({SESSION_LIVE_SQL}) AS live,
+            {CHAIN_COLUMNS}
+            FROM sessions s {CHAIN_JOINS} WHERE s.id=$1""", session_id)
         if not session:
             raise HTTPException(404, "session not found")
         participants = await conn.fetch("""
@@ -438,7 +440,7 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
             ) pit ON true
             WHERE p.session_id=$1
         """, session_id)
-    data = dict(session)
+    data = pop_chain(dict(session))
     data["weather"] = normalize_weather(data.get("weather"), data.get("simulator_provider"))
     live = data.pop("live")
     track_length = data.pop("track_length_m", None)
