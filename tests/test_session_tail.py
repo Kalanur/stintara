@@ -111,12 +111,63 @@ async def test_laps_limited_finish_is_post_finish_idle(db):
     assert len(rows) == 1 and rows[0]["session_laps"] == 20 and rows[0]["status"] == "complete"
 
 
-async def test_normal_session_info_update_is_persisted_with_the_next_scoring_frame(db):
+async def test_unknown_limit_is_filled_in_by_a_confirmed_session_info(db):
     agent = await make_agent(db)
-    sid = await start_race(agent)
+    sid = await start_race(agent, minutes=0, laps=0)  # no positive limit known yet
+    assert (await row(db, sid))["session_minutes"] in (None, 0)
     assert await deliver(agent, running(300.0, laps=3), minutes=90.0, laps=0) == sid
     assert (await row(db, sid))["session_minutes"] == 90.0
     assert main.runtime[str(agent["id"])].get("session_meta_pending") is None  # consumed by that resolution
+
+
+async def test_known_limit_is_stable_but_runtime_follows_session_info(db):
+    agent = await make_agent(db)
+    sid = await start_race(agent)
+    assert await deliver(agent, running(300.0, laps=3), minutes=90.0, laps=0) == sid
+    assert (await row(db, sid))["session_minutes"] == 82.6  # first known positive limit wins
+    assert main.runtime[str(agent["id"])]["session_minutes"] == 90.0
+
+
+async def interleave(db, clock, driven, limits, info, reset_info=None):
+    """A runs; a SessionInfo of the next phase arrives; one more old frame of A; then the reset scoring."""
+    agent = await make_agent(db)
+    sid = await start_race(agent, **limits)
+    await finish_race(agent, sid, clock=clock, driven=driven, **limits)
+    assert await deliver(agent, running(clock + 0.1, laps=driven), **info) == sid  # resolves to A, carries next info
+    return agent, sid, await deliver(agent, idle(), **(reset_info or info))
+
+
+async def test_interleaving_mid_race_keeps_limit_and_separates(db):
+    agent, sid, new = await interleave(db, 900.0, 8, RACE, PLACEHOLDER)
+    assert new not in (None, sid)
+    rows = {r["id"]: r for r in await sessions(db)}
+    assert len(rows) == 2 and rows[sid]["session_minutes"] == 82.6 and rows[sid]["status"] == "complete"
+    assert rows[new]["session_minutes"] == pytest.approx(5 / 60)  # the new session takes the current SessionInfo
+
+
+async def test_interleaving_finished_race_stays_one_session(db):
+    agent, sid, new = await interleave(db, 5331.6, 39, RACE, PLACEHOLDER)
+    assert new is None
+    rows = await sessions(db)
+    assert len(rows) == 1 and rows[0]["session_minutes"] == 82.6 and rows[0]["status"] == "complete"
+    async with db.acquire() as conn:
+        assert await conn.fetchval("SELECT max(total_laps) FROM session_participants WHERE session_id=$1", sid) == 39
+
+
+async def test_interleaving_lap_limit_mid_race(db):
+    limits = dict(minutes=0, laps=20)
+    agent, sid, new = await interleave(db, 900.0, 8, limits, dict(minutes=0, laps=1))
+    assert new not in (None, sid)
+    assert len(await sessions(db)) == 2 and (await row(db, sid))["session_laps"] == 20
+
+
+@pytest.mark.parametrize("laps_info", [0, 1])
+async def test_interleaving_lap_limit_finished(db, laps_info):
+    limits = dict(minutes=0, laps=20)
+    agent, sid, new = await interleave(db, 1500.0, 20, limits, dict(minutes=0, laps=laps_info))
+    assert new is None
+    rows = await sessions(db)
+    assert len(rows) == 1 and rows[0]["session_laps"] == 20 and rows[0]["status"] == "complete"
 
 
 async def test_session_info_alone_does_not_touch_the_persisted_row(db):
