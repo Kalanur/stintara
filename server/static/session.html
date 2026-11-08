@@ -48,7 +48,13 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .lap-overall{color:var(--best);font-weight:750}
 .lap-personal{color:var(--ok)}
 .lap-slower{color:var(--attention)}
-.lap-legend{margin:0 0 6px;font-size:12px;color:var(--muted)}
+.lap-legend{font-size:12px;color:var(--muted)}
+.table-legend{display:flex;align-items:center;gap:12px;padding:0 12px 6px}
+.table-help summary{font-size:12px}
+.table-help .help-body{position:absolute;z-index:5;left:12px;right:12px;margin-top:6px;padding:8px 12px;background:var(--raised);border:1px solid var(--line);border-radius:6px;font-size:12px;color:var(--text);box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.table-help .help-body p{margin:4px 0}
+.standings-panel{position:relative}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .standings-panel th,.standings-panel td{padding-left:6px;padding-right:6px}
 .standings-panel td.sector{color:var(--muted)}
@@ -727,6 +733,7 @@ function renderSession(d) {
   const activeId = ['full-scroll', 'relative-scroll', 'relative-toggle', 'weather-toggle', 'orientation-toggle'].includes(document.activeElement?.id) ? document.activeElement.id : null;
   const weatherOpen = document.querySelector('#weather-details')?.open || false;
   const relativeOpen = document.querySelector('#relative-details')?.open || false;
+  const helpOpen = document.querySelector('#full-help-details')?.open || false;
   const options = '<option value="">Choose a participant</option>' + d.participants.map(p =>
     `<option value="${esc(p.id)}">${esc(p.position)} · ${esc(p.display_name)}</option>`).join('');
   if (options !== selectorOptions) { selector.innerHTML = options; selectorOptions = options; }
@@ -744,8 +751,15 @@ function renderSession(d) {
       <details id="relative-details"><summary id="relative-toggle">Relative standings / session details</summary>${relativeWidget(d.participants, focusId)}
       <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p></details></section>
       <section class="panel standings-panel" aria-label="Full field"><div class="panel-heading"><h2>Full field</h2><span class="muted">${d.participants.length} entries · provider order</span></div>
+      <div class="table-legend"><span class="lap-legend" aria-label="Lap colour legend"><span class="lap-overall">Fastest Lap</span> · <span class="lap-personal">Personal Best (Last)</span> · <span class="lap-slower">Slower Lap</span> · Best otherwise neutral</span>
+      <details class="table-help" id="full-help-details"><summary id="full-help-toggle" aria-label="About this table">Info</summary><div class="help-body" id="full-help">
+      <p>Provider positions and lap times. Unknown values remain —.</p>
+      <p><strong>S1–S3</strong> are the sectors of the last timed lap (the last lap with a valid lap time); after pit laps this can be older than Laps. Sectors are not coloured.</p>
+      <p><strong>Gap</strong> is leader-relative; <strong>Interval</strong> is to the preceding position and only shown when comparable.</p>
+      <p><strong>Colours:</strong> Best is purple only for the single fastest lap of the session; ordinary personal bests stay neutral. Last is purple if it is that session best, green if it equals the driver's own best, yellow if slower than it, uncoloured if unknown.</p>
+      <p>Feed freshness does not establish race completion.</p></div></details></div>
       <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
-      <caption>Provider positions and lap times. S1–S3 are the sectors of the last timed lap (the last lap with a valid lap time; it can be older than Laps after pit laps). Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion. Lap colours — Best: <span class="lap-overall">purple</span> = fastest lap of the session, otherwise uncoloured. Last: <span class="lap-overall">purple</span> = that session best · <span class="lap-personal">green</span> = own best · <span class="lap-slower">yellow</span> = slower than own best · uncoloured = unknown. Sectors are not coloured.</caption>
+      <caption class="sr-only">Full field standings</caption>
       <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col" class="num" title="Completed laps">Laps</th><th scope="col" class="num" title="Sector 1 of the last timed lap">S1</th><th scope="col" class="num" title="Sector 2 of the last timed lap">S2</th><th scope="col" class="num" title="Sector 3 of the last timed lap">S3</th><th scope="col" class="num">Last</th><th scope="col" class="num">Best</th><th scope="col" class="num">Gap</th><th scope="col" class="num">Interval</th><th scope="col" title="Compound and remaining tyre of the worst corner (1.0 new, 0 destroyed). Live while snapshots are fresh, otherwise as of the last timed lap.">Tyre</th><th scope="col" title="Experimental: number of body regions the provider reports as damaged (0 = none reported). Not validated in-game.">Dmg</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
       <tbody>${d.participants.map(p => {
         const vehicle = vehicleLabel(p);
@@ -756,6 +770,8 @@ function renderSession(d) {
       }).join('') || `<tr><td colspan="${hideClass ? 14 : 15}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
   const weatherDetails = document.querySelector('#weather-details');
   if (weatherDetails) weatherDetails.open = weatherOpen;
+  const helpDetails = document.querySelector('#full-help-details');
+  if (helpDetails) helpDetails.open = helpOpen;
   const relativeDetails = document.querySelector('#relative-details');
   if (relativeDetails) relativeDetails.open = relativeOpen;
   if (activeId) document.querySelector('#'+activeId)?.focus({preventScroll:true});
