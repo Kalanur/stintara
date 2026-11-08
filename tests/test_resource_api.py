@@ -16,6 +16,7 @@ async def prepared(db, available=True):
     scoring['vehicles'][0]['energy_current_fraction'] = .63
     await main.handle_message(agent, 'lmu', 'scoring', scoring)
     await main.handle_message(agent, 'lmu', 'session_info', dict(track_name='Synthetic Circuit', session_laps=38))
+    await main.handle_message(agent, 'lmu', 'scoring', scoring)  # SessionInfo is persisted on the next scoring frame
     kind, payload = normalize(dict(type='TelemetryUpdate', current_et=100, fuel=42, fuel_capacity=100,
                                    ve_available=available, ve_history=[1, .898, .796, .694, .592, .49, .4]))
     await main.handle_message(agent, 'lmu', kind, Telemetry.model_validate(payload).model_dump())
