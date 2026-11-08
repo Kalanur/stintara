@@ -281,6 +281,17 @@ Full Field columns: `P | Driver / entry | Laps | S1 | S2 | S3 | Last | Best | Ga
 | Tyre remaining | `wheels[].wear` (mWear, 1.0 new) | `tyre_remaining_min` (worst corner) | Only trusted if a wheel has a real sensor value. For all cars except the player, Pitwall sends wear 1.0 with sentinel temperatures, so it is shown as unknown. |
 | Damage (experimental) | `dent_severity[8]` | `damage_regions`, `damage_max` | Count of body regions the provider reports as damaged (`0` = none reported, unknown `—`). Not validated in-game. Only values 0 and 1 were observed. Rises on track and drops in the pit in the captures, so it behaves like real damage. |
 
+Lap time colours (Full Field, Focus line, Head-to-Head, Relative; classified server-side in `timing.classify_lap_times` from the same payload, never across sessions):
+
+| Colour | Class | Meaning |
+| --- | --- | --- |
+| Purple | `overall` | The single fastest Best of the session (all classes together). A tie at millisecond precision is attributed to nobody. |
+| Green | `personal` | Any other known Best; for Last: equals the driver's own Best (not the session best). |
+| Yellow | `slower` | Last lap slower than the driver's Best. |
+| Uncoloured | none | Unknown, non-positive or non-finite times; Last faster than Best (inconsistent mix); no Best to compare with. |
+
+There is no red: the provider reports no lap validity, so no invalid-lap rule is invented (Best is taken as the provider's valid-lap best). Sectors are never coloured because no reliable per-session sector bests are available.
+
 Tyre and damage use the live snapshot while it is under 30 s old, otherwise the last completed-lap checkpoint. They are never persisted beyond the existing lap rows.
 
 Known data limits: `ScoringUpdate` also carries live `cur_sector*`, but those are not used. `best_sector3` looks unreliable, and `best_sector*` is unused. The replay compiler accepts `race_control` (PR #51), so `VehicleStatusUpdate` captures compile unchanged.
