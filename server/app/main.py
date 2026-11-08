@@ -599,7 +599,7 @@ async def current_or_create_session(agent, payload):
         session_id = await resolve_session(conn, agent, resolution_state, payload, SESSION_TIMEOUT_SECONDS)
         if session_id:
             await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
-    for key in ("pending_convergence", "convergence_invalidated"):
+    for key in ("pending_convergence", "convergence_invalidated", "post_finish_idle"):
         state.pop(key, None)
         if key in resolution_state:
             state[key] = resolution_state[key]
