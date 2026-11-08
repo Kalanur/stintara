@@ -52,6 +52,33 @@ def preceding_interval(previous, current):
     return current["gap_to_leader"] - previous["gap_to_leader"]
 
 
+def lap_ms(value):
+    """Lap time as integer milliseconds for comparison; provider floats are single precision."""
+    return round(value * 1000) if nonnegative(value) and value > 0 else None
+
+
+def classify_lap_times(participants):
+    """Live-timing colour semantics for one session's participants, from provider times only.
+
+    best_lap_class: "overall" only for the single fastest Best of the session (all classes together);
+    every other Best, including ordinary personal bests, stays None (neutral). A tie for the fastest at
+    millisecond precision is attributed to nobody. last_lap_class: "overall" when Last is that unique
+    session best, "personal" when Last equals the driver's own Best (not the session best), "slower" when
+    Last is slower than Best, None when either is unknown or Last is faster than Best (inconsistent mix).
+    The provider reports no lap validity, so there is no invalid class; sectors are never classified.
+    """
+    bests = {id(p): lap_ms(p.get("best_lap_time")) for p in participants}
+    known = [v for v in bests.values() if v is not None]
+    fastest = min(known, default=None)
+    unique = fastest is not None and known.count(fastest) == 1
+    for p in participants:
+        best, last = bests[id(p)], lap_ms(p.get("last_lap_time"))
+        overall = unique and best == fastest
+        p["best_lap_class"] = "overall" if overall else None
+        p["last_lap_class"] = (None if best is None or last is None or last < best
+                               else "slower" if last > best else "overall" if overall else "personal")
+
+
 def project_timing(participants, session_type):
     counts = Counter(p.get("position") for p in participants if position(p.get("position")))
     unique = {p["position"]: p for p in participants if position(p.get("position")) and counts[p["position"]] == 1}
@@ -68,6 +95,7 @@ def project_timing(participants, session_type):
             interval = preceding_interval(previous, p)
             if interval is not None:
                 p.update(interval=interval, interval_preceding_id=previous["id"])
+    classify_lap_times(participants)
 
 
 def session_timing(session, scoring):

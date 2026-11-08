@@ -141,9 +141,9 @@ async function sessionHarness(data, query='', fuelReply=null) {
   const planInput={value:''},planFeedback={textContent:''};
   const planForm={addEventListener(name,listener){this[name]=listener;}};
   const planAuto={addEventListener(name,listener){this[name]=listener;}};
-  const relativeDetails = {open:false};
+  const relativeDetails = {open:false}, helpDetails = {open:false};
   const controls={'#planned-stop':planInput,'#plan-feedback':planFeedback,'#plan-form':planForm,'#plan-auto':planAuto};
-  const document = {activeElement:null,querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : name==='#relative-details' ? relativeDetails : controls[name]||scrolls[name]};
+  const document = {activeElement:null,querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : name==='#relative-details' ? relativeDetails : name==='#full-help-details' ? helpDetails : controls[name]||scrolls[name]};
   let queued, finish, currentData=data;
   let done = new Promise(resolve => { finish=resolve; });
   const context = vm.createContext({URL,location,localStorage,
@@ -164,7 +164,7 @@ async function sessionHarness(data, query='', fuelReply=null) {
   });
   vm.runInContext(spectatorScript(), context);
   await done;
-  return {root,selector,location,replacements,scrolls,fuel,fuelRequests,details,relativeDetails,document,
+  return {root,selector,location,replacements,scrolls,fuel,fuelRequests,details,relativeDetails,helpDetails,document,
     planInput,planFeedback,planForm,planAuto,storage,
     change(id) { selector.value=id; selector.change(); },
     async poll(data) {
@@ -1308,4 +1308,48 @@ test('full field V2: Laps, S1-S3 from last timed lap, tyre and damage; unknown s
   assert.match(table, /<th[^>]*title="[^"]*last timed lap/);
   assert.match(table, /Experimental: number of body regions the provider reports as damaged/);
   assert.doesNotMatch(table, /last completed lap/);
+});
+
+test('lap time colours follow the server classes; unknown and foreign values stay uncoloured', async () => {
+  const lap = (i, best, last, bc, lc) => ({id:syntheticId(i), display_name:`Driver ${i}`, position:i, vehicle_class:'GT3',
+    total_laps:4, finish_status:0, pitstops:0, best_lap_time:best, last_lap_time:last, best_lap_class:bc, last_lap_class:lc});
+  const field = [lap(1, 100, 100, 'overall', 'overall'), lap(2, 101, 102, null, 'slower'),
+    lap(3, 102, 102, null, 'personal'), lap(4, null, 99, null, null), lap(5, 103, 104, 'bogus', '<b>x</b>'),
+    lap(6, 104, 104, 'personal', 'personal')];
+  const page = await sessionHarness(sessionData(field), `?focus=${field[1].id}`);
+  const html = page.root.innerHTML, table = html.slice(html.indexOf('aria-label="Full field standings"'));
+  const rows = table.split('<tr').slice(2);
+  const spans = row => [...row.matchAll(/<span class="(lap-\w+)"[^>]*>([\d:.]+)<\/span>/g)].map(m => m.slice(1, 3).join(' '));
+  assert.deepEqual(spans(rows[0]), ['lap-overall 1:40.000', 'lap-overall 1:40.000']);
+  assert.deepEqual(spans(rows[1]), ['lap-slower 1:42.000']);
+  assert.deepEqual(spans(rows[2]), ['lap-personal 1:42.000']);
+  assert.deepEqual(spans(rows[3]), []);   // missing Best and an incomparable Last stay neutral
+  assert.deepEqual(spans(rows[5]), ['lap-personal 1:44.000']);   // Last only: a stray personal Best class is never rendered
+  assert.deepEqual(spans(rows[4]), []);   // unknown class values are never rendered as colour
+  assert.equal((rows.join('').match(/class="lap-overall"/g) || []).length, 2);   // only one record holder
+  assert.doesNotMatch(html, /best-time/);
+  // Compact one-line legend above the table; the long explanation lives in a collapsible help.
+  const legend = html.match(/<span class="lap-legend"[^>]*>(.*?neutral)<\/span>/s)[1];
+  assert.match(legend, /Fastest Lap.*Personal Best \(Last\).*Slower Lap.*Best otherwise neutral/s);
+  assert.ok(html.indexOf('lap-legend') < html.indexOf('aria-label="Full field standings"'));
+  assert.doesNotMatch(table, /Race Gap is leader-relative/);
+  assert.match(html, /<details class="table-help" id="full-help-details"><summary id="full-help-toggle"[^>]*>Info<\/summary><div class="help-body" id="full-help">[\s\S]*sectors of the last timed lap[\s\S]*Gap<\/strong> is leader-relative[\s\S]*Feed freshness does not establish race completion/);
+  // Focus line and head-to-head show the same classes as the table for the same time.
+  assert.match(html, /<span>Best 1:41\.000<\/span>/);
+  assert.match(html, /<span>Last <span class="lap-slower"[^>]*>1:42\.000<\/span>/);
+  assert.match(html, /<dt>Best<\/dt><dd>1:41\.000<\/dd>/);
+  // Session switch / payload without classes: no colour is carried over.
+  const bare = field.map(({best_lap_class, last_lap_class, ...p}) => p);
+  await page.poll(sessionData(bare));
+  assert.doesNotMatch(page.root.innerHTML.replace(/<span class="lap-legend".*?neutral<\/span>/s, ''), /class="lap-(overall|personal|slower)"/);
+});
+
+test('full field help stays open across polls and the legend is one compact line', async () => {
+  const field = syntheticField(3);
+  const page = await sessionHarness(sessionData(field));
+  assert.equal((page.root.innerHTML.match(/class="lap-legend"/g) || []).length, 1);
+  assert.equal(page.helpDetails.open, false);
+  page.helpDetails.open = true;
+  await page.poll(sessionData(field));
+  assert.equal(page.helpDetails.open, true);
 });

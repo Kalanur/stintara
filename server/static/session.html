@@ -45,7 +45,16 @@ td:not(:nth-child(2)){white-space:nowrap}
 caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .driver-cell{min-width:150px;max-width:260px;overflow-wrap:anywhere}
 .entry{display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
-.best-time{color:var(--best)}
+.lap-overall{color:var(--best);font-weight:750}
+.lap-personal{color:var(--ok)}
+.lap-slower{color:var(--attention)}
+.lap-legend{font-size:12px;color:var(--muted)}
+.table-legend{display:flex;align-items:center;gap:12px;padding:0 12px 6px}
+.table-help summary{font-size:12px}
+.table-help .help-body{position:absolute;z-index:5;left:12px;right:12px;margin-top:6px;padding:8px 12px;background:var(--raised);border:1px solid var(--line);border-radius:6px;font-size:12px;color:var(--text);box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.table-help .help-body p{margin:4px 0}
+.standings-panel{position:relative}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .standings-panel th,.standings-panel td{padding-left:6px;padding-right:6px}
 .standings-panel td.sector{color:var(--muted)}
@@ -345,6 +354,15 @@ function stopsText(p, focused=false) {
   return `${p.pitstops}${last === null ? '' : ` · L${last}`}`;
 }
 // Sector times are last-completed-lap values (individual S1/S2/S3, never a running sector); shown as ss.mmm.
+const LAP_CLASS = {overall: 'lap-overall', personal: 'lap-personal', slower: 'lap-slower'};
+const LAP_TITLE = {overall: 'Fastest lap of the session', personal: 'Personal best', slower: 'Slower than personal best'};
+function lapTime(value, cls) {
+  const text = fmt(value);
+  return Object.hasOwn(LAP_CLASS, cls) && text !== '—'
+    ? `<span class="${LAP_CLASS[cls]}" title="${LAP_TITLE[cls]}">${text}</span>` : text;
+}
+// Best is coloured only for the unique session best; ordinary personal bests stay neutral.
+const bestTime = p => lapTime(p.best_lap_time, p.best_lap_class === 'overall' ? 'overall' : null);
 const sectorFmt = t => Number.isFinite(t) && t > 0 ? (t < 60 ? t.toFixed(3) : fmt(t)) : '—';
 const COMPOUND_SHORT = {soft:'S', medium:'M', hard:'H', wet:'W'};
 function tyreText(p) {
@@ -369,7 +387,7 @@ function focusStatus(participants, focusId, race) {
   return `<p class="focus-status" aria-label="Focus status"><strong>Focus: ${esc(p.display_name)}</strong>
     <span>P${validPosition(p.position) ? p.position : '—'}</span><span>Gap ${gapText(p, race)}</span>
     <span>Interval ${intervalText(p, race)}</span><span>${laps} completed laps</span>
-    <span>Last ${fmt(p.last_lap_time)}</span><span>Best ${fmt(p.best_lap_time)}</span>
+    <span>Last ${lapTime(p.last_lap_time, p.last_lap_class)}</span><span>Best ${bestTime(p)}</span>
     <span title="Last stop: first persisted completed-lap snapshot with an increased counter; not exact entry/exit.">${stopsText(p, true)}</span>
     <span>${participantStatus(p, true)}</span></p>`;
 }
@@ -380,7 +398,7 @@ function focusTiming(participants, focusId) {
     <div class="metrics">${['sector1','sector2','sector3'].map((key,i) => `<div class="metric">S${i+1}<div class="value">${fmt(p[key])}</div></div>`).join('')}</div></section>` : '';
 }
 function timingCells(p) {
-  return `<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${p.in_pits === true ? 'PIT' : '—'}</td><td>—</td>`;
+  return `<td>${esc(p.total_laps)}</td><td>${lapTime(p.last_lap_time, p.last_lap_class)}</td><td>${bestTime(p)}</td><td>${p.in_pits === true ? 'PIT' : '—'}</td><td>—</td>`;
 }
 function relativeWidget(participants, focusId) {
   const rows = relativeWindow(participants, focusId);
@@ -392,7 +410,7 @@ function relativeWidget(participants, focusId) {
 function comparisonCard(label, p, focus, race, hideClass=false) {
   return `<article class="${label === 'Focus' ? 'focus' : ''}"><h3>${label}</h3>${p ? `<strong>${esc(p.display_name)}</strong><dl>
     <dt>Position</dt><dd>${esc(p.position)}</dd>${hideClass ? '' : `<dt>Class</dt><dd>${esc(p.vehicle_class || '—')}</dd>`}
-    <dt>Last</dt><dd>${fmt(p.last_lap_time)}</dd><dt>Best</dt><dd class="best-time">${fmt(p.best_lap_time)}</dd>
+    <dt>Last</dt><dd>${lapTime(p.last_lap_time, p.last_lap_class)}</dd><dt>Best</dt><dd>${bestTime(p)}</dd>
     <dt>Interval to focus</dt><dd>${seconds(intervalToFocus(p, focus, race), true)}</dd></dl>` : '<p>—</p>'}</article>`;
 }
 function headToHeadWidget(participants, focusId, race=false) {
@@ -715,6 +733,7 @@ function renderSession(d) {
   const activeId = ['full-scroll', 'relative-scroll', 'relative-toggle', 'weather-toggle', 'orientation-toggle'].includes(document.activeElement?.id) ? document.activeElement.id : null;
   const weatherOpen = document.querySelector('#weather-details')?.open || false;
   const relativeOpen = document.querySelector('#relative-details')?.open || false;
+  const helpOpen = document.querySelector('#full-help-details')?.open || false;
   const options = '<option value="">Choose a participant</option>' + d.participants.map(p =>
     `<option value="${esc(p.id)}">${esc(p.position)} · ${esc(p.display_name)}</option>`).join('');
   if (options !== selectorOptions) { selector.innerHTML = options; selectorOptions = options; }
@@ -732,18 +751,27 @@ function renderSession(d) {
       <details id="relative-details"><summary id="relative-toggle">Relative standings / session details</summary>${relativeWidget(d.participants, focusId)}
       <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p></details></section>
       <section class="panel standings-panel" aria-label="Full field"><div class="panel-heading"><h2>Full field</h2><span class="muted">${d.participants.length} entries · provider order</span></div>
+      <div class="table-legend"><span class="lap-legend" aria-label="Lap colour legend"><span class="lap-overall">Fastest Lap</span> · <span class="lap-personal">Personal Best (Last)</span> · <span class="lap-slower">Slower Lap</span> · Best otherwise neutral</span>
+      <details class="table-help" id="full-help-details"><summary id="full-help-toggle" aria-label="About this table">Info</summary><div class="help-body" id="full-help">
+      <p>Provider positions and lap times. Unknown values remain —.</p>
+      <p><strong>S1–S3</strong> are the sectors of the last timed lap (the last lap with a valid lap time); after pit laps this can be older than Laps. Sectors are not coloured.</p>
+      <p><strong>Gap</strong> is leader-relative; <strong>Interval</strong> is to the preceding position and only shown when comparable.</p>
+      <p><strong>Colours:</strong> Best is purple only for the single fastest lap of the session; ordinary personal bests stay neutral. Last is purple if it is that session best, green if it equals the driver's own best, yellow if slower than it, uncoloured if unknown.</p>
+      <p>Feed freshness does not establish race completion.</p></div></details></div>
       <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
-      <caption>Provider positions and lap times. S1–S3 are the sectors of the last timed lap (the last lap with a valid lap time; it can be older than Laps after pit laps). Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
+      <caption class="sr-only">Full field standings</caption>
       <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col" class="num" title="Completed laps">Laps</th><th scope="col" class="num" title="Sector 1 of the last timed lap">S1</th><th scope="col" class="num" title="Sector 2 of the last timed lap">S2</th><th scope="col" class="num" title="Sector 3 of the last timed lap">S3</th><th scope="col" class="num">Last</th><th scope="col" class="num">Best</th><th scope="col" class="num">Gap</th><th scope="col" class="num">Interval</th><th scope="col" title="Compound and remaining tyre of the worst corner (1.0 new, 0 destroyed). Live while snapshots are fresh, otherwise as of the last timed lap.">Tyre</th><th scope="col" title="Experimental: number of body regions the provider reports as damaged (0 = none reported). Not validated in-game.">Dmg</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
       <tbody>${d.participants.map(p => {
         const vehicle = vehicleLabel(p);
         const entry = vehicle.label && !(hideClass && vehicle.label === 'Class') ? `${vehicle.label}: ${vehicle.value}` : 'Entry: —';
         return `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td class="driver-cell">${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? ` <a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}
       <span class="entry" title="${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}">${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}</span></td>
-      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td class="num">${esc(p.total_laps)}</td><td class="num sector">${sectorFmt(p.sector1)}</td><td class="num sector">${sectorFmt(p.sector2)}</td><td class="num sector">${sectorFmt(p.sector3)}</td><td class="num">${fmt(p.last_lap_time)}</td><td class="num best-time">${fmt(p.best_lap_time)}</td><td class="num">${gapText(p, race)}</td><td class="num">${intervalText(p, race)}</td><td>${tyreText(p)}</td><td>${damageText(p)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
+      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td class="num">${esc(p.total_laps)}</td><td class="num sector">${sectorFmt(p.sector1)}</td><td class="num sector">${sectorFmt(p.sector2)}</td><td class="num sector">${sectorFmt(p.sector3)}</td><td class="num">${lapTime(p.last_lap_time, p.last_lap_class)}</td><td class="num">${bestTime(p)}</td><td class="num">${gapText(p, race)}</td><td class="num">${intervalText(p, race)}</td><td>${tyreText(p)}</td><td>${damageText(p)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
       }).join('') || `<tr><td colspan="${hideClass ? 14 : 15}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
   const weatherDetails = document.querySelector('#weather-details');
   if (weatherDetails) weatherDetails.open = weatherOpen;
+  const helpDetails = document.querySelector('#full-help-details');
+  if (helpDetails) helpDetails.open = helpOpen;
   const relativeDetails = document.querySelector('#relative-details');
   if (relativeDetails) relativeDetails.open = relativeOpen;
   if (activeId) document.querySelector('#'+activeId)?.focus({preventScroll:true});

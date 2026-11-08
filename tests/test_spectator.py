@@ -173,3 +173,65 @@ def test_projection_field_status_prefers_fresh_snapshot_over_checkpoint_and_stay
     bare = main.spectator_participants([participant(1)], session, True, [], 100)[0]
     assert bare["tyre_compound"] is bare["tyre_remaining_min"] is bare["damage_regions"] is None
     assert bare.get("sector1") is None
+
+
+def timed(best, last):
+    return dict(best_lap_time=best, last_lap_time=last)
+
+
+def test_lap_time_classes_overall_personal_slower_and_unknown():
+    from server.app.timing import classify_lap_times
+    field = [timed(100.0, 100.0), timed(100.5, 101.0), timed(101.0, 101.0), timed(None, 99.0),
+             timed(0, 100.0), timed(float("nan"), None), timed(-1, 100.0), timed(102.0, 101.0), timed(103.0, 0)]
+    classify_lap_times(field)
+    got = [(p["best_lap_class"], p["last_lap_class"]) for p in field]
+    assert got == [("overall", "overall"),      # the one fastest valid lap, and Last equals it
+                   (None, "slower"),            # ordinary personal best is neutral, Last slower
+                   (None, "personal"),          # Last equals own best (not overall)
+                   (None, None),                # no Best: Last cannot be compared
+                   (None, None), (None, None), (None, None),
+                   (None, None),                # Last faster than Best is inconsistent: no colour
+                   (None, None)]                # invalid Last stays unknown
+    assert sum(p["best_lap_class"] == "overall" for p in field) == 1
+
+
+def test_lap_time_class_ties_and_rounding_never_pick_an_arbitrary_record():
+    from server.app.timing import classify_lap_times
+    tie = [timed(100.0, 100.0), timed(100.0004, 100.0004), timed(101.0, 105.0)]
+    classify_lap_times(tie)   # equal at millisecond precision: nobody gets the session record
+    assert [p["best_lap_class"] for p in tie] == [None, None, None]
+    assert [p["last_lap_class"] for p in tie] == ["personal", "personal", "slower"]
+    near = [timed(100.0, 100.0), timed(100.002, 100.002)]
+    classify_lap_times(near)
+    assert [p["best_lap_class"] for p in near] == ["overall", None]
+    single = [timed(100.0, None)]
+    classify_lap_times(single)
+    assert single[0]["best_lap_class"] == "overall" and single[0]["last_lap_class"] is None
+    empty = []
+    classify_lap_times(empty)
+
+
+def test_projection_lap_classes_are_per_payload_and_ignore_other_sessions():
+    session, other = uuid7(), uuid7()
+    rows = [dict(participant(1), local_vehicle_id=1, **timed(101.0, 101.0)),
+            dict(participant(2), local_vehicle_id=2, **timed(102.0, 103.0))]
+    foreign = dict(session_id=other, last_scoring_at=99, scoring={"vehicles": [
+        {"id": 1, "position": 1, "total_laps": 3, "best_lap_time": 90.0, "last_lap_time": 90.0}]})
+    result = main.spectator_participants([dict(r) for r in rows], session, True, [foreign], 100)
+    assert [p["best_lap_class"] for p in result] == ["overall", None]   # foreign 90.0 is not mixed in
+    mine = dict(foreign, session_id=session)
+    result = main.spectator_participants([dict(r) for r in rows], session, True, [mine], 100)
+    byid = {p["local_vehicle_id"]: p for p in result}
+    assert byid[1]["best_lap_class"] == "overall" and byid[1]["best_lap_time"] == 90.0
+    assert byid[2]["best_lap_time"] == 102.0 and byid[2]["best_lap_class"] is None
+    # A new session payload starts from scratch: no record colour is carried over.
+    fresh = main.spectator_participants([dict(participant(1), local_vehicle_id=1)], uuid7(), True, [], 100)
+    assert fresh[0]["best_lap_class"] is None and fresh[0]["last_lap_class"] is None
+
+
+def test_ordinary_personal_bests_are_never_coloured():
+    from server.app.timing import classify_lap_times
+    field = [timed(90.0 + i, 90.0 + i) for i in range(6)]
+    classify_lap_times(field)
+    assert [p["best_lap_class"] for p in field] == ["overall"] + [None] * 5
+    assert [p["last_lap_class"] for p in field] == ["overall"] + ["personal"] * 5
