@@ -283,4 +283,4 @@ Full Field columns: `P | Driver / entry | Laps | S1 | S2 | S3 | Last | Best | Ga
 
 Tyre and damage use the live snapshot while it is under 30 s old, otherwise the last completed-lap checkpoint. They are never persisted beyond the existing lap rows.
 
-Known data limits: `ScoringUpdate` also carries live `cur_sector*`, but those are not used. `best_sector3` looks unreliable, and `best_sector*` is unused. The replay compiler's `KINDS` does not include `race_control`, so `VehicleStatusUpdate` has to be removed before compiling a capture.
+Known data limits: `ScoringUpdate` also carries live `cur_sector*`, but those are not used. `best_sector3` looks unreliable, and `best_sector*` is unused. The replay compiler accepts `race_control` (PR #51), so `VehicleStatusUpdate` captures compile unchanged.

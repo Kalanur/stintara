@@ -411,6 +411,8 @@ test('session clock and focused persisted sectors label completed laps without p
   const page=await sessionHarness(data,`?focus=${field[0].id}`);
   for (const value of ['30 min','0:00:00','0 completed laps','checkpoint lap 2','0:30.500','0:31.250'])
     assert.ok(page.root.innerHTML.includes(value),value);
+  assert.match(page.root.innerHTML,/Last timed lap sectors/);
+  assert.doesNotMatch(page.root.innerHTML,/Last completed lap sectors/);
   assert.doesNotMatch(page.root.innerHTML,/remaining laps|Current lap|Remaining time|official remaining/i);
   await page.poll({...data,live:false,timing:{...data.timing,elapsed_seconds:123}});
   assert.match(page.root.innerHTML,/Elapsed session time: —/);

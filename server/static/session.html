@@ -376,7 +376,7 @@ function focusStatus(participants, focusId, race) {
 function focusTiming(participants, focusId) {
   const p = participantById(participants, focusId);
   return p ? `<section aria-label="Focused timing">
-    <p class="sector-context">Last completed lap sectors · checkpoint lap ${esc(p.sector_lap_number)}</p>
+    <p class="sector-context">Last timed lap sectors · checkpoint lap ${esc(p.sector_lap_number)}</p>
     <div class="metrics">${['sector1','sector2','sector3'].map((key,i) => `<div class="metric">S${i+1}<div class="value">${fmt(p[key])}</div></div>`).join('')}</div></section>` : '';
 }
 function timingCells(p) {
