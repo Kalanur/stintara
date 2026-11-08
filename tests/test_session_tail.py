@@ -111,12 +111,12 @@ async def test_laps_limited_finish_is_post_finish_idle(db):
     assert len(rows) == 1 and rows[0]["session_laps"] == 20 and rows[0]["status"] == "complete"
 
 
-async def test_unknown_limit_is_filled_in_by_a_confirmed_session_info(db):
+async def test_unknown_session_limits_remain_unknown_after_creation(db):
     agent = await make_agent(db)
     sid = await start_race(agent, minutes=0, laps=0)  # no positive limit known yet
-    assert (await row(db, sid))["session_minutes"] in (None, 0)
     assert await deliver(agent, running(300.0, laps=3), minutes=90.0, laps=0) == sid
-    assert (await row(db, sid))["session_minutes"] == 90.0
+    assert (await row(db, sid))["session_minutes"] in (None, 0)  # deliberately conservative: no session identity
+    assert main.runtime[str(agent["id"])]["session_minutes"] == 90.0
     assert main.runtime[str(agent["id"])].get("session_meta_pending") is None  # consumed by that resolution
 
 
@@ -124,7 +124,7 @@ async def test_known_limit_is_stable_but_runtime_follows_session_info(db):
     agent = await make_agent(db)
     sid = await start_race(agent)
     assert await deliver(agent, running(300.0, laps=3), minutes=90.0, laps=0) == sid
-    assert (await row(db, sid))["session_minutes"] == 82.6  # first known positive limit wins
+    assert (await row(db, sid))["session_minutes"] == 82.6  # limits are immutable after INSERT
     assert main.runtime[str(agent["id"])]["session_minutes"] == 90.0
 
 
@@ -154,20 +154,43 @@ async def test_interleaving_finished_race_stays_one_session(db):
         assert await conn.fetchval("SELECT max(total_laps) FROM session_participants WHERE session_id=$1", sid) == 39
 
 
-async def test_interleaving_lap_limit_mid_race(db):
-    limits = dict(minutes=0, laps=20)
-    agent, sid, new = await interleave(db, 900.0, 8, limits, dict(minutes=0, laps=1))
+LAPS = dict(minutes=0, laps=20)
+
+
+@pytest.mark.parametrize("info", [dict(minutes=0, laps=1), dict(minutes=5 / 60, laps=0)])
+async def test_interleaving_lap_limit_mid_race(db, info):  # second case: lap race + time placeholder (cross-dimension)
+    agent, sid, new = await interleave(db, 900.0, 8, LAPS, info)
     assert new not in (None, sid)
-    assert len(await sessions(db)) == 2 and (await row(db, sid))["session_laps"] == 20
+    rows = {r["id"]: r for r in await sessions(db)}
+    assert len(rows) == 2 and (rows[sid]["session_laps"], rows[sid]["session_minutes"]) == (20, 0)
+    assert rows[new]["session_minutes"] == pytest.approx(info["minutes"])  # the new session takes the current info
 
 
-@pytest.mark.parametrize("laps_info", [0, 1])
-async def test_interleaving_lap_limit_finished(db, laps_info):
-    limits = dict(minutes=0, laps=20)
-    agent, sid, new = await interleave(db, 1500.0, 20, limits, dict(minutes=0, laps=laps_info))
+@pytest.mark.parametrize("info", [dict(minutes=0, laps=0), dict(minutes=0, laps=1), dict(minutes=5 / 60, laps=0)])
+async def test_interleaving_lap_limit_finished(db, info):
+    agent, sid, new = await interleave(db, 1500.0, 20, LAPS, info)
     assert new is None
     rows = await sessions(db)
-    assert len(rows) == 1 and rows[0]["session_laps"] == 20 and rows[0]["status"] == "complete"
+    assert len(rows) == 1 and rows[0]["status"] == "complete"
+    assert (rows[0]["session_laps"], rows[0]["session_minutes"]) == (20, 0)
+
+
+@pytest.mark.parametrize("info", [dict(minutes=82.6, laps=1), dict(minutes=0, laps=1)])
+async def test_interleaving_time_limit_mid_race_with_lap_placeholder(db, info):
+    agent, sid, new = await interleave(db, 900.0, 8, RACE, info)
+    assert new not in (None, sid)
+    rows = {r["id"]: r for r in await sessions(db)}
+    assert len(rows) == 2 and (rows[sid]["session_minutes"], rows[sid]["session_laps"]) == (82.6, 0)
+    assert rows[new]["session_laps"] == 1
+
+
+@pytest.mark.parametrize("info", [dict(minutes=82.6, laps=1), dict(minutes=0, laps=1)])
+async def test_interleaving_time_limit_finished_with_lap_placeholder(db, info):
+    agent, sid, new = await interleave(db, 5331.6, 39, RACE, info)
+    assert new is None
+    rows = await sessions(db)
+    assert len(rows) == 1 and rows[0]["status"] == "complete"
+    assert (rows[0]["session_minutes"], rows[0]["session_laps"]) == (82.6, 0)
 
 
 async def test_session_info_alone_does_not_touch_the_persisted_row(db):

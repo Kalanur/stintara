@@ -601,16 +601,13 @@ async def current_or_create_session(agent, payload):
             await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
             if state.get("session_meta_pending"):
                 # SessionInfo carries no session identity, so a scoring frame resolving to A does not prove the
-                # preceding SessionInfo describes A. Known positive limits are therefore stable for a persisted
-                # session (first known positive value wins); only unknown limits are filled in. Weather is mutable.
+                # preceding SessionInfo describes A. session_minutes/session_laps are therefore captured at INSERT
+                # only and never updated afterwards (not even unknown -> known). Weather is mutable; track length
+                # is only filled in while unknown.
                 await conn.execute("""UPDATE sessions SET
                     track_length_m=CASE WHEN track_length_m IS NULL OR track_length_m<=0 THEN $2 ELSE track_length_m END,
-                    session_laps=CASE WHEN session_laps IS NULL OR session_laps<=0 THEN $3 ELSE session_laps END,
-                    session_minutes=CASE WHEN session_minutes IS NULL OR session_minutes<=0 THEN $4
-                                         ELSE session_minutes END,
-                    weather=$5::jsonb WHERE id=$1 AND status='live'""",
-                    session_id, state.get("track_length_m"), state.get("session_laps"),
-                    state.get("session_minutes"), state.get("weather_json", "{}"))
+                    weather=$3::jsonb WHERE id=$1 AND status='live'""",
+                    session_id, state.get("track_length_m"), state.get("weather_json", "{}"))
     if session_id:
         state.pop("session_meta_pending", None)
     for key in ("pending_convergence", "convergence_invalidated", "post_finish_idle"):
