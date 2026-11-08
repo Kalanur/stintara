@@ -6,7 +6,7 @@ from pathlib import Path
 WIRE = "stintara-pitwall-capture"
 PROTOCOL = "stintara-protocol-replay"
 SOURCES = {"synthetic", "real", "sanitized_real"}
-KINDS = {"connection", "session_info", "scoring", "lap_snapshots", "telemetry"}
+KINDS = {"connection", "session_info", "scoring", "lap_snapshots", "telemetry", "race_control"}
 
 
 class FormatError(ValueError):

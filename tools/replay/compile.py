@@ -19,7 +19,7 @@ def compile_capture(metadata, records):
             counts["ignored"] += 1
             continue
         kind, payload = normalized
-        interval = {"scoring": .2, "telemetry": 1.0}.get(kind, 0)
+        interval = {"scoring": .2, "telemetry": 1.0, "race_control": .1}.get(kind, 0)
         if kind in last and row["t"] - last[kind] < interval:
             counts["ignored"] += 1
             continue
