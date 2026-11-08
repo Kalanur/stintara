@@ -259,10 +259,10 @@ def test_serialize_uses_no_runtime_and_exposes_stable_keys():
     row = dict(id=uuid7(), simulator_provider="lmu", session_type="Race", track_name="T", status="complete",
                started_at=T0, ended_at=T0, participant_count=1, w_id=None, w_name=None, w_position=None,
                w_finish=None, w_n=None, k_id=None, k_slug=None, k_name=None, k_position=None,
-               k_finish=None, k_n=None)
+               k_finish=None, k_n=None, race_id=None, prev_id=None, prev_type=None)
     assert set(history.serialize(row)) == {"id", "simulator_provider", "session_type", "track_name", "status",
                                            "started_at", "ended_at", "participant_count", "winner",
-                                           "stintara_driver"}
+                                           "stintara_driver", "race_id", "previous_session"}
 
 
 async def test_schema_indexes_are_idempotent(db):

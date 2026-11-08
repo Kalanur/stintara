@@ -46,6 +46,7 @@ function card(x) {
     <p class="muted">Started ${esc(started)}${!live ? `<br>Finished ${esc(ended)}` : ''}
     ${w ? `<br>Winner: ${esc(w.display_name)}` : ''}
     ${k ? `<br>Stintara Driver: ${esc(k.display_name)}${k.position != null ? ` · P${esc(k.position)}` : ''}${FINISH[k.finish_status] ? ` · ${FINISH[k.finish_status]}` : ''}` : ''}</p>
+    ${x.previous_session ? `<p class="muted"><a href="/sessions/${esc(encodeURIComponent(x.previous_session.id))}/live">← Previous: ${esc(x.previous_session.session_type)}</a></p>` : ''}
     <p><a href="/sessions/${esc(encodeURIComponent(x.id))}/live${focus}">View stored session →</a></p></div>`;
 }
 

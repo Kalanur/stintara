@@ -24,8 +24,10 @@ SELECT s.id, s.simulator_provider, s.session_type, s.track_name, s.status,
        w.id AS w_id, w.display_name AS w_name, w.position AS w_position,
        w.finish_status AS w_finish, w.n AS w_n,
        k.id AS k_id, k.slug AS k_slug, k.driver_name AS k_name, k.position AS k_position,
-       k.finish_status AS k_finish, k.n AS k_n
+       k.finish_status AS k_finish, k.n AS k_n,
+       s.race_id, ps.id AS prev_id, ps.session_type AS prev_type
 FROM sessions s
+LEFT JOIN sessions ps ON ps.id=s.previous_session_id
 LEFT JOIN LATERAL (
     SELECT p.id, p.display_name, p.position, p.finish_status, count(*) OVER () AS n
     FROM session_participants p WHERE p.session_id=s.id AND p.position=1 LIMIT 1
@@ -78,6 +80,8 @@ def serialize(row) -> dict[str, Any]:
             "status": row["status"],
             "started_at": row["started_at"], "ended_at": row["ended_at"],
             "participant_count": row["participant_count"],
+            "race_id": row["race_id"],
+            "previous_session": {"id": row["prev_id"], "session_type": row["prev_type"]} if row["prev_id"] else None,
             "winner": winner, "stintara_driver": driver}
 
 

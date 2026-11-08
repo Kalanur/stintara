@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_seen_at timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Persisted Practice -> Qualifying -> Race order (#43): set only from a directly observed same-agent
+-- transition, never inferred afterwards. One successor per session; races/events carry the shared context.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id uuid
+    REFERENCES sessions(id) ON DELETE SET NULL CHECK (previous_session_id IS NULL OR previous_session_id <> id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_previous ON sessions(previous_session_id)
+    WHERE previous_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_sessions_race ON sessions(race_id) WHERE race_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_sessions_live ON sessions(status, started_at DESC);
 -- History browser (newest start first) and Home "recent results" (completed races by completion time).
 CREATE INDEX IF NOT EXISTS ix_sessions_history ON sessions(started_at DESC, id DESC);

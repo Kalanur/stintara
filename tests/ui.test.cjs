@@ -1240,3 +1240,28 @@ test('history: a stale failing request cannot replace the current list with an e
   assert.match(h.el('#list').innerHTML, /filtered/);
   assert.notEqual(h.el('#list').textContent, 'late boom');
 });
+
+test('session page shows chain navigation only from persisted neighbours (#43)', async () => {
+  const base = {live:false, participants:[],
+    session:{id:'q', track_name:'Synthetic', session_type:'Qualifying', status:'complete'}};
+  const none = (await render('session.html', base)).innerHTML;
+  assert.doesNotMatch(none, /Previous:|Go to|Waiting for next|coming soon/);
+  const both = (await render('session.html', {...base, session:{...base.session,
+    previous_session:{id:'p 1', session_type:'Practice'}, next_session:{id:'r', session_type:'Race'}}})).innerHTML;
+  assert.match(both, /href="\/sessions\/p%201\/live">← Previous: Practice/);
+  assert.match(both, /Qualifying over · <a href="\/sessions\/r\/live">Go to Race →/);
+  const escaped = (await render('session.html', {...base, session:{...base.session,
+    previous_session:{id:'p', session_type:'<b>x</b>'}}})).innerHTML;
+  assert.doesNotMatch(escaped, /<b>x<\/b>/);
+});
+
+test('history and home link only an existing previous session (#43)', async () => {
+  const withPrev = recentItem({previous_session:{id:'q-1', session_type:'Qualifying'}});
+  const home = (await render('index.html', homeData([withPrev]))).recent.innerHTML;
+  assert.match(home, /href="\/sessions\/q-1\/live">← Previous: Qualifying/);
+  assert.doesNotMatch((await render('index.html', homeData([recentItem({previous_session:null})]))).recent.innerHTML, /Previous:/);
+  const h = await renderHistory(url => url.includes('/filters') ? {providers:[], tracks:[], session_types:[]}
+    : {items:[withPrev, recentItem({id:'solo'})], limit:20, has_more:false, next_cursor:null});
+  const list = h.el('#list').innerHTML;
+  assert.equal((list.match(/Previous:/g) || []).length, 1);
+});

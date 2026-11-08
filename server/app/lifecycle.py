@@ -36,6 +36,37 @@ async def race_ran_its_course(conn, previous):
     return False
 
 
+SESSION_ORDER = {"Practice": 0, "Qualifying": 1, "Race": 2}
+TRACK_LENGTH_TOLERANCE_M = 1.0
+
+
+def chain_continues(previous, *, provider, track, track_length, session_type, fresh):
+    """Only a directly observed, forward Practice -> Qualifying -> Race step on the same track links."""
+    if not fresh or previous["simulator_provider"] != provider or previous["track_name"] != track:
+        return False
+    old, new = SESSION_ORDER.get(previous["session_type"]), SESSION_ORDER.get(session_type)
+    if old is None or new is None or new <= old:
+        return False  # same-type resets (restarts) and backwards steps never link
+    left = previous["track_length_m"]
+    return not (finite(left) and finite(track_length) and abs(left - track_length) > TRACK_LENGTH_TOLERANCE_M)
+
+
+async def link_session_chain(conn, previous, session_id):
+    """Caller holds the lock on ``previous``. Reuses events/races; creates an internal pair on first link."""
+    if await conn.fetchval("SELECT 1 FROM sessions WHERE previous_session_id=$1", previous["id"]):
+        return  # another observer already created the successor; never create a second chain branch
+    race_id = previous["race_id"]
+    if race_id is None:
+        event_id, race_id = uuid7(), uuid7()
+        await conn.execute("INSERT INTO events(id,simulator_provider,track_name) VALUES($1,$2,$3)",
+                           event_id, previous["simulator_provider"], previous["track_name"])
+        await conn.execute("INSERT INTO races(id,event_id,simulator_provider) VALUES($1,$2,$3)",
+                           race_id, event_id, previous["simulator_provider"])
+        await conn.execute("UPDATE sessions SET race_id=$2 WHERE id=$1", previous["id"], race_id)
+    await conn.execute("UPDATE sessions SET race_id=$2,previous_session_id=$3 WHERE id=$1",
+                       session_id, race_id, previous["id"])
+
+
 async def complete_if_unobserved(conn, session_id):
     await conn.execute("""
         UPDATE sessions SET status='complete',ended_at=now()
@@ -192,6 +223,12 @@ async def resolve_session(conn, agent, state, scoring, timeout_seconds):
             state.get("track_length_m"), state.get("game_version"),
             state.get("session_laps"), state.get("session_minutes"), state.get("weather_json", "{}"))
         await attach_observation(conn, session_id, agent["id"])
+        # Exactly one live session of this agent was just left by a genuine transition (#43).
+        if len(rows) == 1 and chain_continues(
+                rows[0], provider=provider, track=track, track_length=state.get("track_length_m"),
+                session_type=scoring["session_type"],
+                fresh=(now - rows[0]["observation_seen"]).total_seconds() < timeout_seconds):
+            await link_session_chain(conn, rows[0], session_id)
     await conn.execute("""
         UPDATE session_observations SET last_seen_at=clock_timestamp(),last_session_time=$3
         WHERE session_id=$1 AND agent_id=$2
