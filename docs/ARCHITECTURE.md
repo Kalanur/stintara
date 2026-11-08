@@ -283,12 +283,14 @@ Full Field columns: `P | Driver / entry | Laps | S1 | S2 | S3 | Last | Best | Ga
 
 Lap time colours (Full Field, Focus line, Head-to-Head, Relative; classified server-side in `timing.classify_lap_times` from the same payload, never across sessions):
 
-| Colour | Class | Meaning |
-| --- | --- | --- |
-| Purple | `overall` | The single fastest Best of the session (all classes together). A tie at millisecond precision is attributed to nobody. |
-| Green | `personal` | Any other known Best; for Last: equals the driver's own Best (not the session best). |
-| Yellow | `slower` | Last lap slower than the driver's Best. |
-| Uncoloured | none | Unknown, non-positive or non-finite times; Last faster than Best (inconsistent mix); no Best to compare with. |
+| Column | Colour | Class | Meaning |
+| --- | --- | --- | --- |
+| Best | Purple | `overall` | The single fastest Best of the session (all classes together). A tie at millisecond precision is attributed to nobody. |
+| Best | Uncoloured | none | Every other Best, including ordinary personal bests (no green), and unknown, non-positive or non-finite values. |
+| Last | Purple | `overall` | Last equals the unique session best. |
+| Last | Green | `personal` | Last equals the driver's own Best but is not the session best. |
+| Last | Yellow | `slower` | Last slower than the driver's Best. |
+| Last | Uncoloured | none | Unknown values, no Best to compare with, or Last faster than Best (inconsistent mix). |
 
 There is no red: the provider reports no lap validity, so no invalid-lap rule is invented (Best is taken as the provider's valid-lap best). Sectors are never coloured because no reliable per-session sector bests are available.
 

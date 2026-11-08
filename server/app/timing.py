@@ -60,10 +60,11 @@ def lap_ms(value):
 def classify_lap_times(participants):
     """Live-timing colour semantics for one session's participants, from provider times only.
 
-    best_lap_class: "overall" = the single fastest Best of the session (all classes together);
-    "personal" = any other known Best (a tie for the fastest is not attributed to anyone);
-    None = unknown. last_lap_class: "overall"/"personal" when Last equals that Best, "slower" when Last is
-    slower than Best, None when either is unknown or Last is faster than Best (inconsistent mix).
+    best_lap_class: "overall" only for the single fastest Best of the session (all classes together);
+    every other Best, including ordinary personal bests, stays None (neutral). A tie for the fastest at
+    millisecond precision is attributed to nobody. last_lap_class: "overall" when Last is that unique
+    session best, "personal" when Last equals the driver's own Best (not the session best), "slower" when
+    Last is slower than Best, None when either is unknown or Last is faster than Best (inconsistent mix).
     The provider reports no lap validity, so there is no invalid class; sectors are never classified.
     """
     bests = {id(p): lap_ms(p.get("best_lap_time")) for p in participants}
@@ -72,10 +73,10 @@ def classify_lap_times(participants):
     unique = fastest is not None and known.count(fastest) == 1
     for p in participants:
         best, last = bests[id(p)], lap_ms(p.get("last_lap_time"))
-        best_class = None if best is None else "overall" if unique and best == fastest else "personal"
-        p["best_lap_class"] = best_class
+        overall = unique and best == fastest
+        p["best_lap_class"] = "overall" if overall else None
         p["last_lap_class"] = (None if best is None or last is None or last < best
-                               else "slower" if last > best else best_class)
+                               else "slower" if last > best else "overall" if overall else "personal")
 
 
 def project_timing(participants, session_type):

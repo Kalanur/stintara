@@ -1313,24 +1313,26 @@ test('full field V2: Laps, S1-S3 from last timed lap, tyre and damage; unknown s
 test('lap time colours follow the server classes; unknown and foreign values stay uncoloured', async () => {
   const lap = (i, best, last, bc, lc) => ({id:syntheticId(i), display_name:`Driver ${i}`, position:i, vehicle_class:'GT3',
     total_laps:4, finish_status:0, pitstops:0, best_lap_time:best, last_lap_time:last, best_lap_class:bc, last_lap_class:lc});
-  const field = [lap(1, 100, 100, 'overall', 'overall'), lap(2, 101, 102, 'personal', 'slower'),
-    lap(3, 102, 102, 'personal', 'personal'), lap(4, null, 99, null, null), lap(5, 103, 104, 'bogus', '<b>x</b>')];
+  const field = [lap(1, 100, 100, 'overall', 'overall'), lap(2, 101, 102, null, 'slower'),
+    lap(3, 102, 102, null, 'personal'), lap(4, null, 99, null, null), lap(5, 103, 104, 'bogus', '<b>x</b>'),
+    lap(6, 104, 104, 'personal', 'personal')];
   const page = await sessionHarness(sessionData(field), `?focus=${field[1].id}`);
   const html = page.root.innerHTML, table = html.slice(html.indexOf('aria-label="Full field standings"'));
   const rows = table.split('<tr').slice(2);
   const spans = row => [...row.matchAll(/<span class="(lap-\w+)"[^>]*>([\d:.]+)<\/span>/g)].map(m => m.slice(1, 3).join(' '));
   assert.deepEqual(spans(rows[0]), ['lap-overall 1:40.000', 'lap-overall 1:40.000']);
-  assert.deepEqual(spans(rows[1]), ['lap-slower 1:42.000', 'lap-personal 1:41.000']);
-  assert.deepEqual(spans(rows[2]), ['lap-personal 1:42.000', 'lap-personal 1:42.000']);
+  assert.deepEqual(spans(rows[1]), ['lap-slower 1:42.000']);
+  assert.deepEqual(spans(rows[2]), ['lap-personal 1:42.000']);
   assert.deepEqual(spans(rows[3]), []);   // missing Best and an incomparable Last stay neutral
+  assert.deepEqual(spans(rows[5]), ['lap-personal 1:44.000']);   // Last only: a stray personal Best class is never rendered
   assert.deepEqual(spans(rows[4]), []);   // unknown class values are never rendered as colour
   assert.equal((rows.join('').match(/class="lap-overall"/g) || []).length, 2);   // only one record holder
   assert.doesNotMatch(html, /best-time/);
-  assert.match(table, /purple<\/span> fastest lap of the session/);
+  assert.match(table, /Best: <span class="lap-overall">purple<\/span> = fastest lap of the session, otherwise uncoloured/);
   // Focus line and head-to-head show the same classes as the table for the same time.
-  assert.match(html, /<span>Best <span class="lap-personal"[^>]*>1:41\.000<\/span>/);
+  assert.match(html, /<span>Best 1:41\.000<\/span>/);
   assert.match(html, /<span>Last <span class="lap-slower"[^>]*>1:42\.000<\/span>/);
-  assert.match(html, /<dd><span class="lap-personal"[^>]*>1:41\.000<\/span><\/dd>/);
+  assert.match(html, /<dt>Best<\/dt><dd>1:41\.000<\/dd>/);
   // Session switch / payload without classes: no colour is carried over.
   const bare = field.map(({best_lap_class, last_lap_class, ...p}) => p);
   await page.poll(sessionData(bare));
