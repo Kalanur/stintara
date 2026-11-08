@@ -86,6 +86,14 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .trk-car.pit{fill:none;stroke:var(--pit);stroke-width:1.5;opacity:.7}
 .trk-car.stale{fill:none;stroke:var(--muted);opacity:.6}
 .trk-focus{fill:var(--focus);stroke:#fff;stroke-width:2;vector-effect:non-scaling-stroke}
+.trk-sector{stroke:#d7e4f0;stroke-width:2;stroke-linecap:round;vector-effect:non-scaling-stroke;opacity:.85}
+.trk-car.rival{fill:var(--info)}
+.trk-rival-ring{fill:none;stroke:var(--info);stroke-width:1.5;vector-effect:non-scaling-stroke;opacity:.7}
+.trk-label{fill:var(--text);font-weight:700;paint-order:stroke;stroke:var(--bg);stroke-width:3px;stroke-linejoin:round;pointer-events:none}
+.trk-label.focus{fill:var(--focus)}
+.trk-leader{stroke:var(--info);stroke-width:1;vector-effect:non-scaling-stroke;opacity:.8}
+.trk-leader.focus{stroke:var(--focus)}
+.trk-label.ahead,.trk-label.behind{fill:var(--info);font-weight:600}
 .trk-focus-ring{fill:none;stroke:var(--focus);stroke-width:2;vector-effect:non-scaling-stroke;opacity:.7}
 .placeholder{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--muted);border:1px dashed var(--line);border-radius:4px;margin-top:8px;min-height:30px}
 .future-status{color:var(--muted);font-size:12px}
@@ -585,7 +593,60 @@ function trackProjection(geometry, mode) {
     return [cos * dx + sin * dy + rotation.cx, -sin * dx + cos * dy + rotation.cy];
   } };
 }
-function trackMapSvg(track, focusId, mode = 'auto') {
+// Opponents follow the Head-to-Head semantics (adjacent provider positions, unique only), never spatial proximity.
+function trackRoles(participants, focusId) {
+  const focus = participantById(participants, focusId);
+  if (!focus) return null;
+  const ahead = uniquePositionNeighbor(participants, focus, -1), behind = uniquePositionNeighbor(participants, focus, 1);
+  const own = p => (p && validPosition(p.position) ? `P${p.position}` : null);
+  return { focus: focus.id, ahead: ahead?.id || null, behind: behind?.id || null,
+           text: { [focus.id]: own(focus) || 'P—', ...(ahead ? { [ahead.id]: own(ahead) } : {}), ...(behind ? { [behind.id]: own(behind) } : {}) } };
+}
+const TRACK_MAP_DEFAULT_SIZE = { width: 760, height: 300 };
+let trackMapSize = TRACK_MAP_DEFAULT_SIZE;
+function measureTrackMap() {
+  try {
+    const box = document.querySelector('.map-area')?.getBoundingClientRect?.();
+    if (box && box.width > 80 && box.height > 80) trackMapSize = { width: box.width, height: box.height };
+  } catch { /* measuring is best effort; the default size keeps labels readable */ }
+}
+const rectsOverlap = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+// Greedy, priority-ordered label placement in map units; an item that cannot be placed without covering another
+// label or any vehicle dot is dropped (the focus is always first and is placed at its least-overlapping spot).
+function layoutTrackLabels(items, em, dots) {
+  const placed = [], boxes = [];
+  const dotBoxes = dots.map(d => ({ x0: d.at[0] - d.r, x1: d.at[0] + d.r, y0: d.at[1] - d.r, y1: d.at[1] + d.r, key: d.key }));
+  for (const [index, item] of items.entries()) {
+    const width = (item.text.length * 0.6 + 0.6) * em, height = 1.25 * em, gap = item.r * 1.9 + 0.15 * em;
+    const [x, y] = item.at;
+    const candidates = [[1, -1], [1, 1], [-1, -1], [-1, 1], [0, -1], [0, 1], [1, 0], [-1, 0]].map(([dx, dy]) => {
+      const x0 = dx > 0 ? x + gap : dx < 0 ? x - gap - width : x - width / 2;
+      const y0 = dy > 0 ? y + gap : dy < 0 ? y - gap - height : y - height / 2;
+      return { x0, x1: x0 + width, y0, y1: y0 + height, anchor: dx > 0 ? 'start' : dx < 0 ? 'end' : 'middle',
+               tx: dx > 0 ? x0 : dx < 0 ? x0 + width : x0 + width / 2, ty: y0 + height * 0.78 };
+    });
+    const hits = box => boxes.filter(other => rectsOverlap(box, other)).length
+      + dotBoxes.filter(dot => dot.key !== item.key && rectsOverlap(box, dot)).length;
+    // Fewest collisions first; among equals the spot farthest from any other vehicle keeps the label unambiguous.
+    const clearance = box => Math.min(...dots.filter(d => d.key !== item.key).map(d => Math.hypot((box.x0 + box.x1) / 2 - d.at[0], (box.y0 + box.y1) / 2 - d.at[1])), Infinity);
+    const best = candidates.map(box => ({ box, hits: hits(box), clear: clearance(box) }))
+      .sort((a, b) => a.hits - b.hits || b.clear - a.clear)[0];
+    if (best.hits === 0 || index === 0) {
+      boxes.push(best.box);
+      placed.push({ ...item, ...best.box, lx: Math.min(Math.max(x, best.box.x0), best.box.x1), ly: Math.min(Math.max(y, best.box.y0), best.box.y1) });
+    }
+  }
+  return placed;
+}
+function sectorMarkers(geometry) {
+  const markers = geometry?.complete === true && geometry?.closed === true ? geometry.sector_markers : null;
+  if (!Array.isArray(markers) || markers.length !== 2) return [];
+  const valid = markers.every((m, i) => m && m.boundary === i + 1 && Array.isArray(m.point) && Array.isArray(m.direction)
+    && m.point.length === 2 && m.direction.length === 2 && m.point.every(v => mapNumber(v) !== null)
+    && m.direction.every(v => mapNumber(v) !== null) && Math.abs(Math.hypot(m.direction[0], m.direction[1]) - 1) < 0.25);
+  return valid ? markers : [];
+}
+function trackMapSvg(track, focusId, mode = 'auto', roles = null, size = TRACK_MAP_DEFAULT_SIZE) {
   const geometry = track?.geometry || {};
   const points = (geometry.points || []).filter(p => Array.isArray(p) && mapNumber(p[0]) !== null && mapNumber(p[1]) !== null);
   const vehicles = (track?.vehicles || []).filter(v => mapNumber(v.x) !== null && mapNumber(v.z) !== null);
@@ -621,17 +682,42 @@ function trackMapSvg(track, focusId, mode = 'auto') {
       flush();
     }
   }
+  // Short ticks across the learned centerline at the observed sector boundaries; nothing is drawn without them.
+  let ticks = '';
+  for (const m of sectorMarkers(geometry)) {
+    const a = project(m.point), b = project([m.point[0] + m.direction[0] * 10, m.point[1] + m.direction[1] * 10]);
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (!(len > 0)) continue;
+    const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len, half = span * 0.024;
+    ticks += `<line class="trk-sector" x1="${fmt(a[0] - nx * half)}" y1="${fmt(a[1] - ny * half)}" x2="${fmt(a[0] + nx * half)}" y2="${fmt(a[1] + ny * half)}"><title>Sector boundary S${m.boundary} | S${m.boundary + 1}</title></line>`;
+  }
   const radius = span / 70;
   const fresh = track?.vehicles_fresh === true;
   const ordered = screenVehicles.slice().sort((a, b) => (a.v.participant_id === focusId) - (b.v.participant_id === focusId));
-  const cars = ordered.map(({ v, at }) => {
-    const focus = Boolean(focusId) && v.participant_id === focusId;
+  const scale = Math.min(size.width / (maxX - minX + 2 * pad), size.height / (maxY - minY + 2 * pad));
+  const em = Math.min(span * 0.14, 12 / scale);   // about 12 px of text at the current map size, bounded on tiny maps
+  const roleOf = id => !roles || !fresh || typeof id !== 'string' ? null : id === roles.focus ? 'focus' : id === roles.ahead ? 'ahead' : id === roles.behind ? 'behind' : null;
+  const seenRole = new Set();
+  const labelled = [];
+  const cars = ordered.map(({ v, at }, index) => {
+    let role = roleOf(v.participant_id);
+    if (role && seenRole.has(role)) role = null;   // a duplicated participant_id never labels a second dot
+    if (role) seenRole.add(role);
+    const focus = Boolean(focusId) && v.participant_id === focusId && fresh;
     const label = `${v.position ?? '—'} · ${v.name ?? 'Unknown'}${v.in_pits ? ' · pit' : ''}${fresh ? '' : ' · stale'}`;
     const cx = fmt(at[0]), cy = fmt(at[1]);
-    if (focus && fresh) return `<g><circle class="trk-focus-ring" cx="${cx}" cy="${cy}" r="${fmt(radius * 2.1)}"/><circle class="trk-focus" cx="${cx}" cy="${cy}" r="${fmt(radius * 1.35)}"><title>${esc(label)} · focus</title></circle></g>`;
+    if (role) labelled.push({ key: index, role, at, r: radius * (role === 'focus' ? 2.1 : 1.5), text: roles.text[v.participant_id] || 'P—' });
+    if (focus) return `<g><circle class="trk-focus-ring" cx="${cx}" cy="${cy}" r="${fmt(radius * 2.1)}"/><circle class="trk-focus" cx="${cx}" cy="${cy}" r="${fmt(radius * 1.35)}"><title>${esc(label)} · focus</title></circle></g>`;
+    if (role) return `<g><circle class="trk-rival-ring ${role}" cx="${cx}" cy="${cy}" r="${fmt(radius * 1.5)}"/><circle class="trk-car rival" cx="${cx}" cy="${cy}" r="${fmt(radius)}"><title>${esc(label)} · ${role === 'ahead' ? 'ahead of' : 'behind'} focus</title></circle></g>`;
     return `<circle class="trk-car${v.in_pits ? ' pit' : ''}${fresh ? '' : ' stale'}" cx="${cx}" cy="${cy}" r="${fmt(radius)}"><title>${esc(label)}</title></circle>`;
   }).join('');
-  return `<svg viewBox="${fmt(minX - pad)} ${fmt(minY - pad)} ${fmt(maxX - minX + 2 * pad)} ${fmt(maxY - minY + 2 * pad)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Track map">${base}${overlay}${cars}</svg>`;
+  const order = { focus: 0, ahead: 1, behind: 2 };
+  const items = labelled.sort((a, b) => order[a.role] - order[b.role]);
+  const dots = ordered.map(({ at }, index) => ({ key: index, at, r: radius * 1.2 }));
+  const labels = layoutTrackLabels(items, em, dots).map(l =>
+    `<line class="trk-leader ${l.role}" x1="${fmt(l.at[0])}" y1="${fmt(l.at[1])}" x2="${fmt(l.lx)}" y2="${fmt(l.ly)}"/>`
+    + `<text class="trk-label ${l.role}" x="${fmt(l.tx)}" y="${fmt(l.ty)}" text-anchor="${l.anchor}" font-size="${fmt(em)}">${esc(l.text)}</text>`).join('');
+  return `<svg viewBox="${fmt(minX - pad)} ${fmt(minY - pad)} ${fmt(maxX - minX + 2 * pad)} ${fmt(maxY - minY + 2 * pad)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Track map">${base}${overlay}${ticks}${cars}${labels}</svg>`;
 }
 function trackMapPanel(d, focusId, mode) {
   const track = d.track_map || {};
@@ -650,7 +736,7 @@ function trackMapPanel(d, focusId, mode) {
   return `<section class="panel map-panel" aria-label="Track map and race control"><div class="map-head"><h2>Track Map</h2>
     ${learning ? `<span class="rc-badge rc-muted">${esc(learning)}</span>` : ''}${storedBadges}${stale}${toggle}
     <div class="rc-badges">${storedOnly ? '' : raceControlBadges(rc)}</div></div>
-    <div class="map-area">${trackMapSvg(track, focusId, orientation)}</div>${flagOnly}</section>`;
+    <div class="map-area">${trackMapSvg(track, focusId, orientation, trackRoles(d.participants || [], focusId), trackMapSize)}</div>${flagOnly}</section>`;
 }
 const sessionId = __SESSION_ID__;
 const selector = document.querySelector('#focus');
@@ -721,7 +807,8 @@ function syncFocusURL() {
   const current = new URL(location.href);
   if (next !== current.pathname + current.search + current.hash) history.replaceState(null, '', next);
 }
-function renderSession(d) {
+function renderSession(d, resized = false) {
+  const mapSizeUsed = trackMapSize;
   const root = document.querySelector('#root');
   const race = d.session.session_type === 'Race';
   const fieldClass = singleClass(d.participants);
@@ -779,7 +866,12 @@ function renderSession(d) {
     const element = document.querySelector('#'+id);
     if (element) { element.scrollLeft = left; element.scrollTop = top; }
   }
+  // Labels are sized in map units for the measured map area; render once more when that area turned out different.
+  measureTrackMap();
+  const changed = (a, b) => Math.abs(a - b) > 0.06 * Math.max(a, b);
+  if (!resized && (changed(mapSizeUsed.width, trackMapSize.width) || changed(mapSizeUsed.height, trackMapSize.height))) renderSession(d, true);
 }
+if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('resize', () => { if (latestData) renderSession(latestData); });
 document.querySelector('#root')?.addEventListener?.('click', event => {
   if (!event.target?.closest?.('#orientation-toggle') || !latestData) return;
   const name = latestData.session?.track_name;

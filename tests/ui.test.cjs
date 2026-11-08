@@ -1353,3 +1353,148 @@ test('full field help stays open across polls and the legend is one compact line
   await page.poll(sessionData(field));
   assert.equal(page.helpDetails.open, true);
 });
+
+// --- Trackmap V2: P labels, rivals from Head-to-Head semantics, sector ticks (synthetic ids and names only) ---
+const labelsOf = html => [...html.matchAll(/<text class="trk-label (\w+)"[^>]*>([^<]*)</g)].map(m => `${m[1]}:${m[2]}`);
+const ticksOf = html => [...html.matchAll(/<line class="trk-sector" x1="(-?[\d.]+)" y1="(-?[\d.]+)" x2="(-?[\d.]+)" y2="(-?[\d.]+)"/g)]
+  .map(m => [(+m[1] + +m[3]) / 2, (+m[2] + +m[4]) / 2]);
+function v2Field(positions, extra = {}) {
+  return positions.map((position, i) => ({id: syntheticId(i + 1), display_name: 'Same Name', position, vehicle_class: 'GT3',
+    total_laps: 10, ...(extra[i] || {})}));
+}
+function v2Track(field, over = {}) {
+  const ring = ellipse(250, 600, 0, 40);
+  const markers = [{boundary: 1, point: ring[10], direction: [0, 1]}, {boundary: 2, point: ring[28], direction: [1, 0]}];
+  return {geometry: {...closedGeometry(ring), sector_boundaries_m: [1000, 2000], sector_markers: markers}, vehicles_fresh: true, vehicles_age_s: .2,
+    vehicles: field.map((p, i) => ({participant_id: p.id, x: ring[i * 3 % 40][0], z: ring[i * 3 % 40][1], in_pits: false,
+      position: p.position, name: p.display_name})), race_control: null, ...over};
+}
+function v2Panel(field, focusIndex, trackOver = {}, mode = 'original') {
+  return helpersWith().trackMapPanel({track_map: v2Track(field, trackOver), participants: field, session: {track_name: 'T'}},
+    focusIndex === null ? null : field[focusIndex].id, mode);
+}
+
+test('trackmap V2: focus and both direct rivals get P labels from adjacent provider positions only', () => {
+  const field = v2Field([1, 2, 3, 4, 5, 6]);
+  const html = v2Panel(field, 2);
+  assert.deepEqual(labelsOf(html).sort(), ['ahead:P2', 'behind:P4', 'focus:P3']);
+  assert.equal((html.match(/class="trk-focus"/g) || []).length, 1);
+  assert.equal((html.match(/class="trk-rival-ring/g) || []).length, 2);
+  assert.match(html, /· ahead of focus/); assert.match(html, /· behind focus/);
+  // Identity is participant_id: identical display names never change who is labelled.
+  assert.equal(new Set(field.map(p => p.display_name)).size, 1);
+});
+
+test('trackmap V2: P1 and the last driver have only one rival, unknown focus position is not guessed', () => {
+  const field = v2Field([1, 2, 3]);
+  assert.deepEqual(labelsOf(v2Panel(field, 0)).sort(), ['behind:P2', 'focus:P1']);
+  assert.deepEqual(labelsOf(v2Panel(field, 2)).sort(), ['ahead:P2', 'focus:P3']);
+  const unknown = v2Field([1, null, 3]);
+  assert.deepEqual(labelsOf(v2Panel(unknown, 1)), ['focus:P—']);
+  assert.deepEqual(labelsOf(v2Panel(field, null)), []);   // no focus: plain dots only
+});
+
+test('trackmap V2: duplicate or contradictory positions never produce a rival; lapped cars follow provider positions', () => {
+  const duplicate = v2Field([1, 2, 2, 3, 4]);   // two cars claim P2
+  assert.deepEqual(labelsOf(v2Panel(duplicate, 3)).sort(), ['behind:P4', 'focus:P3']);   // ambiguous P2 is not chosen
+  const nonsense = v2Field([1, 0, -4, 1.5, '2']);
+  assert.deepEqual(labelsOf(v2Panel(nonsense, 0)), ['focus:P1']);
+  // Adjacent provider position wins even when the neighbour is laps down; no distance or lap logic is applied.
+  const lapped = v2Field([1, 2, 3], {1: {total_laps: 8}, 2: {total_laps: 7}});
+  assert.deepEqual(labelsOf(v2Panel(lapped, 1)).sort(), ['ahead:P1', 'behind:P3', 'focus:P2']);
+});
+
+test('trackmap V2: stale vehicle positions and stored-only sessions carry no labels or rival styling', () => {
+  const field = v2Field([1, 2, 3]);
+  const stale = v2Panel(field, 1, {vehicles_fresh: false});
+  assert.deepEqual(labelsOf(stale), []);
+  assert.doesNotMatch(stale, /trk-rival|class="trk-focus"|class="trk-leader/);
+  const stored = v2Panel(field, 1, {vehicles: [], vehicles_fresh: false, static_only: true, vehicles_age_s: null});
+  assert.deepEqual(labelsOf(stored), []);
+  assert.equal(ticksOf(stored).length, 2);   // the stored geometry still shows its learned sector boundaries
+  assert.match(stored, /STORED TRACK/);
+});
+
+test('trackmap V2: labels never overlap each other or other vehicles; the focus has priority when space is short', () => {
+  const h = helpersWith();
+  const dots = [{key: 0, at: [100, 100], r: 6}, {key: 1, at: [112, 100], r: 6}, {key: 2, at: [88, 100], r: 6}, {key: 3, at: [100, 112], r: 6}];
+  const items = [{key: 0, role: 'focus', at: [100, 100], r: 8, text: 'P12'}, {key: 1, role: 'ahead', at: [112, 100], r: 7, text: 'P11'},
+    {key: 2, role: 'behind', at: [88, 100], r: 7, text: 'P13'}];
+  const placed = h.layoutTrackLabels(items, 14, dots);
+  assert.equal(placed[0].role, 'focus');
+  assert.ok(placed.length >= 1 && placed.length <= 3);
+  for (let i = 0; i < placed.length; i++) {
+    for (let j = i + 1; j < placed.length; j++) {
+      const a = placed[i], b = placed[j];
+      assert.ok(!(a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1), `${a.text} overlaps ${b.text}`);
+    }
+  }
+  // A rival with no free spot is dropped, never stacked on the focus label.
+  const walled = [{key: 0, at: [0, 0], r: 6}, ...Array.from({length: 24}, (_, i) => ({key: i + 1, at: [Math.cos(i / 24 * 6.283) * 14, Math.sin(i / 24 * 6.283) * 14], r: 6}))];
+  const crowded = h.layoutTrackLabels([{key: 0, role: 'focus', at: [0, 0], r: 8, text: 'P5'}, {key: 1, role: 'ahead', at: [14, 0], r: 7, text: 'P4'}], 14, walled);
+  assert.equal(crowded[0].role, 'focus');
+  assert.ok(crowded.length <= 2);
+});
+
+test('trackmap V2: sector ticks sit on the centerline at the observed boundaries and follow AUTO/ORIGINAL', () => {
+  const field = v2Field([1, 2, 3]);
+  const ring = ellipse(250, 600, 0, 40);
+  const original = ticksOf(v2Panel(field, 1, {}, 'original'));
+  assert.equal(original.length, 2);
+  // ORIGINAL: identity projection (x, -z), so each tick centre is the projected marker point itself.
+  assert.deepEqual(original.map(t => t.map(v => +v.toFixed(1))), [10, 28].map(i => [+ring[i][0].toFixed(1), +(-ring[i][1]).toFixed(1)]));
+  const autoHtml = v2Panel(field, 1, {}, 'auto');
+  const auto = ticksOf(autoHtml);
+  assert.equal(auto.length, 2);
+  const autoBase = baseVertices(autoHtml);
+  for (const t of auto) assert.ok(autoBase.some(b => Math.hypot(b[0] - t[0], b[1] - t[1]) < 60), 'AUTO tick stays on the rotated centerline');
+});
+
+test('trackmap V2: missing, invalid or learning-state sector markers draw nothing; a new session starts clean', () => {
+  const field = v2Field([1, 2, 3]);
+  const geometry = v2Track(field).geometry;
+  const draw = markers => ticksOf(v2Panel(field, 1, {geometry: {...geometry, sector_markers: markers}})).length;
+  assert.equal(draw(null), 0);
+  assert.equal(draw([]), 0);
+  assert.equal(draw([geometry.sector_markers[0]]), 0);                                       // one boundary only
+  assert.equal(draw([geometry.sector_markers[1], geometry.sector_markers[0]]), 0);           // wrong order
+  assert.equal(draw([{...geometry.sector_markers[0], point: [NaN, 0]}, geometry.sector_markers[1]]), 0);
+  assert.equal(draw([{...geometry.sector_markers[0], direction: [0, 0]}, geometry.sector_markers[1]]), 0);
+  assert.equal(draw('1000,2000'), 0);
+  assert.equal(ticksOf(v2Panel(field, 1, {geometry: {...geometry, complete: false, closed: false, state: 'learning'}})).length, 0);
+  // Session switch: a payload without markers or fresh vehicles leaves nothing of the previous session behind.
+  const next = helpersWith().trackMapPanel({track_map: {geometry: {state: 'unknown', complete: false, closed: false, points: []}, vehicles: [], vehicles_fresh: false},
+    participants: v2Field([1, 2]), session: {track_name: 'Other'}}, syntheticId(1), 'auto');
+  assert.deepEqual(labelsOf(next), []);
+  assert.equal(ticksOf(next).length, 0);
+});
+
+test('trackmap V2: a larger synthetic race keeps exactly one focus and at most two rival labels', () => {
+  const field = v2Field(Array.from({length: 40}, (_, i) => i + 1));
+  const html = v2Panel(field, 19);
+  const labels = labelsOf(html);
+  assert.equal(labels.filter(l => l.startsWith('focus:')).length, 1);
+  assert.ok(labels.filter(l => !l.startsWith('focus:')).length <= 2);
+  assert.ok(labels.includes('focus:P20'));
+  assert.equal((html.match(/class="trk-car/g) || []).length + (html.match(/class="trk-focus"/g) || []).length, 40);
+});
+
+test('latency probe analysis separates cadence, server age, polling and render time (synthetic samples)', () => {
+  const { analyse } = require('../tools/trackmap_latency.cjs');
+  // Scoring messages arrive every 200 ms (x = 1, 2, ...); the page polls every 500 ms, fetch takes 10 ms, DOM +4 ms, paint +9 ms.
+  const resp = [], dom = [], paint = [];
+  for (let k = 0; k < 10; k++) {
+    const t0 = 1000 + k * 500, t1 = t0 + 10, latest = Math.floor((t1 - 100) / 200);   // message n arrives at 100 + 200 n
+    resp.push({ t0, t1, age: (t1 - (100 + 200 * latest)) / 1000, x: latest });
+    dom.push(t1 + 4); paint.push(t1 + 9);
+  }
+  const report = analyse(resp, dom, paint);
+  assert.ok(report.polls_with_new_position >= 8, 'every poll saw a newer position');
+  assert.equal(report.poll_interval_ms.mean, 500);
+  assert.equal(report.fetch_ms.mean, 10);
+  assert.equal(report.dom_after_response_ms.mean, 4);
+  assert.equal(report.paint_after_response_ms.mean, 9);
+  assert.ok(report.server_age_ms.max < 200 && report.server_age_ms.mean > 0);
+  assert.ok(report.worst_case_age_ms <= 200 + 9 + 500 + 1, 'worst case = age + paint + one poll interval');
+  assert.equal(analyse([], [], []).server_age_ms, null);   // no samples: nothing invented
+});

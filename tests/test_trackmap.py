@@ -180,3 +180,30 @@ def test_pit_unknown_and_backwards_sector_transitions_are_ignored():
         tracker.observe(2, 1000.0, False)   # backwards 3 -> 2
         tracker.observe(None, 900.0, False)
     assert model.sector_observations == {1: [], 2: []}
+
+
+def test_sector_markers_lie_on_the_learned_centerline_at_observed_boundaries():
+    model, _, _ = learn(lap_samples(start=2.0, end=LENGTH + 40))
+    assert public_geometry(model)["sector_markers"] is None     # no sector observations: nothing invented
+    observe(SectorTracker(model), 3)
+    markers = public_geometry(model)["sector_markers"]
+    assert [m["boundary"] for m in markers] == [1, 2]
+    for marker, distance in zip(markers, (1000.0, 2000.0)):
+        expected = circuit(distance)
+        assert math.dist(marker["point"], expected[:2]) < 15     # on the centerline, not a third of the outline
+        assert math.hypot(*marker["direction"]) == pytest.approx(1.0)
+
+
+def test_sector_markers_are_omitted_for_unknown_unplaceable_or_incomplete_geometry():
+    model = TrackModel(LENGTH)
+    assert model.boundary_markers([1000.0, 2000.0]) is None      # no closed geometry yet
+    model.points, model.distances = [[0, 0], [10, 0], [20, 0]], [500.0, 600.0, 700.0]
+    assert model.boundary_markers([1000.0, 2000.0]) is None      # outside the sampled arc: never guessed
+    assert model.boundary_markers(None) is None
+    model.points, model.distances = [[0, 0], [0, 0], [20, 0]], [900.0, 1100.0, 2500.0]
+    assert model.boundary_markers([1000.0, 2000.0]) is None      # degenerate segment
+    contradictory = TrackModel(LENGTH)
+    contradictory.points, contradictory.distances = [[0, 0], [1, 1], [2, 2]], [500.0, 1500.0, 2500.0]
+    observe(SectorTracker(contradictory), 2, drift=0.0)
+    contradictory.sector_observations[1] = [100.0, 900.0]
+    assert public_geometry(contradictory)["sector_markers"] is None

@@ -106,6 +106,31 @@ class TrackModel:
             del observed[:-7]
             self.generation += 1
 
+    def boundary_markers(self, boundaries=None):
+        """Raw-coordinate point and unit direction on the learned centerline at each observed sector boundary.
+
+        Only boundaries that passed sector_boundaries() are used; a boundary that cannot be placed on the
+        centerline (outside the sampled arc) yields no markers at all rather than a guessed position.
+        """
+        boundaries = boundaries if boundaries is not None else self.sector_boundaries()
+        if boundaries is None or not self.complete:
+            return None
+        markers = []
+        count = len(self.points)
+        for number, distance in enumerate(boundaries, 1):
+            index = next((i for i in range(count - 1) if self.distances[i] <= distance < self.distances[i + 1]), None)
+            if index is None:
+                return None
+            (x0, z0), (x1, z1) = self.points[index], self.points[index + 1]
+            span = self.distances[index + 1] - self.distances[index]
+            length = math.hypot(x1 - x0, z1 - z0)
+            if span <= 0 or length <= 0:
+                return None
+            t = (distance - self.distances[index]) / span
+            markers.append(dict(boundary=number, point=[x0 + (x1 - x0) * t, z0 + (z1 - z0) * t],
+                                direction=[(x1 - x0) / length, (z1 - z0) / length]))
+        return markers
+
     def point_sectors(self, distances=None, boundaries=None):
         boundaries = boundaries if boundaries is not None else self.sector_boundaries()
         distances = distances if distances is not None else self.distances
@@ -337,7 +362,7 @@ def public_geometry(model, learner=None):
     """Compact read-only representation. Closed polylines are explicit; partials never carry a closing edge."""
     if model is None:
         return dict(state="unknown", complete=False, closed=False, progress=None, points=[], point_sectors=None,
-                    sector_boundaries_m=None, length_m=None, source=None)
+                    sector_boundaries_m=None, sector_markers=None, length_m=None, source=None)
     complete = model.complete
     points = model.points if complete else (learner.points if learner and learner.active else [])
     distances = model.distances if complete else (learner.distances if learner and learner.active else [])
@@ -346,7 +371,8 @@ def public_geometry(model, learner=None):
                 progress=None if complete else (learner.progress() if learner else None),
                 points=[list(p) for p in points], length_m=model.length,
                 point_sectors=model.point_sectors(distances, boundaries) if points else None,
-                sector_boundaries_m=boundaries, source=model.source if complete else None)
+                sector_boundaries_m=boundaries,
+                sector_markers=model.boundary_markers(boundaries) if complete else None, source=model.source if complete else None)
 
 
 # --- runtime glue (per agent state dict; bounded; persistence lives in track_repo) --------------------------

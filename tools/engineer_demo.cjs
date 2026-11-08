@@ -19,6 +19,12 @@ function circuitPoint(distance) {
   const a = Math.PI / 2 + (d - 2 * straight - arc) / radius;
   return [radius * Math.cos(a), radius * Math.sin(a)];
 }
+// Sector boundary marker as the server derives it: raw-coordinate point plus unit direction on the centerline.
+function sectorMarker(boundary, distance, turn) {
+  const [x0, z0] = turn(circuitPoint(distance)), [x1, z1] = turn(circuitPoint(distance + 1));
+  const length = Math.hypot(x1 - x0, z1 - z0);
+  return {boundary, point: [Number(x0.toFixed(1)), Number(z0.toFixed(1))], direction: [(x1 - x0) / length, (z1 - z0) / length]};
+}
 function syntheticTrackMap(participants, trackScenario = 'green') {
   const learning = trackScenario === 'learning';
   const step = 25, distances = [];
@@ -39,14 +45,16 @@ function syntheticTrackMap(participants, trackScenario = 'green') {
   if (trackScenario === 'stored') return {
     geometry: {state: 'complete', complete: true, closed: true, progress: null, length_m: TRACK_LENGTH, source: 'stored',
       points: distances.map(d => circuitPoint(d).map(v => Number(v.toFixed(1)))),
-      point_sectors: distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3), sector_boundaries_m: [1000, 2000]},
+      point_sectors: distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3), sector_boundaries_m: [1000, 2000],
+      sector_markers: [sectorMarker(1, 1000, p => p), sectorMarker(2, 2000, p => p)]},
     vehicles: [], vehicles_age_s: null, vehicles_fresh: false, race_control: null, static_only: true};
   return {
     geometry: {state: learning ? 'learning' : 'complete', complete: !learning, closed: !learning,
       progress: learning ? 0.63 : null, length_m: TRACK_LENGTH,
       points: distances.map(d => turn(circuitPoint(d)).map(v => Number(v.toFixed(1)))),
       point_sectors: learning ? null : distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3),
-      sector_boundaries_m: learning ? null : [1000, 2000]},
+      sector_boundaries_m: learning ? null : [1000, 2000],
+      sector_markers: learning ? null : [sectorMarker(1, 1000, turn), sectorMarker(2, 2000, turn)]},
     vehicles, vehicles_age_s: 0.2, vehicles_fresh: true,
     race_control: {phase: trackScenario === 'fcy' ? 'full_course_yellow' : 'green', sector_flags: flags,
       safety_car_active: trackScenario === 'fcy', player_sector: 2, diagnostics: {}, age_s: 0.2, fresh: true},
@@ -294,6 +302,7 @@ async function verifyViewports(channel) {
       await page.locator('#fuel strong').first().waitFor();
       for (const [width,height,label] of REAL_VIEWPORTS) {
         await page.setViewportSize({width,height});
+        await page.waitForTimeout(1300);   // two polls: map labels are sized for the measured map area
         const m=await page.evaluate(()=>{
           const rect=sel=>{const e=document.querySelector(sel);if(!e)return null;const r=e.getBoundingClientRect();
             return {height:r.height,width:r.width,clipped:e.scrollHeight>e.clientHeight+1,hidden:Math.max(0,e.scrollHeight-e.clientHeight)};};
@@ -308,7 +317,15 @@ async function verifyViewports(channel) {
             if(a.left<b.right-1&&b.left<a.right-1&&a.top<b.bottom-1&&b.top<a.bottom-1)overlaps.push(boxes[i][0]+' x '+boxes[j][0]);}
           const settings=document.querySelector('.resource-settings')?.getBoundingClientRect();
           const toggle=document.querySelector('#orientation-toggle');
-          return {docW:document.documentElement.scrollWidth,docH:document.documentElement.scrollHeight,rows,
+          // Labels, rivals and sector ticks (Trackmap V2): measured on screen, not inferred from markup.
+          const rectOf=e=>{const r=e.getBoundingClientRect();return {l:r.left,r:r.right,t:r.top,b:r.bottom};};
+          const labels=[...document.querySelectorAll('.map-area .trk-label')].map(e=>({role:e.getAttribute('class').split(' ')[1],text:e.textContent,font:parseFloat(getComputedStyle(e).fontSize),...rectOf(e)}));
+          const dots=[...document.querySelectorAll('.map-area circle.trk-car, .map-area circle.trk-focus')].map(rectOf);
+          const path=document.querySelector('.trk-base'),ctm=path.getScreenCTM(),total=path.getTotalLength();
+          const samples=Array.from({length:600},(_,i)=>{const q=path.getPointAtLength(total*i/600);return [q.x*ctm.a+ctm.e,q.y*ctm.d+ctm.f];});
+          const ticks=[...document.querySelectorAll('.map-area .trk-sector')].map(e=>{const r=e.getBoundingClientRect(),cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;
+            return {length:Math.hypot(r.width,r.height),offPath:Math.min(...samples.map(([x,y])=>Math.hypot(x-cx,y-cy)))};});
+          return {labels,dots,ticks,docW:document.documentElement.scrollWidth,docH:document.documentElement.scrollHeight,rows,
             h2h:rect('#comparison-panel'),weather:rect('#weather-panel'),strategy:rect('.fuel-panel'),map:rect('.map-panel'),
             svg:{w:box.width,h:box.height},trackAspect:base.width/base.height,overlaps,
             settingsInside:settings?settings.top>=0&&settings.bottom<=innerHeight+1:null,
@@ -330,8 +347,23 @@ async function verifyViewports(channel) {
           assert.doesNotMatch(m.text,/GREEN|RACE CONTROL/);
         } else assert.equal(m.toggle,true,`${where}: orientation control inside the panel`);
         assert.ok(m.trackAspect>1,`${where}: circuit is laid out horizontally (${m.trackAspect.toFixed(2)})`);
+        // Trackmap V2: two sector ticks on the centerline; focus label first; no label hides a label or the focus dot.
+        assert.equal(m.ticks.length,2,`${where}: two sector boundary ticks`);
+        for (const tick of m.ticks) assert.ok(tick.offPath<4&&tick.length>6,`${where}: tick sits on the centerline (${tick.offPath.toFixed(1)}px off)`);
+        const overlap=(a,b)=>a.l<b.r&&b.l<a.r&&a.t<b.b&&b.t<a.b;
+        if (scenario==='stored') assert.equal(m.labels.length,0,`${where}: stored track has no vehicle labels`);
+        else {
+          const focusLabel=m.labels.find(l=>l.role==='focus');
+          assert.equal(focusLabel?.text,'P3',`${where}: focus labelled P3`);
+          assert.ok(m.labels.every(l=>l.b-l.t>=9),`${where}: labels stay readable (${m.labels.map(l=>(l.b-l.t).toFixed(1))}px high)`);
+          for(let i=0;i<m.labels.length;i++)for(let j=i+1;j<m.labels.length;j++)assert.equal(overlap(m.labels[i],m.labels[j]),false,`${where}: labels ${m.labels[i].text}/${m.labels[j].text} overlap`);
+          const shrink=d=>({l:d.l+1,r:d.r-1,t:d.t+1,b:d.b-1});
+          for (const label of m.labels) assert.equal(m.dots.some(d=>overlap(label,shrink(d))),false,`${where}: label ${label.text} covers a vehicle dot`);
+          assert.ok(m.labels.every(l=>['focus','ahead','behind'].includes(l.role)),`${where}: only focus and direct rivals are labelled`);
+        }
         console.log(JSON.stringify({where,rows:m.rows,docH:m.docH,map:Math.round(m.map.height),svg:`${Math.round(m.svg.w)}x${Math.round(m.svg.h)}`,
-          strategyHidden:Math.round(m.strategy.hidden),h2hHidden:Math.round(m.h2h.hidden),aspect:Number(m.trackAspect.toFixed(2))}));
+          strategyHidden:Math.round(m.strategy.hidden),h2hHidden:Math.round(m.h2h.hidden),aspect:Number(m.trackAspect.toFixed(2)),
+          labels:m.labels.map(l=>`${l.text}:${Math.round(l.b-l.t)}px`).join(' '),ticks:m.ticks.length}));
         await page.screenshot({path:path.join(output,`engineer-v02-${scenario}-${width}x${height}.png`),fullPage:true});
       }
       if (scenario==='vertical') {
