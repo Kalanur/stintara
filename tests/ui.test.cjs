@@ -411,6 +411,8 @@ test('session clock and focused persisted sectors label completed laps without p
   const page=await sessionHarness(data,`?focus=${field[0].id}`);
   for (const value of ['30 min','0:00:00','0 completed laps','checkpoint lap 2','0:30.500','0:31.250'])
     assert.ok(page.root.innerHTML.includes(value),value);
+  assert.match(page.root.innerHTML,/Last timed lap sectors/);
+  assert.doesNotMatch(page.root.innerHTML,/Last completed lap sectors/);
   assert.doesNotMatch(page.root.innerHTML,/remaining laps|Current lap|Remaining time|official remaining/i);
   await page.poll({...data,live:false,timing:{...data.timing,elapsed_seconds:123}});
   assert.match(page.root.innerHTML,/Elapsed session time: —/);
@@ -435,17 +437,17 @@ test('single class appears once; full field, relative and H2H keep class for mix
   assert.equal((h.root.innerHTML.match(/GT3/g)||[]).length,1);
   assert.doesNotMatch(h.root.innerHTML,/<th[^>]*>Class<\/th>|<dt>Class<\/dt>/);
   const full=h.root.innerHTML.split('<h2>Full field</h2>')[1];
-  assert.equal((full.match(/<th scope=/g)||[]).length,9);
+  assert.equal((full.match(/<th scope=/g)||[]).length,14);
   for (const value of ['Hypercar', null, '', '  ']) {
     const mixed=field.map(p => ({...p})); mixed[2].vehicle_class=value;
     await h.poll(sessionData(mixed));
     assert.match(h.root.innerHTML,/<th scope="col">Class<\/th>/);
     assert.match(h.root.innerHTML,/<th>Class<\/th>/);
     assert.match(h.root.innerHTML,/<dt>Class<\/dt>/);
-    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,10);
+    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,15);
   }
   await h.poll(sessionData([]));
-  assert.match(h.root.innerHTML,/colspan="10"/);
+  assert.match(h.root.innerHTML,/colspan="15"/);
   const escaped=await render('session.html',sessionData([{vehicle_class:'<GT3>',display_name:'<Driver>'}]));
   assert.match(escaped.innerHTML,/&lt;GT3&gt;/);
   assert.doesNotMatch(escaped.innerHTML,/<GT3>|<Driver>/);
@@ -1264,4 +1266,46 @@ test('history and home link only an existing previous session (#43)', async () =
     : {items:[withPrev, recentItem({id:'solo'})], limit:20, has_more:false, next_cursor:null});
   const list = h.el('#list').innerHTML;
   assert.equal((list.match(/Previous:/g) || []).length, 1);
+});
+
+
+test('full field V2: Laps, S1-S3 from last timed lap, tyre and damage; unknown stays dash', async () => {
+  const known = {sector1:36.931, sector2:50.6, sector3:35.432, last_lap_time:122.963, best_lap_time:121,
+    tyre_compound:'Medium', tyre_remaining_min:0.874, damage_regions:0, damage_max:0};
+  const damaged = {...known, damage_regions:3, damage_max:1, tyre_compound:'<b>Wet</b>'};
+  const unknown = {sector1:null, sector2:null, sector3:null, tyre_compound:null, tyre_remaining_min:null,
+    damage_regions:null, damage_max:null};
+  const field = [known, damaged, unknown, {}].map((extra, i) => ({id:syntheticId(i+1), display_name:'Driver', position:i+1,
+    vehicle_class:'GT3', total_laps:4, finish_status:0, pitstops:0, ...extra}));
+  const html = (await sessionHarness(sessionData(field))).root.innerHTML;
+  const table = html.slice(html.indexOf('aria-label="Full field standings"'));
+  assert.match(table, /<th[^>]*>Laps<\/th>/);
+  assert.doesNotMatch(table, /<th[^>]*>Completed laps<\/th>/);
+  for (const label of ['S1', 'S2', 'S3', 'Tyre', 'Dmg']) assert.match(table, new RegExp(`<th[^>]*>${label}</th>`));
+  const rows = table.split('<tr').slice(2);
+  assert.equal(rows.length, 4);
+  for (const value of ['36.931', '50.600', '35.432', '>M 87%<', '>0<']) assert.ok(rows[0].includes(value), value);
+  assert.doesNotMatch(rows[0], />OK</);
+  assert.match(rows[1], /class="dmg"[^>]*>3</);
+  assert.doesNotMatch(table, /<b>Wet/);
+  for (const row of rows.slice(2)) {
+    const cells = row.split('<td').slice(1).map(c => c.replace(/<[^>]*>/g, '').replace(/^[^>]*>/, ''));
+    assert.equal(row.includes('36.931'), false);
+    assert.ok(row.match(/class="num sector">—</g).length === 3);
+  }
+  const h = {sectorFmt: null};
+  const context = vm.createContext({URL});
+  vm.runInContext(spectatorScript().split('const sessionId =')[0] + ';this.api={sectorFmt,tyreText,damageText}', context);
+  Object.assign(h, context.api);
+  assert.equal(h.sectorFmt(36.9314), '36.931');
+  assert.equal(h.sectorFmt(61.5), '1:01.500');
+  for (const bad of [null, undefined, -1, 0, NaN, '36.9']) assert.equal(h.sectorFmt(bad), '—');
+  assert.equal(context.api.tyreText({}), '—');
+  for (const bad of [-1, null, undefined, NaN, 1.5, '2']) assert.equal(context.api.damageText({damage_regions:bad}), '—', String(bad));
+  assert.equal(context.api.damageText({}), '—');
+  assert.match(context.api.damageText({damage_regions:0, damage_max:0}), /^<span title="[^"]*not validated in-game[^"]*">0<\/span>$/);
+  assert.match(context.api.damageText({damage_regions:2, damage_max:1}), /class="dmg"[^>]*>2</);
+  assert.match(table, /<th[^>]*title="[^"]*last timed lap/);
+  assert.match(table, /Experimental: number of body regions the provider reports as damaged/);
+  assert.doesNotMatch(table, /last completed lap/);
 });

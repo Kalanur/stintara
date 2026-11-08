@@ -29,7 +29,7 @@ from .migrations import migrate_sample_ids
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
 from .resource_strategy import finish_projection, fraction, plan_resources
 from .secrets import read_secret
-from .timing import newest_scoring, newest_state, project_timing, session_timing
+from .timing import field_status, newest_scoring, newest_state, project_timing, session_timing
 from .trackmap import (
     TrackModel,
     TrackStore,
@@ -384,10 +384,26 @@ async def api_recent_results() -> dict[str, Any]:
         return await history.query_sessions(conn, limit=history.RECENT_RESULTS_LIMIT, recent=True)
 
 
+def stored_field_status(row):
+    """Tyre/damage as of the latest persisted completed-lap checkpoint."""
+    def decoded(value):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return None
+        return value
+    damage, wheels = decoded(row.pop("lap_damage", None)), decoded(row.pop("tyre_snapshot", None))
+    dents = damage.get("dent_severity") if isinstance(damage, dict) else None
+    return field_status(row.pop("compound_front", None), wheels if isinstance(wheels, list) else None, dents)
+
+
 def spectator_participants(rows, session_id, live, states, now, session_type=None):
     """Overlay one newest fresh observation; never combine different sessions by names."""
     participants = [dict(row) for row in rows]
-    scoring = newest_scoring(session_id, live, states, now)
+    state = newest_state(session_id, live, states, now)
+    scoring = state.get("scoring", {})
+    snapshots = state.get("snapshots", {}) if now - state.get("snapshots_at", -1e9) < 30 else {}
     vehicles = {v["id"]: v for v in scoring.get("vehicles", [])}
     for p in participants:
         vehicle = vehicles.get(p["local_vehicle_id"])
@@ -400,6 +416,14 @@ def spectator_participants(rows, session_id, live, states, now, session_type=Non
             # Retain the recorded participant, but never mix old gaps into this observation.
             p["gap_to_leader"] = p["laps_behind_leader"] = None
         p.update(vehicle_identity(p))
+        status = stored_field_status(p)
+        snap = snapshots.get(p["local_vehicle_id"])
+        if snap and snap.get("has_telemetry"):
+            # Fresher than the lap checkpoint; same fields, same semantics.
+            status = field_status(snap.get("tire_compound_front_name"),
+                                  snap.get("wheels"),
+                                  (snap.get("damage") or {}).get("dent_severity"))
+        p.update(status)
     project_timing(participants, session_type)
     return sorted(participants, key=lambda p: (p["position"] is None,
                                               p["position"] or 0, str(p["id"])))
@@ -423,10 +447,12 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
                    p.position, p.total_laps, p.last_lap_time, p.best_lap_time, p.in_pits,
                    p.pitstops, p.finish_status, p.has_telemetry, pit.last_pit_lap,
                    p.gap_to_leader, p.laps_behind_leader,
-                   lap.lap_number AS sector_lap_number, lap.sector1, lap.sector2, lap.sector3
+                   lap.lap_number AS sector_lap_number, lap.sector1, lap.sector2, lap.sector3,
+                   lap.compound_front, lap.tyre_snapshot, lap.damage AS lap_damage
             FROM session_participants p LEFT JOIN drivers d ON d.id=p.driver_id
             LEFT JOIN LATERAL (
-                SELECT lap_number,sector1,sector2,sector3 FROM laps
+                SELECT lap_number,sector1,sector2,sector3,compound_front,
+                       tyre_snapshot,damage FROM laps
                 WHERE session_participant_id=p.id AND lap_number > 0
                 ORDER BY lap_number DESC LIMIT 1
             ) lap ON true
@@ -617,7 +643,7 @@ async def current_or_create_session(agent, payload):
         if key in resolution_state:
             state[key] = resolution_state[key]
     if session_id != state.get("session_id"):
-        for key in ("last_sample_at", "last_persisted_scoring", "scoring"):
+        for key in ("last_sample_at", "last_persisted_scoring", "scoring", "snapshots", "snapshots_at"):
             state.pop(key, None)
     state["session_id"] = session_id
     state["session_type"] = payload["session_type"]
@@ -842,6 +868,9 @@ async def handle_message(agent, provider, kind, payload):
             return
         if elapsed is not None and lap_elapsed is not None and abs(elapsed - lap_elapsed) > 5:
             return  # cached snapshot from another session/reconnect
+        # Live-only overlay for the field view (tyre/damage); never persisted beyond lap checkpoints.
+        state["snapshots"] = {int(d["id"]): d for d in payload.get("drivers") or [] if d.get("id") is not None}
+        state["snapshots_at"] = time.monotonic()
         await store_lap_snapshots(agent, session_id, payload)
     elif kind == "telemetry" and time.monotonic() - state.get("last_scoring_at", 0) < 15:
         if state.get("track_name") != state.get("persisted_track"):
