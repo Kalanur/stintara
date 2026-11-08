@@ -46,6 +46,10 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .driver-cell{min-width:150px;max-width:260px;overflow-wrap:anywhere}
 .entry{display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
 .best-time{color:var(--best)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.standings-panel th,.standings-panel td{padding-left:6px;padding-right:6px}
+.standings-panel td.sector{color:var(--muted)}
+.dmg{color:var(--attention);font-weight:750}
 .badge{display:inline-block;font-size:12px;font-weight:750;border:1px solid currentColor;padding:1px 5px;border-radius:4px}
 .pit{color:var(--pit)}
 .track{color:var(--ok)}
@@ -339,6 +343,24 @@ function stopsText(p, focused=false) {
   const last = p.pitstops > 0 && Number.isSafeInteger(p.last_pit_lap) && p.last_pit_lap > 0 ? p.last_pit_lap : null;
   if (focused) return `${p.pitstops} ${p.pitstops === 1 ? 'stop' : 'stops'}${last === null ? '' : ` · Last stop L${last}`}`;
   return `${p.pitstops}${last === null ? '' : ` · L${last}`}`;
+}
+// Sector times are last-completed-lap values (individual S1/S2/S3, never a running sector); shown as ss.mmm.
+const sectorFmt = t => Number.isFinite(t) && t > 0 ? (t < 60 ? t.toFixed(3) : fmt(t)) : '—';
+const COMPOUND_SHORT = {soft:'S', medium:'M', hard:'H', wet:'W'};
+function tyreText(p) {
+  const name = typeof p.tyre_compound === 'string' ? p.tyre_compound.trim() : '';
+  const wear = Number.isFinite(p.tyre_remaining_min) && p.tyre_remaining_min >= 0 && p.tyre_remaining_min <= 1
+    ? `${Math.round(p.tyre_remaining_min * 100)}%` : null;
+  if (!name && wear === null) return '—';
+  const label = name ? (COMPOUND_SHORT[name.toLowerCase()] || name.slice(0, 3)) : '?';
+  const title = `${name || 'Compound unknown'} · remaining tyre (worst corner) ${wear ?? 'unknown'}`;
+  return `<span title="${esc(title)}">${esc(label)}${wear === null ? '' : ` ${esc(wear)}`}</span>`;
+}
+function damageText(p) {
+  const n = p.damage_regions;
+  if (!Number.isSafeInteger(n) || n < 0) return '—';
+  if (n === 0) return '<span title="No body damage reported">OK</span>';
+  return `<span class="dmg" title="${esc(`${n} body region(s) with damage · max provider severity ${p.damage_max}`)}">${esc(n)}</span>`;
 }
 function focusStatus(participants, focusId, race) {
   const p = participantById(participants, focusId);
@@ -711,15 +733,15 @@ function renderSession(d) {
       <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p></details></section>
       <section class="panel standings-panel" aria-label="Full field"><div class="panel-heading"><h2>Full field</h2><span class="muted">${d.participants.length} entries · provider order</span></div>
       <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
-      <caption>Provider positions and lap times. Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
-      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col">Completed laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
+      <caption>Provider positions and lap times. S1–S3 are the sectors of the last completed lap. Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
+      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col" class="num" title="Completed laps">Laps</th><th scope="col" class="num" title="Sector 1, last completed lap">S1</th><th scope="col" class="num" title="Sector 2, last completed lap">S2</th><th scope="col" class="num" title="Sector 3, last completed lap">S3</th><th scope="col" class="num">Last</th><th scope="col" class="num">Best</th><th scope="col" class="num">Gap</th><th scope="col" class="num">Interval</th><th scope="col" title="Compound and remaining tyre of the worst corner (1.0 new, 0 destroyed). Live while snapshots are fresh, otherwise as of the last completed lap.">Tyre</th><th scope="col" title="Body regions with damage; OK = none reported.">Dmg</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
       <tbody>${d.participants.map(p => {
         const vehicle = vehicleLabel(p);
         const entry = vehicle.label && !(hideClass && vehicle.label === 'Class') ? `${vehicle.label}: ${vehicle.value}` : 'Entry: —';
         return `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td class="driver-cell">${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? ` <a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}
       <span class="entry" title="${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}">${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}</span></td>
-      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td class="best-time">${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
-      }).join('') || `<tr><td colspan="${hideClass ? 9 : 10}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
+      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td class="num">${esc(p.total_laps)}</td><td class="num sector">${sectorFmt(p.sector1)}</td><td class="num sector">${sectorFmt(p.sector2)}</td><td class="num sector">${sectorFmt(p.sector3)}</td><td class="num">${fmt(p.last_lap_time)}</td><td class="num best-time">${fmt(p.best_lap_time)}</td><td class="num">${gapText(p, race)}</td><td class="num">${intervalText(p, race)}</td><td>${tyreText(p)}</td><td>${damageText(p)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
+      }).join('') || `<tr><td colspan="${hideClass ? 14 : 15}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
   const weatherDetails = document.querySelector('#weather-details');
   if (weatherDetails) weatherDetails.open = weatherOpen;
   const relativeDetails = document.querySelector('#relative-details');

@@ -124,3 +124,52 @@ async def test_driver_focus_id_is_actual_participant_not_equal_name(db):
     assert by_local[8]["driver_id"] is None
     assert by_local[7]["driver_id"] == agent["driver_id"]
     assert len({p["participant_id"] for p in data["participants"]}) == 2
+
+
+def wheels(*remaining, sensor=80.0):
+    return [dict(remaining=r, temp_mid=sensor) for r in remaining]
+
+
+def test_field_status_remaining_tyre_semantics_and_unknowns():
+    from server.app.timing import field_status
+    # mWear is tyre remaining (1.0 new): the field value is the worst (minimum) corner, never inverted.
+    assert field_status("Medium", wheels(1.0, 0.8, 0.9, 0.95), [0] * 8) == dict(
+        tyre_compound="Medium", tyre_remaining_min=0.8, damage_regions=0, damage_max=0)
+    assert field_status(None, wheels(1.0, 0.5, None, 1.0), None) == dict(
+        tyre_compound=None, tyre_remaining_min=None, damage_regions=None, damage_max=None)
+    assert field_status(" ", wheels(1, 1, 1, 1), [0, 1, 0, 1, 1, 0, 0, 0])["damage_regions"] == 3
+    assert field_status("Wet", wheels(1, 1, 1, float("nan")), [0, True])["tyre_remaining_min"] is None
+    assert field_status("Wet", [], [0, -1])["damage_regions"] is None
+    assert field_status("Wet", None, None)["tyre_remaining_min"] is None
+
+
+def test_field_status_ignores_provider_placeholder_wear_without_sensors():
+    from server.app.timing import field_status
+    # Non-player cars: mWear constant 1.0, all sensors sentinel (normalized to None) -> unknown, not "new".
+    placeholder = [dict(remaining=1.0, temp_inner=None, temp_mid=None, temp_outer=None,
+                        carcass_temp=None, brake_temp=None, pressure=None) for _ in range(4)]
+    result = field_status("Medium", placeholder, [0, 0, 0, 0, 0, 0, 0, 0])
+    assert result["tyre_remaining_min"] is None
+    assert result["tyre_compound"] == "Medium" and result["damage_regions"] == 0
+
+
+def test_projection_field_status_prefers_fresh_snapshot_over_checkpoint_and_stays_unknown():
+    import json
+    session = uuid7()
+    stored = dict(participant(1), compound_front="Soft", tyre_snapshot=json.dumps(wheels(0.5, 0.5, 0.5, 0.5)),
+                  lap_damage='{"dent_severity": [0, 0, 0, 0, 0, 0, 0, 0]}', sector1=30.0, sector2=40.0, sector3=20.0)
+    p = main.spectator_participants([dict(stored)], session, True, [], 100)[0]
+    assert (p["tyre_compound"], p["tyre_remaining_min"], p["damage_regions"]) == ("Soft", 0.5, 0)
+    assert (p["sector1"], p["sector2"], p["sector3"]) == (30.0, 40.0, 20.0)
+    snap = {"has_telemetry": True, "tire_compound_front_name": "Hard", "wheels": wheels(0.9, 0.9, 0.9, 0.9),
+            "damage": {"dent_severity": [0, 2, 0, 0, 0, 0, 0, 0]}}
+    live = dict(session_id=session, last_scoring_at=99, snapshots_at=99, snapshots={7: snap},
+                scoring={"vehicles": [{"id": 7, "position": 1, "total_laps": 2}]})
+    p = main.spectator_participants([dict(stored)], session, True, [live], 100)[0]
+    assert (p["tyre_compound"], p["tyre_remaining_min"], p["damage_regions"], p["damage_max"]) == ("Hard", 0.9, 1, 2)
+    stale = dict(live, snapshots_at=10)
+    assert main.spectator_participants([dict(stored)], session, True, [stale], 100)[0]["tyre_compound"] == "Soft"
+    # No checkpoint and no snapshot: everything unknown, no guessed values, timing sectors unknown too.
+    bare = main.spectator_participants([participant(1)], session, True, [], 100)[0]
+    assert bare["tyre_compound"] is bare["tyre_remaining_min"] is bare["damage_regions"] is None
+    assert bare.get("sector1") is None

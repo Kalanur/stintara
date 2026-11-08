@@ -78,3 +78,31 @@ def session_timing(session, scoring):
     distance = laps if session.get("session_type") == "Race" and not duration and lap_count(laps) and laps > 0 else None
     return dict(elapsed_seconds=elapsed if nonnegative(elapsed) else None,
                 configured_laps=distance, configured_minutes=duration)
+
+
+SENSOR_KEYS = ("temp_inner", "temp_mid", "temp_outer", "carcass_temp", "brake_temp", "pressure")
+
+
+def finite_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def field_status(compound, wheels, dents):
+    """Compact tyre/damage view of one checkpoint or snapshot; unknown stays None, nothing is guessed.
+
+    LMU mWear is tyre remaining (1.0 new .. 0.0 destroyed), so the field value is the worst corner.
+    Pitwall only has real tyre telemetry for the player's car: for every other car mWear is a constant 1.0
+    next to sentinel (-273.15) temperatures. Remaining tyre is therefore trusted only when at least one
+    wheel carries a real sensor value; otherwise it is unknown, never "new".
+    dent_severity is one provider integer per body region (0 = undamaged; 0/1 observed in captures).
+    """
+    wheels = [w for w in wheels or [] if isinstance(w, dict)]
+    corners = [w.get("remaining") for w in wheels]
+    sensors = any(finite_number(w.get(k)) for w in wheels for k in SENSOR_KEYS)
+    trusted = len(corners) == 4 and sensors and all(finite_number(v) and 0 <= v <= 1 for v in corners)
+    regions = [v for v in dents if type(v) is int and v >= 0] if isinstance(dents, list) else []
+    known_dents = bool(regions) and len(regions) == len(dents)
+    return {"tyre_compound": compound if isinstance(compound, str) and compound.strip() else None,
+            "tyre_remaining_min": min(corners) if trusted else None,
+            "damage_regions": sum(1 for v in regions if v > 0) if known_dents else None,
+            "damage_max": max(regions) if known_dents else None}
