@@ -18,7 +18,7 @@ LMU-specific interpretation lives in `agent/pitwall.py`.
 
 `GET /api/sessions/{id}/live` gains a `track_map` object (no new polling loop; only the closed geometry is persisted, see
 "Persistent geometry"):
-`geometry` (`state`, `complete`, `closed`, `progress`, `points`, `point_sectors`, `sector_boundaries_m`),
+`geometry` (`state`, `complete`, `closed`, `progress`, `points`, `point_sectors`, `sector_boundaries_m`, `sector_markers`),
 `vehicles` (position, pit flag, participant id), `vehicles_age_s`/`vehicles_fresh` (5 s) and `race_control`
 (with `age_s`/`fresh`, 5 s). Vehicles and race control are held in bounded runtime memory per agent and are never
 written to PostgreSQL. `geometry.source` is `learned` or `stored`; `static_only: true` marks a session without a fresh
@@ -96,7 +96,24 @@ Unknown values degrade to `unknown`, are shown only as a muted "flag unrecognize
 `diagnostics`. A stale race-control feed (>5 s) is shown as stale, never as GREEN. No stopped-car or incident
 classification is made.
 
+`geometry.sector_markers` (Track Map V2) is `null` unless the closed geometry has two observed sector boundaries
+(`sector_boundaries_m`, the same agreeing-observation rule as before). Each marker is
+`{boundary: 1|2, point: [x, z], direction: [dx, dz]}` in raw simulator coordinates: the point on the learned centerline at
+that lap distance and the unit direction of the centerline segment there. A boundary that cannot be placed on the sampled
+arc yields no markers at all; nothing is guessed from fractions of the track length. The markers are derived, not persisted.
+
 ## UI
+
+**Track Map V2 additions.** The focus vehicle gets a `P<position>` label and keeps its ring; the direct opponents are the
+adjacent provider positions with a unique match, exactly the Head-to-Head rule (`uniquePositionNeighbor`), never spatial
+proximity, so lapped cars, duplicate or unknown positions cannot select the wrong car. They get a dimmer blue ring and a
+`P<position>` label; all other vehicles stay unlabelled dots. Identity is `participant_id` only (an unresolved vehicle is
+never labelled). Labels are placed greedily (focus first, then ahead, then behind) at the position that collides with the
+fewest labels and vehicle dots, with a leader line to their dot; a rival without a free spot is dropped, the focus is always
+drawn. Labels appear only while vehicle positions are fresh. Text size is derived from the measured map area (about 12 px);
+the page re-renders once when that area changes (window resize, layout settling). Two short ticks across the centerline mark
+the observed sector boundaries (`sector_markers`), projected with the same AUTO/ORIGINAL transformation as the outline;
+without valid markers nothing is drawn. Class-based opponents are deliberately not part of this (Multiclass, issue #53).
 
 SVG without external libraries, fitted with preserved aspect ratio. World plane (x, z); elevation is ignored.
 Focus vehicle in cyan, pit vehicles hollow and dimmed, stale positions hollow gray with `POSITIONS STALE`.
@@ -109,7 +126,8 @@ markers. Fewer than 8 valid points, no spread, a near-isotropic shape (minor/maj
 below 0.5° or a partial/open geometry fall back to ORIGINAL. The remaining 180° ambiguity is not resolved. On desktop the Focus panel moved above the Full Field as a slim strip so the map can use
 the freed height; the stacked fallback is unchanged.
 
-`node tools/engineer_demo.cjs --viewports --browser msedge` measures the real browser viewports recorded on 2026-11-07,
+`node tools/engineer_demo.cjs --viewports --browser msedge` (Track Map V2 additionally: two sector ticks within 4 px of the centerline,
+focus label `P3`, no label overlapping a label or a vehicle dot, labels at least 9 px high, no labels on a stored track) measures the real browser viewports recorded on 2026-11-07,
 1920×911 (1080p display, compact desktop path) and 2560×1271 (1440p display, normal desktop path), plus the stress
 sizes 1920×900, 1920×800 and 2560×1300, for a horizontal, a vertically encoded and a stored-only scenario (no document
 scrolling, no overlapping panels, Head-to-Head/Weather not clipped, PIT settings visible, AUTO orientation, ORIGINAL
@@ -118,6 +136,33 @@ toggle and its persistence). It needs Playwright and Edge/Chrome locally and is 
 
 `node tools/engineer_demo.cjs --screenshot --track-scenarios --browser msedge` renders synthetic Green, Local Yellow,
 Learning and FCY/SC scenarios at 1920×1080, 1920×900, 1920×800 and 2560×1300 into the ignored `build/` folder.
+
+## Latency probe
+
+`node tools/trackmap_latency.cjs --base http://127.0.0.1:8099 --session <id> --seconds 40` drives a headless Chrome against a
+local server that is replaying the synthetic `latency-probe` scenario (`python -m tools.replay.scenarios latency-probe
+--output data/captures/raw/latency-probe.jsonl`, compile with `tools.replay.compile`, replay with `tools.replay.stintara_replay
+--speed 1`). It records, per session poll, the request time, the server-reported `vehicles_age_s`, and the first document-wide
+DOM mutation and `requestAnimationFrame` after the response. These last two measurements are **proxies**, not an exact
+Track Map DOM update or screen-paint timestamp: other dashboard updates can trigger the observer, and
+`requestAnimationFrame` runs before painting. Only differences from the same clock are used; `vehicles_age_s` is a
+server-side duration and is never subtracted from a browser timestamp. It measures time since the server last received
+the position, **not** Agent/Pitwall capture-to-server transfer time or browser network propagation time. The latter is
+included in the browser's request duration but cannot be fully attributed from these samples. A remote run remains
+useful for approximate age, polling and frame-timing trends, not strict end-to-end latency. The scoring cadence itself
+is not measurable from a 2 Hz poll; the nominal 0.2 s throttle comes from the agent/compiler.
+
+First local measurement (2026-11-09, Chrome 1920×911, one machine, synthetic 14 Hz source, 4.7 Hz forwarded): server age of
+the newest position at each poll mean 117 ms, max 220 ms; poll interval mean 554 ms (500 ms timer plus
+the fetch and the sequential fuel request); fetch 10 ms median (p95 38 ms). The document-wide DOM mutation proxy was
+6 ms median and the next-animation-frame proxy 11 ms median after the response (p95 17 ms). Combining server age and
+these proxies yields an **estimated**, not directly observed, display age of about 130 ms mean and 233 ms maximum at the
+frame callback. With each poll result held for about 0.55 s, a simple model estimates an age at an arbitrary viewing
+instant of about 0.4 s on average and up to about 0.8 s, **excluding unmeasured upstream transport and paint timing**.
+Interpretation: browser polling is likely a major source of visible stepwise motion in this synthetic local test; the
+data does not yet establish true end-to-end or remote latency. Interpolating between 5 Hz samples would not solve the
+slow browser refresh by itself. A separate, faster vehicles-only refresh (or push) is the next experiment; re-measure
+with map-specific instrumentation before claiming a quantified improvement. No interpolation was implemented.
 
 ## Known limitations
 

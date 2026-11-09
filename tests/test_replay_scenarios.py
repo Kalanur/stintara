@@ -37,3 +37,19 @@ def test_demo_matches_generator_and_production_adapter_contracts():
     assert estimate["estimate"]["sample_count"] == 5
     assert {k for k, _ in validated} == {"connection", "session_info", "scoring", "lap_snapshots", "telemetry"}
     assert len(FIXTURE.read_bytes()) < 40000
+
+
+def test_latency_probe_scenario_is_deterministic_synthetic_and_unique_per_scoring_message():
+    from tools.replay.compile import compile_capture
+    metadata, rows = scenario("latency-probe")
+    assert metadata["source"] == "synthetic"
+    assert dumps(metadata, rows) == dumps(*scenario("latency-probe"))
+    scoring = [r["message"] for r in rows if r["message"]["type"] == "ScoringUpdate"]
+    xs = [m["vehicles"][0]["pos_x"] for m in scoring]
+    assert len(xs) == len(set(xs)) > 1000                      # one unique x per source message
+    assert all("Driver" in v["driver_name"] for m in scoring[:3] for v in m["vehicles"])
+    _, compiled, counts = compile_capture(metadata, rows)
+    # The compiler applies the agent's 0.2 s scoring throttle: about 5 Hz survive from 14 Hz.
+    assert 4 <= counts["scoring"] / 90 <= 6
+    times = [r["t"] for r in compiled if r["message"]["message_type"] == "scoring"]
+    assert min(b - a for a, b in zip(times, times[1:])) >= 0.2 - 1e-9
