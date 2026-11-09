@@ -1498,3 +1498,244 @@ test('latency probe analysis separates cadence, server age, polling and render t
   assert.ok(report.worst_case_age_ms <= 200 + 9 + 500 + 1, 'worst case = age + paint + one poll interval');
   assert.equal(analyse([], [], []).server_age_ms, null);   // no samples: nothing invented
 });
+
+test('latency probe map analysis: drawn steps, age at the paint and at arbitrary instants (synthetic samples)', () => {
+  const { analyseMap } = require('../tools/trackmap_latency.cjs');
+  // A response every 250 ms carrying a 100 ms old position; the map is drawn 5 ms after each response, painted 10 ms after.
+  const resp = [], steps = [];
+  for (let k = 0; k < 20; k++) { const t1 = 1000 + k * 250; resp.push({ t0: t1 - 3, t1, age: 0.1, kind: 'vehicles' }); steps.push({ t: t1 + 5, p: t1 + 10 }); }
+  const map = analyseMap(resp, steps, 5000);
+  assert.equal(map.visible_updates, 20);
+  assert.equal(map.visible_updates_per_s, 4);
+  assert.equal(map.step_interval_ms.median, 250);
+  assert.equal(map.age_at_paint_ms.median, 110);                       // 100 server + 10 browser
+  assert.ok(map.age_at_random_instant_ms.max <= 110 + 250 && map.age_at_random_instant_ms.median > 110);
+  assert.equal(analyseMap([], [], 1000).step_interval_ms, null);        // nothing recorded: nothing invented
+});
+
+// --- Vehicles-only refresh (#55) -----------------------------------------------------------------------------------
+
+test('vehicle refresh rules: cadence is clamped and only advertised for live, non-stored maps', () => {
+  const h = helpers();
+  assert.equal(h.vehicleRefreshMs({vehicle_refresh_ms: 250}), 250);
+  assert.equal(h.vehicleRefreshMs({vehicle_refresh_ms: 5}), 100);
+  assert.equal(h.vehicleRefreshMs({vehicle_refresh_ms: 60000}), 2000);
+  for (const bad of [undefined, null, {}, {vehicle_refresh_ms: 0}, {vehicle_refresh_ms: 'x'}, {vehicle_refresh_ms: 250, static_only: true}]) {
+    assert.equal(h.vehicleRefreshMs(bad), null);
+  }
+  assert.equal(h.vehicleBackoff(250, 0), 250);
+  assert.equal(h.vehicleBackoff(250, 2), 1000);
+  assert.equal(h.vehicleBackoff(250, 30), 2000);
+});
+
+test('vehicle samples: only newer data of the same server run replaces held data', () => {
+  const h = helpers();
+  const sample = (seq, over = {}) => h.vehicleSample({seq, server_epoch: 'e1', vehicles: [], vehicles_age_s: 0.1, vehicles_fresh: true, ...over});
+  const held = sample(10);
+  assert.equal(h.acceptVehicles(null, sample(1)), true);
+  assert.equal(h.acceptVehicles(held, sample(11)), true);
+  assert.equal(h.acceptVehicles(held, sample(10)), false);                         // repeated sample
+  assert.equal(h.acceptVehicles(held, sample(9)), false);                          // out of order
+  assert.equal(h.acceptVehicles(held, sample(10, {vehicles_fresh: false})), true); // same sample, now stale
+  assert.equal(h.acceptVehicles(held, sample(1, {server_epoch: 'e2'})), true);     // server restarted: counter restarts
+  assert.equal(h.acceptVehicles(held, null), false);
+  // the full /live payload uses vehicles_seq; malformed samples are rejected
+  assert.equal(h.vehicleSample({vehicles_seq: 3, server_epoch: 'e1', vehicles: []}).seq, 3);
+  for (const bad of [null, {}, {seq: '3', server_epoch: 'e1', vehicles: []}, {seq: 3, vehicles: []}, {seq: 3, server_epoch: 'e1'}]) {
+    assert.equal(h.vehicleSample(bad), null);
+  }
+  assert.equal(h.vehiclesGoneStale({fresh: true, heardAt: 0}, 5001), true);
+  assert.equal(h.vehiclesGoneStale({fresh: true, heardAt: 0}, 4999), false);
+  assert.equal(h.vehiclesGoneStale({fresh: false, heardAt: 0}, 60000), false);
+  assert.equal(h.vehiclesGoneStale(null, 60000), false);
+});
+
+test('vehicle layer is a separate group; geometry and vehicles never mix', () => {
+  const h = helpers();
+  const field = Array.from({length: 40}, (_, i) => ({id: `p${i}`, position: i + 1, display_name: `Driver ${i}`}));
+  const track = v2Track(field);
+  const size = {width: 1000, height: 500};
+  const svg = h.trackMapSvg(track, 'p3', 'original', h.trackRoles(field, 'p3'), size);
+  const parts = h.trackMapParts(track, 'p3', 'original', h.trackRoles(field, 'p3'), size);
+  assert.equal(svg, h.trackMapSvgOf(parts));
+  assert.match(svg, /<g id="trk-vehicles">/);
+  assert.equal((parts.vehicles.match(/<circle class="trk-(car|focus)"/g) || []).length, 40);
+  assert.doesNotMatch(parts.vehicles, /trk-base|trk-sector|trk-yellow/);
+  assert.doesNotMatch(parts.geometry, /trk-car|trk-focus|trk-label/);
+  assert.equal(h.trackMapParts({geometry: {points: []}, vehicles: []}, null, 'auto', null), null);
+  assert.match(h.trackMapSvg({geometry: {points: []}, vehicles: []}, null), /Waiting for position data/);
+  // moving one car changes the layer only; geometry and view box stay byte-identical
+  const moved = v2Track(field); moved.vehicles[4] = {...moved.vehicles[4], x: moved.vehicles[4].x + 1};
+  const next = h.trackMapParts(moved, 'p3', 'original', h.trackRoles(field, 'p3'), size);
+  assert.equal(next.geometry, parts.geometry); assert.equal(next.viewBox, parts.viewBox); assert.notEqual(next.vehicles, parts.vehicles);
+});
+
+async function vehicleHarness({track, vehicles = () => ({ok: false, status: 503, json: async () => ({})}), hidden = false, live = true} = {}) {
+  const field = Array.from({length: 40}, (_, i) => ({id: `p${i}`, position: i + 1, display_name: `Driver ${i}`}));
+  const timers = []; let timerId = 0, clock = 1000;
+  const counters = {rootRenders: 0, layerWrites: 0, areaWrites: 0, liveRequests: 0, vehicleRequests: [], listeners: {}};
+  let root = '', layerHtml = null, areaHtml = null;
+  const mapOf = html => html.match(/<div class="map-area">([\s\S]*?)<\/div><\/section>/)?.[1] ?? '';
+  const layer = {get innerHTML() { return layerHtml ?? (mapOf(root).match(/<g id="trk-vehicles">([\s\S]*?)<\/g><\/svg>/)?.[1] ?? ''); },
+    set innerHTML(value) { layerHtml = value; counters.layerWrites++; }};
+  const area = {get innerHTML() { return areaHtml ?? mapOf(root); }, set innerHTML(value) { areaHtml = value; counters.areaWrites++; },
+    querySelector: name => name === 'svg' && mapOf(root).startsWith('<svg') && areaHtml === null ? {
+      getAttribute: attr => attr === 'viewBox' ? mapOf(root).match(/viewBox="([^"]*)"/)?.[1] : null,
+      querySelector: id => id === '#trk-vehicles' ? layer : null} : null};
+  const rootEl = {get innerHTML() { return root; }, set innerHTML(value) { root = value; layerHtml = areaHtml = null; counters.rootRenders++; },
+    textContent: '', addEventListener() {}};
+  const selector = {innerHTML: '', value: '', addEventListener() {}};
+  const doc = {hidden, activeElement: null,
+    addEventListener: (name, fn) => { counters.listeners[name] = fn; },
+    querySelector: name => name === '#root' ? rootEl : name === '#focus' ? selector : name === '.map-area' ? area : name === '#fuel' ? {textContent: '', innerHTML: ''} : null};
+  const state = {current: {live, session: {id: syntheticId(99), track_name: 'T', session_type: 'Race'}, participants: field,
+    track_map: track ?? {...v2Track(field), server_epoch: 'e1', vehicles_seq: 10, vehicle_refresh_ms: 250}}};
+  const context = vm.createContext({URL, location: {href: 'http://localhost/sessions/x/live'}, history: {replaceState() {}}, document: doc,
+    performance: {now: () => clock}, AbortController,
+    setTimeout: (fn, ms) => { const id = ++timerId; timers.push({id, fn, ms}); return id; },
+    clearTimeout: id => { const i = timers.findIndex(t => t.id === id); if (i >= 0) timers.splice(i, 1); },
+    fetch: async (url, options) => {
+      if (url.includes('/vehicles')) { counters.vehicleRequests.push({url, options}); return vehicles(url, counters); }
+      if (url.includes('/live')) { counters.liveRequests++; return {ok: true, json: async () => JSON.parse(JSON.stringify(state.current))}; }
+      return {ok: false, status: 503, json: async () => ({})};
+    }});
+  vm.runInContext(spectatorScript(), context);
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const fire = async predicate => { const i = timers.findIndex(predicate); assert.ok(i >= 0, 'expected timer'); const [t] = timers.splice(i, 1); t.fn(); await settle(); await settle(); };
+  await settle(); await settle();
+  const isRefresh = t => t.fn.name === 'refresh', isPoll = t => !isRefresh(t) && t.ms !== 1500;   // 1500 ms: request time-out
+  return {counters, timers, state, doc, settle, fire, root: () => root, layer, advance: ms => { clock += ms; },
+    poll: () => fire(isRefresh),                                 // the unchanged full /live refresh
+    vehicleTimer: () => timers.find(isPoll),
+    tick: () => fire(isPoll)};                                   // the next vehicles poll
+}
+const vehicleBody = (seq, over = {}) => ({session_id: syntheticId(99), live: true, seq, server_epoch: 'e1', vehicles_age_s: 0.1, vehicles_fresh: true,
+  vehicles: Array.from({length: 40}, (_, i) => ({participant_id: `p${i}`, x: 100 + i + seq, z: 50, in_pits: false, position: i + 1, name: `Driver ${i}`})), ...over});
+const reply = body => ({ok: true, json: async () => body});
+const dots = html => (html.match(/<circle class="trk-(car|focus)/g) || []).length;
+
+test('vehicles refresh starts only when the server advertises it and polls the lightweight endpoint', async () => {
+  const none = await vehicleHarness({track: {...v2Track([{id: 'p0', position: 1, display_name: 'A'}]), vehicles_seq: 1, server_epoch: 'e1'}});
+  assert.equal(none.counters.vehicleRequests.length, 0);          // older server: behaviour unchanged
+  const stored = await vehicleHarness({track: {geometry: {state: 'complete', complete: true, closed: true, points: ellipse(250, 600, 0, 40)},
+    vehicles: [], static_only: true, vehicle_refresh_ms: 250}});
+  assert.equal(stored.counters.vehicleRequests.length, 0);        // stored track of a historical session: no positions
+  const offline = await vehicleHarness({live: false});
+  assert.equal(offline.counters.vehicleRequests.length, 0);
+  const h = await vehicleHarness({vehicles: () => reply(vehicleBody(11))});
+  assert.equal(h.counters.vehicleRequests.length, 1);
+  assert.match(h.counters.vehicleRequests[0].url, new RegExp(`/api/sessions/${syntheticId(99)}/vehicles$`));
+  assert.equal(h.counters.vehicleRequests[0].options.cache, 'no-store');
+  assert.ok(h.counters.vehicleRequests[0].options.signal, 'every request can time out');
+});
+
+test('a newer vehicles response redraws only the vehicle layer, 40 dots, without rebuilding the dashboard', async () => {
+  const h = await vehicleHarness({vehicles: () => reply(vehicleBody(11))});
+  assert.equal(h.counters.rootRenders, 1);
+  assert.ok(h.counters.layerWrites >= 1);
+  assert.equal(h.counters.areaWrites, 0);
+  assert.equal(dots(h.layer.innerHTML), 40);
+  const writes = h.counters.layerWrites;
+  await h.tick();                                                  // the same sample again
+  assert.equal(h.counters.layerWrites, writes);                    // is not redrawn
+  assert.equal(h.counters.rootRenders, 1);
+});
+
+test('the next vehicles poll is scheduled at the advertised cadence, never overlapping the previous request', async () => {
+  let release, calls = 0;
+  const h = await vehicleHarness({vehicles: () => { calls++; return new Promise(resolve => { release = () => resolve(reply(vehicleBody(10 + calls))); }); }});
+  assert.equal(calls, 1);
+  await h.poll(); await h.poll();                                   // full refreshes while the request is in flight
+  assert.equal(calls, 1, 'a running request is never doubled by the full refresh');
+  h.advance(40); release(); await h.settle(); await h.settle();
+  const next = h.vehicleTimer();
+  assert.ok(next && next.ms <= 250 && next.ms >= 200, 'next poll scheduled at the cadence minus the request time');
+});
+
+test('older, repeated or foreign responses never overwrite newer positions', async () => {
+  const bodies = [vehicleBody(20), vehicleBody(15), vehicleBody(20), vehicleBody(30, {session_id: syntheticId(7)}), vehicleBody(31, {live: false}),
+    vehicleBody(21, {vehicles: []}), vehicleBody(25)];
+  const h = await vehicleHarness({vehicles: () => reply(bodies.shift())});
+  const first = h.layer.innerHTML;                                  // seq 20 drawn
+  assert.equal(dots(first), 40);
+  for (let i = 0; i < 4; i++) { await h.tick(); assert.equal(h.layer.innerHTML, first, `response ${i + 2} must be ignored`); }
+  await h.tick(); assert.equal(h.layer.innerHTML, '');               // a newer sample 21 without vehicles is a real statement
+  await h.tick(); assert.equal(dots(h.layer.innerHTML), 40);         // 25 draws again
+});
+
+test('a slow full /live response older than the held vehicles keeps the newer positions', async () => {
+  const h = await vehicleHarness({vehicles: () => reply(vehicleBody(40))});
+  assert.equal(dots(h.layer.innerHTML), 40);
+  h.state.current.track_map.vehicles_seq = 12;                       // the full payload was sampled before seq 40
+  h.state.current.track_map.vehicles = v2Track(h.state.current.participants).vehicles.map(v => ({...v, x: 9999}));
+  await h.poll();
+  assert.doesNotMatch(h.root(), /cx="9999/);
+  assert.equal(dots(h.root()), 40);
+  h.state.current.track_map.vehicles_seq = 41;                       // and a newer full payload does replace them
+  h.state.current.track_map.vehicles = v2Track(h.state.current.participants).vehicles.map(v => ({...v, x: 0, z: 0}));
+  await h.poll();
+  assert.match(h.root(), /cx="0\.0"/);
+});
+
+test('a restarted server (new epoch, restarted counter) is accepted', async () => {
+  const bodies = [vehicleBody(50), vehicleBody(51), vehicleBody(2, {server_epoch: 'e2'})];
+  const h = await vehicleHarness({vehicles: () => reply(bodies.shift())});
+  await h.tick();
+  const before = h.layer.innerHTML;
+  await h.tick();
+  assert.notEqual(h.layer.innerHTML, before);
+  assert.match(h.layer.innerHTML, /cy="102\.0"/);                    // first car of seq 2 (x = 100 + i + 2; AUTO orientation turns x into cy)
+  assert.doesNotMatch(h.layer.innerHTML, /cy="151\.0"/);
+});
+
+test('failures back off, positions turn stale after silence, and the page recovers', async () => {
+  let mode = 'ok', n = 0;
+  const h = await vehicleHarness({vehicles: () => { n++; if (mode === 'fail') throw new Error('network'); return reply(vehicleBody(60 + n)); }});
+  assert.doesNotMatch(h.root(), /POSITIONS STALE/);
+  mode = 'fail';
+  const delays = [];
+  for (let i = 0; i < 4; i++) { await h.tick(); delays.push(h.vehicleTimer().ms); }
+  assert.deepEqual(delays, [500, 1000, 2000, 2000]);                 // exponential, capped
+  h.advance(6000);
+  await h.tick();                                                    // silence beyond five seconds
+  assert.match(h.root(), /POSITIONS STALE/);
+  assert.match(h.root(), /trk-car stale/);
+  mode = 'ok';
+  await h.tick();
+  assert.doesNotMatch(h.root(), /POSITIONS STALE/);
+  assert.ok(h.vehicleTimer().ms <= 250, 'back to the normal cadence after recovery');
+});
+
+test('a hidden page stops polling and resumes when visible again; late answers of the old run are ignored', async () => {
+  let release, calls = 0;
+  const h = await vehicleHarness({vehicles: () => { calls++; return calls === 1 ? new Promise(resolve => { release = () => resolve(reply(vehicleBody(80))); }) : reply(vehicleBody(81)); }});
+  const before = h.layer.innerHTML;
+  h.doc.hidden = true; h.counters.listeners.visibilitychange();
+  release(); await h.settle(); await h.settle();
+  assert.equal(h.layer.innerHTML, before, 'the answer of a stopped run is dropped');
+  assert.equal(h.vehicleTimer(), undefined, 'no timer while hidden');
+  h.doc.hidden = false; h.counters.listeners.visibilitychange(); await h.settle(); await h.settle();
+  assert.equal(calls, 2);
+  assert.notEqual(h.layer.innerHTML, before);
+});
+
+test('a session that stops being live ends the vehicles refresh', async () => {
+  const h = await vehicleHarness({vehicles: () => reply(vehicleBody(90))});
+  const requests = h.counters.vehicleRequests.length;
+  h.state.current.live = false;
+  await h.poll();
+  assert.equal(h.vehicleTimer(), undefined);
+  await h.settle();
+  assert.equal(h.counters.vehicleRequests.length, requests);
+});
+
+test('load probe summary reports rate, errors and percentiles without inventing values', () => {
+  const { summarise } = require('../tools/trackmap_load.cjs');
+  const report = summarise([5, 1, 3, 2, 4, 100], 2, 2, 3);
+  assert.equal(report.requests, 6);
+  assert.equal(report.requests_per_s, 3);
+  assert.equal(report.errors, 2);
+  assert.equal(report.response_ms.median, 4);               // nearest rank of the sorted samples, as in the other probe
+  assert.equal(report.response_ms.max, 100);
+  assert.deepEqual(summarise([], 4, 2, 1).response_ms, {median: null, p95: null, max: null});
+});

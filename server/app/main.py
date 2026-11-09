@@ -15,7 +15,8 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ValidationError
 
 from . import history, track_repo
@@ -36,9 +37,11 @@ from .trackmap import (
     attach_track,
     feed_race_control,
     feed_scoring,
+    next_sample_seq,
     static_track_map_payload,
     track_key,
     track_map_payload,
+    vehicles_payload,
 )
 from .uuid7 import uuid7
 from .weather import normalize_weather
@@ -488,6 +491,23 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
             "track_map": track_map}
 
 
+@app.get("/api/sessions/{session_id}/vehicles")
+async def api_session_vehicles(session_id: UUID) -> JSONResponse:
+    """Lightweight runtime-only vehicle positions for the Track Map. Never touches PostgreSQL.
+
+    Reads the same in-memory state as `track_map` of the full /live payload, so it exposes nothing new; it is as
+    public as /live. Only a fresh runtime observation of exactly this session answers with vehicles. A session
+    without one (historical, unknown id, no agent) is reported `live: false` and carries no positions.
+    """
+    now = time.monotonic()
+    state = newest_state(session_id, True, list(runtime.values()), now)
+    index = state.get("participant_index") if state else None
+    by_local = index["by_local"] if index and index["session_id"] == session_id else {}
+    body = ({"session_id": session_id, "live": True, **vehicles_payload(state, by_local, now)} if state
+            else {"session_id": session_id, "live": False, "vehicles": []})
+    return JSONResponse(jsonable_encoder(body), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/sessions/{session_id}/participants/{participant_id}/fuel")
 async def api_participant_fuel(session_id: UUID, participant_id: UUID) -> dict[str, Any]:
     assert pool
@@ -623,10 +643,11 @@ async def authenticate_agent(token: str) -> asyncpg.Record | None:
 async def current_or_create_session(agent, payload):
     state = runtime.setdefault(str(agent["id"]), {})
     resolution_state = state.copy()
+    known = {}
     async with pool.acquire() as conn, conn.transaction():
         session_id = await resolve_session(conn, agent, resolution_state, payload, SESSION_TIMEOUT_SECONDS)
         if session_id:
-            await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
+            known = await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
             if state.get("session_meta_pending"):
                 # SessionInfo carries no session identity, so a scoring frame resolving to A does not prove the
                 # preceding SessionInfo describes A. session_minutes/session_laps are therefore captured at INSERT
@@ -643,26 +664,41 @@ async def current_or_create_session(agent, payload):
         if key in resolution_state:
             state[key] = resolution_state[key]
     if session_id != state.get("session_id"):
-        for key in ("last_sample_at", "last_persisted_scoring", "scoring", "snapshots", "snapshots_at"):
+        for key in ("last_sample_at", "last_persisted_scoring", "scoring", "snapshots", "snapshots_at",
+                    "participant_index"):
             state.pop(key, None)
     state["session_id"] = session_id
+    if session_id:
+        remember_participants(state, session_id, known)
     state["session_type"] = payload["session_type"]
     return session_id
 
 
+def remember_participants(state, session_id, known):
+    """Runtime identity cache for the vehicles endpoint; tagged with its session so it can never leak across."""
+    index = state.get("participant_index")
+    if not index or index["session_id"] != session_id:
+        index = state["participant_index"] = {"session_id": session_id, "by_local": {}}
+    index["by_local"].update(known or {})
+
+
 async def upsert_participants(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any]) -> None:
     assert pool
+    state = runtime[str(agent["id"])]
     async with pool.acquire() as conn, conn.transaction():
-        await upsert_participants_on_connection(conn, agent, session_id, payload, runtime[str(agent["id"])]["provider"])
+        known = await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
+    remember_participants(state, session_id, known)
 
 
 async def upsert_participants_on_connection(conn, agent, session_id, payload, provider):
+    """Upsert the field; returns {local_vehicle_id: {"id", "display_name"}} as stored (no extra query)."""
     player_vehicle_id = payload.get("player_vehicle_id")
     vehicles = payload.get("vehicles") or []
+    known = {}
     for v in vehicles:
         local_id = int(v.get("id", -1))
         driver_id = agent["driver_id"] if local_id == player_vehicle_id else None
-        await conn.execute(
+        row = await conn.fetchrow(
             """
             INSERT INTO session_participants(
                 id,session_id,driver_id,provider,local_vehicle_id,display_name,team_name,car_name,car_class,car_number,
@@ -675,13 +711,16 @@ async def upsert_participants_on_connection(conn, agent, session_id, payload, pr
                 total_laps=EXCLUDED.total_laps,last_lap_time=EXCLUDED.last_lap_time,best_lap_time=EXCLUDED.best_lap_time,
                 gap_to_leader=EXCLUDED.gap_to_leader,laps_behind_leader=EXCLUDED.laps_behind_leader,
                 in_pits=EXCLUDED.in_pits,last_seen_at=now()
+            RETURNING id,display_name
             """,
             uuid7(), session_id, driver_id, local_id, v.get("driver_name") or f"Vehicle {local_id}",
             v.get("team_name"), v.get("car_name"), v.get("vehicle_class"), v.get("car_number"),
             v.get("position"), v.get("total_laps", 0), v.get("last_lap_time"), v.get("best_lap_time"),
             v.get("time_behind_leader"), v.get("laps_behind_leader"), bool(v.get("in_pits", False)), provider,
         )
+        known[local_id] = {"id": row["id"], "display_name": row["display_name"]}
     await conn.execute("UPDATE sessions SET last_seen_at=now() WHERE id=$1", session_id)
+    return known
 
 
 def checkpoint_energy(state: dict[str, Any], local_id: int) -> float | None:
@@ -845,6 +884,7 @@ async def handle_message(agent, provider, kind, payload):
                 await conn.execute("UPDATE agents SET last_seen_at=now() WHERE id=$1", agent["id"])
         state["scoring"] = payload
         state["last_scoring_at"] = now
+        state["scoring_seq"] = next_sample_seq()
         feed_scoring(state, payload, reset=changed)
         await sync_track_store(state)
         pending = state.pop("pending_laps", None)
