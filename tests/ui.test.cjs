@@ -1114,7 +1114,7 @@ test('desktop layouts reserve room for Head-to-Head, Weather and Strategy withou
   assert.match(css, /grid-template-rows:auto auto minmax\(100px,1fr\) auto 180px/);
   assert.match(css, /\.dashboard\{gap:8px;grid-template-rows:auto auto minmax\(100px,1fr\) auto 172px\}/);
   assert.match(css, /\.fuel-panel\{max-height:clamp\(390px,calc\(100dvh - 760px\),470px\)\}/);
-  assert.match(css, /\.h2h dl\{grid-template-columns:1fr auto 1fr auto/);
+  assert.match(css, /\.h2h dl\{grid-template-columns:max-content minmax\(0,1fr\) max-content auto/);
   assert.equal((css.match(/body\{[^}]*font:14px/g) || []).length, 1);                 // base font size unchanged
   for (const block of css.split('@media').slice(1)) assert.doesNotMatch(block.split('\n}\n')[0], /body\{[^}]*font(-size)?:/);
 });
