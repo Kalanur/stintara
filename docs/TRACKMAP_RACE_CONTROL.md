@@ -142,19 +142,27 @@ Learning and FCY/SC scenarios at 1920×1080, 1920×900, 1920×800 and 2560×1300
 `node tools/trackmap_latency.cjs --base http://127.0.0.1:8099 --session <id> --seconds 40` drives a headless Chrome against a
 local server that is replaying the synthetic `latency-probe` scenario (`python -m tools.replay.scenarios latency-probe
 --output data/captures/raw/latency-probe.jsonl`, compile with `tools.replay.compile`, replay with `tools.replay.stintara_replay
---speed 1`). It records, per session poll, the request time, the server-reported `vehicles_age_s`, and the first DOM mutation
-and animation frame after the response. Only differences of the same clock are used; `vehicles_age_s` is a server-side
-duration and is never subtracted from a browser timestamp, so the probe is also valid against a remote server for age and
-render figures. The scoring cadence itself is not measurable from a 2 Hz poll; it is the compiler's agent throttle (0.2 s).
+--speed 1`). It records, per session poll, the request time, the server-reported `vehicles_age_s`, and the first document-wide
+DOM mutation and `requestAnimationFrame` after the response. These last two measurements are **proxies**, not an exact
+Track Map DOM update or screen-paint timestamp: other dashboard updates can trigger the observer, and
+`requestAnimationFrame` runs before painting. Only differences from the same clock are used; `vehicles_age_s` is a
+server-side duration and is never subtracted from a browser timestamp. It measures time since the server last received
+the position, **not** Agent/Pitwall capture-to-server transfer time or browser network propagation time. The latter is
+included in the browser's request duration but cannot be fully attributed from these samples. A remote run remains
+useful for approximate age, polling and frame-timing trends, not strict end-to-end latency. The scoring cadence itself
+is not measurable from a 2 Hz poll; the nominal 0.2 s throttle comes from the agent/compiler.
 
 First local measurement (2026-11-09, Chrome 1920×911, one machine, synthetic 14 Hz source, 4.7 Hz forwarded): server age of
-the newest position at each poll mean 117 ms, max 220 ms (one scoring interval); poll interval mean 554 ms (500 ms timer plus
-the fetch and the sequential fuel request); fetch 10 ms median (p95 38 ms); DOM update 6 ms and paint 11 ms median after the
-response (p95 17 ms). Age of the position when painted: mean 130 ms, max 233 ms. Because the page shows each poll result until
-the next one, the expected age at a random instant is about 0.4 s and the worst case about 0.8 s. Interpretation: the delay is
-dominated by the browser polling interval, not by the agent cadence or rendering. Interpolating between 5 Hz samples would not
-help while a new sample reaches the page only about every 0.55 s; a faster, vehicles-only refresh (or push) is the lever and
-would be a separate change. No interpolation was implemented.
+the newest position at each poll mean 117 ms, max 220 ms; poll interval mean 554 ms (500 ms timer plus
+the fetch and the sequential fuel request); fetch 10 ms median (p95 38 ms). The document-wide DOM mutation proxy was
+6 ms median and the next-animation-frame proxy 11 ms median after the response (p95 17 ms). Combining server age and
+these proxies yields an **estimated**, not directly observed, display age of about 130 ms mean and 233 ms maximum at the
+frame callback. With each poll result held for about 0.55 s, a simple model estimates an age at an arbitrary viewing
+instant of about 0.4 s on average and up to about 0.8 s, **excluding unmeasured upstream transport and paint timing**.
+Interpretation: browser polling is likely a major source of visible stepwise motion in this synthetic local test; the
+data does not yet establish true end-to-end or remote latency. Interpolating between 5 Hz samples would not solve the
+slow browser refresh by itself. A separate, faster vehicles-only refresh (or push) is the next experiment; re-measure
+with map-specific instrumentation before claiming a quantified improvement. No interpolation was implemented.
 
 ## Known limitations
 
