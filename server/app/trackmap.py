@@ -6,7 +6,9 @@ step inconsistent with the travelled distance discards the running attempt. A cl
 plausible start/finish wrap (end near the lap end, restart near the lap start, positions that fit the
 small arc between them). An incomplete correct map is preferred over a complete-looking wrong one.
 """
+import itertools
 import math
+import secrets
 from collections import OrderedDict
 from statistics import median
 
@@ -380,6 +382,16 @@ def public_geometry(model, learner=None):
 VEHICLE_FRESH_SECONDS = 5.0
 RACE_CONTROL_FRESH_SECONDS = 5.0
 SECTOR_SAMPLE_MAX_AGE_SECONDS = 1.0
+VEHICLE_REFRESH_MS = 250       # advertised cadence of the lightweight vehicles endpoint; the browser clamps it
+
+# Ordering of scoring samples for the browser. The counter is process-wide, so samples of different agents stay
+# comparable; the epoch changes on every start so a restarted server is never mistaken for an old one.
+SERVER_EPOCH = secrets.token_hex(4)
+_sample_counter = itertools.count(1)
+
+
+def next_sample_seq():
+    return next(_sample_counter)
 
 
 def attach_track(state, store, provider, name, length):
@@ -433,21 +445,40 @@ def public_race_control(state, now):
     return dict(payload, age_s=round(age, 2), fresh=0 <= age <= RACE_CONTROL_FRESH_SECONDS)
 
 
+def runtime_vehicles(state, participants_by_local):
+    """Positions of the newest scoring frame, mapped to central participants through already-known identities.
+
+    `participants_by_local` maps the provider's local vehicle id to {"id", "display_name"}. A vehicle without a
+    known participant keeps participant_id/name None; identity is never guessed from names.
+    """
+    vehicles = []
+    for v in state.get("scoring", {}).get("vehicles", []):
+        x, z = v.get("pos_x"), v.get("pos_z")
+        if not (finite(x) and finite(z)):
+            continue
+        p = participants_by_local.get(v.get("id"), {})
+        vehicles.append(dict(participant_id=p.get("id"), x=round(x, 1), z=round(z, 1), in_pits=bool(v.get("in_pits")),
+                             position=v.get("position"), name=p.get("display_name")))
+    return vehicles
+
+
+def vehicles_payload(state, participants_by_local, now):
+    """Runtime-only vehicles snapshot; reads no database and persists nothing."""
+    age = now - state.get("last_scoring_at", 0)
+    return dict(seq=state.get("scoring_seq"), server_epoch=SERVER_EPOCH,
+                vehicles=runtime_vehicles(state, participants_by_local),
+                vehicles_age_s=round(age, 3), vehicles_fresh=0 <= age <= VEHICLE_FRESH_SECONDS)
+
+
 def track_map_payload(state, participants, now):
     """Read-only current spatial state for the Engineer. Stale vehicles are flagged, never presented as live."""
     if not state:
         return dict(geometry=public_geometry(None), vehicles=[], vehicles_age_s=None, vehicles_fresh=False,
                     race_control=None, static_only=False)
     age = now - state.get("last_scoring_at", 0)
-    by_local = {p.get("local_vehicle_id"): p for p in participants}
-    vehicles = []
-    for v in state.get("scoring", {}).get("vehicles", []):
-        x, z = v.get("pos_x"), v.get("pos_z")
-        if not (finite(x) and finite(z)):
-            continue
-        p = by_local.get(v.get("id"), {})
-        vehicles.append(dict(participant_id=p.get("id"), x=round(x, 1), z=round(z, 1), in_pits=bool(v.get("in_pits")),
-                             position=v.get("position"), name=p.get("display_name")))
     return dict(geometry=public_geometry(state.get("track_model"), state.get("track_learner")),
-                vehicles=vehicles, vehicles_age_s=round(age, 2), vehicles_fresh=0 <= age <= VEHICLE_FRESH_SECONDS,
-                race_control=public_race_control(state, now), static_only=False)
+                vehicles=runtime_vehicles(state, {p.get("local_vehicle_id"): p for p in participants}),
+                vehicles_age_s=round(age, 2), vehicles_fresh=0 <= age <= VEHICLE_FRESH_SECONDS,
+                race_control=public_race_control(state, now), static_only=False,
+                vehicles_seq=state.get("scoring_seq"), server_epoch=SERVER_EPOCH,
+                vehicle_refresh_ms=VEHICLE_REFRESH_MS)

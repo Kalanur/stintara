@@ -646,7 +646,9 @@ function sectorMarkers(geometry) {
     && m.direction.every(v => mapNumber(v) !== null) && Math.abs(Math.hypot(m.direction[0], m.direction[1]) - 1) < 0.25);
   return valid ? markers : [];
 }
-function trackMapSvg(track, focusId, mode = 'auto', roles = null, size = TRACK_MAP_DEFAULT_SIZE) {
+// Geometry (outline, flags, sector ticks) and the moving vehicle layer are separate parts so a vehicles-only refresh
+// (#55) can replace just the layer. Returns null when there is nothing to draw.
+function trackMapParts(track, focusId, mode = 'auto', roles = null, size = TRACK_MAP_DEFAULT_SIZE) {
   const geometry = track?.geometry || {};
   const points = (geometry.points || []).filter(p => Array.isArray(p) && mapNumber(p[0]) !== null && mapNumber(p[1]) !== null);
   const vehicles = (track?.vehicles || []).filter(v => mapNumber(v.x) !== null && mapNumber(v.z) !== null);
@@ -654,7 +656,7 @@ function trackMapSvg(track, focusId, mode = 'auto', roles = null, size = TRACK_M
   const screenPoints = points.map(project);
   const screenVehicles = vehicles.map(v => ({ v, at: project([v.x, v.z]) }));
   const all = screenPoints.concat(screenVehicles.map(c => c.at));
-  if (!all.length) return '<div class="placeholder"><span>Waiting for position data</span></div>';
+  if (!all.length) return null;
   const xs = all.map(p => p[0]), ys = all.map(p => p[1]);
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
   const span = Math.max(maxX - minX, maxY - minY, 50);
@@ -717,8 +719,41 @@ function trackMapSvg(track, focusId, mode = 'auto', roles = null, size = TRACK_M
   const labels = layoutTrackLabels(items, em, dots).map(l =>
     `<line class="trk-leader ${l.role}" x1="${fmt(l.at[0])}" y1="${fmt(l.at[1])}" x2="${fmt(l.lx)}" y2="${fmt(l.ly)}"/>`
     + `<text class="trk-label ${l.role}" x="${fmt(l.tx)}" y="${fmt(l.ty)}" text-anchor="${l.anchor}" font-size="${fmt(em)}">${esc(l.text)}</text>`).join('');
-  return `<svg viewBox="${fmt(minX - pad)} ${fmt(minY - pad)} ${fmt(maxX - minX + 2 * pad)} ${fmt(maxY - minY + 2 * pad)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Track map">${base}${overlay}${ticks}${cars}${labels}</svg>`;
+  return { viewBox: `${fmt(minX - pad)} ${fmt(minY - pad)} ${fmt(maxX - minX + 2 * pad)} ${fmt(maxY - minY + 2 * pad)}`,
+           geometry: base + overlay + ticks, vehicles: cars + labels };
 }
+const TRACK_MAP_PLACEHOLDER = '<div class="placeholder"><span>Waiting for position data</span></div>';
+function trackMapSvgOf(parts) {
+  return `<svg viewBox="${parts.viewBox}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Track map">${parts.geometry}<g id="trk-vehicles">${parts.vehicles}</g></svg>`;
+}
+function trackMapSvg(track, focusId, mode = 'auto', roles = null, size = TRACK_MAP_DEFAULT_SIZE) {
+  const parts = trackMapParts(track, focusId, mode, roles, size);
+  return parts ? trackMapSvgOf(parts) : TRACK_MAP_PLACEHOLDER;
+}
+// --- Vehicles-only refresh (#55): ordering and staleness rules. Pure; the browser wiring follows the session id. ---
+const VEHICLE_REFRESH_MIN_MS = 100, VEHICLE_REFRESH_MAX_MS = 2000, VEHICLE_REQUEST_TIMEOUT_MS = 1500, VEHICLE_SILENCE_STALE_MS = 5000;
+// Cadence advertised by the server inside track_map; absent (older server, stored track) means no fast refresh.
+function vehicleRefreshMs(track) {
+  const ms = Number(track?.vehicle_refresh_ms);
+  return track?.static_only !== true && Number.isFinite(ms) && ms > 0 ? Math.min(VEHICLE_REFRESH_MAX_MS, Math.max(VEHICLE_REFRESH_MIN_MS, ms)) : null;
+}
+// Both the full /live payload (vehicles_seq) and the vehicles endpoint (seq) describe one scoring sample.
+function vehicleSample(source) {
+  if (!source || !Array.isArray(source.vehicles)) return null;
+  const seq = source.seq ?? source.vehicles_seq;
+  if (!Number.isSafeInteger(seq) || typeof source.server_epoch !== 'string') return null;
+  return { epoch: source.server_epoch, seq, vehicles: source.vehicles, age: source.vehicles_age_s, fresh: source.vehicles_fresh === true };
+}
+// A sample replaces the held one only when it is newer (same server run) or announces a changed freshness for the
+// same sample. Older or repeated samples, e.g. a slow full /live response, never overwrite newer positions.
+function acceptVehicles(held, sample) {
+  if (!sample) return false;
+  if (!held || held.epoch !== sample.epoch) return true;
+  return sample.seq > held.seq || (sample.seq === held.seq && sample.fresh !== held.fresh);
+}
+// A silent channel must not keep positions "fresh": after silence only the browser clock is consulted.
+function vehiclesGoneStale(held, now) { return Boolean(held) && held.fresh && now - held.heardAt > VEHICLE_SILENCE_STALE_MS; }
+function vehicleBackoff(interval, failures) { return Math.min(VEHICLE_REFRESH_MAX_MS, interval * 2 ** Math.min(failures, 4)); }
 function trackMapPanel(d, focusId, mode) {
   const track = d.track_map || {};
   const geometry = track.geometry;
@@ -868,6 +903,7 @@ function renderSession(d, resized = false) {
   }
   // Labels are sized in map units for the measured map area; render once more when that area turned out different.
   measureTrackMap();
+  paintedFresh = d.track_map?.vehicles_fresh;
   const changed = (a, b) => Math.abs(a - b) > 0.06 * Math.max(a, b);
   if (!resized && (changed(mapSizeUsed.width, trackMapSize.width) || changed(mapSizeUsed.height, trackMapSize.height))) renderSession(d, true);
 }
@@ -885,6 +921,75 @@ selector.addEventListener('change', () => {
   renderSession(latestData);
   void refreshFuel();
 });
+const nowMs = () => typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+let vehicleHeld = null, vehicleRun = 0, vehicleRunning = false, vehicleTimer = null, vehicleFailures = 0, vehicleInterval = null, paintedFresh = null;
+function applyHeldVehicles(track) {
+  Object.assign(track, { vehicles: vehicleHeld.vehicles, vehicles_age_s: vehicleHeld.age, vehicles_fresh: vehicleHeld.fresh, vehicles_seq: vehicleHeld.seq });
+}
+// Called for every full /live response: keeps the newer of the held and the received positions.
+function reconcileVehicles(d) {
+  const track = d.track_map;
+  const sample = d.live && track && track.static_only !== true ? vehicleSample(track) : null;
+  if (!sample) { vehicleHeld = null; return; }
+  if (acceptVehicles(vehicleHeld, sample)) vehicleHeld = { ...sample, heardAt: nowMs() };
+  else { vehicleHeld.heardAt = nowMs(); applyHeldVehicles(track); }
+}
+function paintVehicles() {
+  const d = latestData, track = d?.track_map;
+  if (!track) return;
+  if (track.vehicles_fresh !== paintedFresh) { renderSession(d); return; }   // badges change: full render, rare
+  const mode = trackOrientation(d.session?.track_name);
+  const parts = trackMapParts(track, focusId, mode, trackRoles(d.participants || [], focusId), trackMapSize);
+  const area = document.querySelector('.map-area');
+  const svg = area?.querySelector?.('svg'), layer = svg?.querySelector?.('#trk-vehicles');
+  if (parts && layer && svg.getAttribute('viewBox') === parts.viewBox) layer.innerHTML = parts.vehicles;
+  else if (area) area.innerHTML = parts ? trackMapSvgOf(parts) : TRACK_MAP_PLACEHOLDER;   // bounds changed: map area only
+}
+function stopVehicleLoop() { vehicleRunning = false; ++vehicleRun; if (vehicleTimer !== null) clearTimeout(vehicleTimer); vehicleTimer = null; }
+function ensureVehicleLoop(d) {
+  const interval = d.live ? vehicleRefreshMs(d.track_map) : null;
+  if (interval === null || document.hidden) { vehicleInterval = interval; stopVehicleLoop(); return; }
+  vehicleInterval = interval;
+  if (!vehicleRunning) { vehicleRunning = true; vehicleFailures = 0; void pollVehicles(++vehicleRun); }
+}
+async function pollVehicles(run) {
+  if (run !== vehicleRun) return;
+  const started = nowMs();
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const abort = setTimeout(() => controller?.abort(), VEHICLE_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/vehicles`, {cache:'no-store', signal: controller?.signal});
+    if (!response.ok) throw new Error('vehicles unavailable');
+    const body = await response.json();
+    if (run !== vehicleRun) return;
+    if (String(body.session_id).toLowerCase() !== String(sessionId).toLowerCase()) throw new Error('wrong session');
+    vehicleFailures = 0;
+    if (body.live === true && latestData?.track_map && latestData.track_map.static_only !== true) {
+      const sample = vehicleSample(body);
+      if (vehicleHeld) vehicleHeld.heardAt = nowMs();
+      if (acceptVehicles(vehicleHeld, sample)) {
+        vehicleHeld = { ...sample, heardAt: nowMs() };
+        applyHeldVehicles(latestData.track_map);
+        paintVehicles();
+      }
+    }
+  } catch {
+    if (run !== vehicleRun) return;
+    ++vehicleFailures;
+    if (vehiclesGoneStale(vehicleHeld, nowMs()) && latestData?.track_map) {
+      vehicleHeld.fresh = false;
+      applyHeldVehicles(latestData.track_map);
+      paintVehicles();
+    }
+  } finally {
+    clearTimeout(abort);
+    if (run === vehicleRun) vehicleTimer = setTimeout(() => { vehicleTimer = null; void pollVehicles(run); },
+      Math.max(0, vehicleBackoff(vehicleInterval ?? 250, vehicleFailures) - (nowMs() - started)));
+  }
+}
+if (typeof document !== 'undefined' && document.addEventListener) document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopVehicleLoop(); else if (latestData) ensureVehicleLoop(latestData);
+});
 async function refresh() {
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/live`, {cache:'no-store'});
@@ -897,9 +1002,11 @@ async function refresh() {
     } else {
       focusId = resolveFocus(d.participants, focusId);
     }
+    reconcileVehicles(d);
     latestData = d;
     syncFocusURL();
     renderSession(d);
+    ensureVehicleLoop(d);
     await refreshFuel();
   } catch (error) {
     document.querySelector('#root').textContent = error.message;

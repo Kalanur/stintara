@@ -22,7 +22,39 @@ LMU-specific interpretation lives in `agent/pitwall.py`.
 `vehicles` (position, pit flag, participant id), `vehicles_age_s`/`vehicles_fresh` (5 s) and `race_control`
 (with `age_s`/`fresh`, 5 s). Vehicles and race control are held in bounded runtime memory per agent and are never
 written to PostgreSQL. `geometry.source` is `learned` or `stored`; `static_only: true` marks a session without a fresh
-observation whose payload contains the persisted geometry only (no vehicles, no race control).
+observation whose payload contains the persisted geometry only (no vehicles, no race control). A live `track_map`
+additionally carries `vehicles_seq`, `server_epoch` and `vehicle_refresh_ms` (see "Vehicles-only refresh").
+
+## Vehicles-only refresh (#55)
+
+`GET /api/sessions/{id}/vehicles` returns only the moving layer: `session_id`, `live`, `seq`, `server_epoch`, `vehicles`
+(same objects as `track_map.vehicles`: `participant_id`, `x`, `z`, `in_pits`, `position`, `name`), `vehicles_age_s`
+(3 decimals) and `vehicles_fresh` (5 s). The browser polls it every `track_map.vehicle_refresh_ms` (250 ms, clamped to
+100–2000 ms client-side) next to the unchanged 500 ms `/live` poll. Design rules:
+
+- **No PostgreSQL per poll.** The endpoint reads the same in-memory runtime state as `track_map`. `participant_id` comes from
+  a per-agent identity cache (`participant_index`: local vehicle id → participant id and stored display name) that is filled
+  from the `RETURNING` clause of the existing participant upsert, i.e. at the existing persistence cadence and with no extra
+  query. The cache is tagged with its session id, dropped on a session switch and ignored for any other session. A vehicle
+  without a cached participant keeps `participant_id: null`; nothing is matched by display name.
+- **Same exposure as `/live`.** The repository has no viewer authentication; the endpoint is exactly as public as the
+  `track_map` already served by `/live` and adds no new data. No agent, WebSocket or database protocol changed.
+- **Session scope.** Only a fresh (< 15 s) runtime observation of exactly the requested session answers with positions
+  (newest observation wins, as in `/live`). Historical, unknown or idle sessions answer `{"live": false, "vehicles": []}`
+  (HTTP 200, so the endpoint is no existence oracle); stored tracks never get positions.
+- **Ordering.** Every scoring frame receives a process-wide `scoring_seq`; `server_epoch` changes on every server start. The
+  page replaces held positions only with a newer `seq` of the same epoch (or any sample of a new epoch, or a changed freshness
+  of the same sample). The full `/live` payload carries the same pair, so a slow `/live` response can never overwrite newer
+  vehicles, and late answers of a stopped run, of another session or with `live: false` are dropped.
+- **Degradation.** One request in flight, 1.5 s time-out, exponential back-off (cadence × 2ⁿ, capped at 2 s), positions are
+  marked stale after 5 s without any valid answer (browser clock only), the loop stops while the tab is hidden and resumes
+  on `visibilitychange`, and it only runs for a live session whose `track_map` advertises `vehicle_refresh_ms`. An older
+  server (no advertisement) keeps the previous behaviour.
+- **Vehicle layer only.** The SVG is built from two parts, geometry and `<g id="trk-vehicles">`. A vehicles response
+  replaces only that group; the dashboard is not rebuilt. If the view box would change (vehicles outside the learned
+  bounds, learning geometry) only the map area is replaced; a freshness change renders the page once to update badges.
+- Not changed: geometry persistence, Race Control semantics, P labels and sector ticks (they are drawn by the same code in the
+  vehicle layer), Strategy and Driver Live. No interpolation, no WebSocket, no schema change.
 
 ## Geometry learning rules (`server/app/trackmap.py`)
 
@@ -163,6 +195,64 @@ Interpretation: browser polling is likely a major source of visible stepwise mot
 data does not yet establish true end-to-end or remote latency. Interpolating between 5 Hz samples would not solve the
 slow browser refresh by itself. A separate, faster vehicles-only refresh (or push) is the next experiment; re-measure
 with map-specific instrumentation before claiming a quantified improvement. No interpolation was implemented.
+
+### Map-specific probe and before/after measurement (#55)
+
+The probe now also reads the *drawn* positions: a `MutationObserver` compares the first dots of `.map-area` after every
+mutation and counts only real position changes (other dashboard updates are ignored), plus the next animation frame.
+`map.age_at_random_instant_ms` is sampled every 5 ms over the run: for a viewer looking at the map at instant τ the displayed
+data is the newest painted step before τ; its age is the server-reported `vehicles_age_s` (a duration) plus the browser time
+elapsed since that response arrived (same-clock difference). Options: `--warmup <s>` (excluded), `--viewport WxH`,
+`--latency <ms>` (DevTools network emulation, not a real network) and `--legacy`, which hides `vehicle_refresh_ms` from the page
+so the *same* server and session are measured with the old full-`/live`-only behaviour (before) and with the vehicles
+refresh (after). `python -m tools.replay.scenarios latency-probe-40` produces the 40-vehicle field.
+`node tools/trackmap_load.cjs --viewers N --endpoint vehicles|live` is the multi-viewer load generator.
+
+Method: Chrome 156 headless, one Windows machine (browser, server, PostgreSQL 17 container and replay on the same host,
+loopback), the synthetic 40-vehicle scenario (14 Hz source, about 4.7 Hz forwarded by the 0.2 s agent throttle), 30 s window after a
+6 s warm-up, runs of both modes interleaved. Median across runs of the per-run values (p95 and max are per run first).
+
+| 1920×911, 5 pairs | before (`/live` only) | after (+ vehicles 250 ms) |
+| --- | --- | --- |
+| drawn position updates per second | 1.8 | 3.7 |
+| interval between drawn steps p50 / p95 | 555 / 595 ms | 250 / 500 ms |
+| age at the paint p50 / p95 | 192 / 307 ms | 118 / 232 ms |
+| **age at a random viewing instant p50 / p95** | **476 / 772 ms** | **259 / 472 ms** |
+| age at a random instant, worst run max | 908 ms | 1003 ms (source jitter, below) |
+| fetch time p50 / p95 (the polled endpoint) | 9.2 / 29 ms (`/live`) | 3.5 / 8.8 ms (`/vehicles`) |
+| payload, 40 vehicles | 39.9 KB `/live` | 5.4 KB `/vehicles` |
+
+Other conditions (2 pairs each): 2560×1271: age at a random instant p50/p95 484/781 ms before, 248/421 ms after; drawn updates
+1.5 → 3.8 per second. With 40 ms added request latency: 507/829 ms before, 264/446 ms after (step interval 654 → 250 ms).
+The 2560×1271 "before" series contains one run with a source stall of 2.3 s, so its p95 is not repeatable.
+
+Server load (20 s windows, 40 vehicles, replay ingest running; PostgreSQL transactions from `pg_stat_database`, server CPU from
+the server process): ingest alone 90 transactions and 0.34 s CPU.
+
+| polled endpoint | req/s | response p50 / p95 | DB transactions | server CPU |
+| --- | --- | --- | --- | --- |
+| `/vehicles` × 1 @250 ms | 3.9 | 3.5 / 7 ms | 88 | 0.72 s |
+| `/vehicles` × 10 | 39 | 4.8 / 15.8 ms | 97 | 1.92 s |
+| `/vehicles` × 25 | 97.6 | 15.8 / 47.3 ms | 86 | 4.25 s |
+| `/vehicles` × 50 | 194.9 | 35.4 / 101 ms | 82 | 6.70 s |
+| `/live` × 10 @500 ms (today) | 19.8 | 9.7 / 37.5 ms | 1226 | 2.22 s |
+| `/live` × 25 @500 ms (today) | 49.1 | 17.8 / 42.7 ms | 2986 | 3.80 s |
+| `/live` × 10 @250 ms (the naive alternative) | 38.5 | 23.5 / 70.2 ms | 2452 | 3.25 s |
+
+`/vehicles` adds no PostgreSQL transactions at any viewer count (82–97 against a baseline of 90, i.e. noise), costs about
+1.6–2 ms of server CPU per request here, and a `/live` request costs about three transactions. Polling `/live` four times a
+second instead would have multiplied the database load by about 4×.
+
+Limitations of these numbers: synthetic data and a single local machine, no run on the operator network; the latency emulation adds a fixed
+delay only (no jitter, loss or bandwidth limit); the server age is a server-side duration, so Agent/Pitwall capture-to-server
+transfer, the display compositor and the monitor are not included and `requestAnimationFrame` remains a proxy for paint; the
+replay source itself stalled in some runs (server age spikes up to 8 s in an earlier, discarded series of three pairs, and still
+0.75–0.85 s in three of the five reported "after" runs), which affects both modes but can inflate a single run's maximum; the
+forwarded source rate (about 4.7 Hz) is the floor, and drawn updates stay slightly below it because two frames can fall into one
+250 ms poll; the absolute CPU numbers belong to this machine and say nothing about Unraid. In a real-browser check (CDP, same
+session) neither viewport scrolled, 40 vehicles plus the focus/rival rings were drawn and one vehicle-layer update took
+0.4–0.5 ms for 40 cars. The Playwright viewport check (`tools/engineer_demo.cjs --viewports`) could not be run because
+Playwright is not installed here.
 
 ## Known limitations
 
