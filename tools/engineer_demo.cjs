@@ -293,6 +293,7 @@ async function verifyViewports(channel) {
         .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
         .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
       const page=await browser.newPage({viewport:{width:1920,height:911},reducedMotion:'reduce'});
+      try {
       await page.addInitScript(({epoch,sid,pid})=>{Date.now=()=>Date.parse(epoch);
         localStorage.setItem(`stintara:strategy:v1:${sid}:${pid}`,'32');},{epoch,sid:demo.data.session.id,pid:demo.focus});
       await page.route('**/*',route=>route.fulfill(route.request().url().includes('/api/') ?
@@ -376,7 +377,13 @@ async function verifyViewports(channel) {
         assert.match(await page.locator('#orientation-toggle').innerText(),/ORIGINAL/,'per-track choice persists across reloads');
         await page.locator('#orientation-toggle').click();
       }
-      await page.close();
+      } catch (error) {
+        // A failure on the first viewport must still leave a useful artifact for GitHub Actions.
+        await page.screenshot({path:path.join(output,`engineer-v02-failure-${scenario}.png`),fullPage:true}).catch(() => {});
+        throw error;
+      } finally {
+        await page.close();
+      }
     }
   } finally { await browser.close(); }
 }

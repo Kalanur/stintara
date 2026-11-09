@@ -52,8 +52,34 @@ jobs:
           export BOOTSTRAP_AGENT_TOKEN="$(openssl rand -hex 24)"
           docker compose config --quiet
 
+  engineer-browser:
+    # Real Chromium checks of the synthetic Engineer dashboard. No live server, captures, or secrets.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install pinned Playwright and Chromium
+        run: |
+          npm install --no-save --ignore-scripts --no-package-lock playwright@1.65.0
+          npx playwright install --with-deps chromium
+      - name: Check real-browser engineer viewports
+        run: node tools/engineer_demo.cjs --viewports
+      - name: Upload synthetic browser diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engineer-browser-diagnostics
+          path: build/engineer-v02-*.png
+          if-no-files-found: warn
+          retention-days: 5
+
   docker:
-    needs: test
+    needs: [test, engineer-browser]
     # Only PRs and explicitly allowed publication refs build an image.
     if: >-
       github.event_name == 'pull_request' ||
