@@ -117,7 +117,9 @@ def finite_number(value):
 
 def tyre_sensors_present(wheels):
     """True when at least one wheel carries a real sensor value (the only evidence of real tyre telemetry)."""
-    return any(finite_number(w.get(k)) for w in wheels or [] if isinstance(w, dict) for k in SENSOR_KEYS)
+    # A pressure of exactly 0 is also what Pitwall leaves for a flat/detached marker on any car: not evidence.
+    return any(finite_number(w.get(k)) and (k != "pressure" or w[k] > 0)
+               for w in wheels or [] if isinstance(w, dict) for k in SENSOR_KEYS)
 
 
 def wheels_trusted(wheels):

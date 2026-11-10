@@ -17,6 +17,7 @@ from tests.test_convergence import deliver, roster, scoring
 REAL = [dict(remaining=r, temp_inner=80.0, temp_mid=85.0, temp_outer=90.0, pressure=170.0) for r in (.9, .8, .85, .75)]
 PLACEHOLDER = [dict(remaining=1.0)] * 4
 clock = iter(range(1000, 100000))
+EPOCH = "pitwall-connection-1"
 
 
 def checkpoint(car, lap=5, wheels=REAL, fuel=(41.5, 100.0), telemetry=True, lap_time=90.5, stops=1, **extra):
@@ -27,24 +28,24 @@ def checkpoint(car, lap=5, wheels=REAL, fuel=(41.5, 100.0), telemetry=True, lap_
     return dict(session_type="Race", session_time=100, drivers=[snap])
 
 
-async def send(agent, payload):
+async def send(agent, payload, epoch=EPOCH):
     # The envelope clock must match the agent's scoring clock (server-side 5 s plausibility check).
     payload["session_time"] = main.runtime[str(agent["id"])]["scoring"]["session_time"]
-    await main.handle_message(agent, "lmu", "lap_snapshots", payload)
+    await main.handle_message(agent, "lmu", "lap_snapshots", payload, epoch)
 
 
-async def frame(agent, player, laps):
+async def frame(agent, player, laps, epoch=EPOCH, session_clock=None):
     """One scoring frame of the agent whose player car (and only that car) has completed `laps` laps."""
-    payload = scoring(roster(), kind="Race", player=player, clock=next(clock))
+    payload = scoring(roster(), kind="Race", player=player, clock=next(clock) if session_clock is None else session_clock)
     for vehicle in payload["vehicles"]:
         vehicle["total_laps"] = laps if vehicle["id"] == player else 0
-    await main.handle_message(agent, "lmu", "scoring", payload)
+    await main.handle_message(agent, "lmu", "scoring", payload, epoch)
 
 
-async def start_lap(agent, player, lap):
+async def start_lap(agent, player, lap, epoch=EPOCH):
     """The agent watches its car cross into `lap` (lap-1 -> lap completed laps)."""
-    await frame(agent, player, lap - 1)
-    await frame(agent, player, lap)
+    await frame(agent, player, lap - 1, epoch)
+    await frame(agent, player, lap, epoch)
 
 
 async def field(db, track="Synthetic Circuit"):
@@ -298,7 +299,7 @@ async def test_stale_player_vehicle_id_cannot_turn_foreign_placeholders_into_own
     agent = await make_agent(db, "stale-owner")
     sid = await deliver(agent, scoring(roster(), kind="Race", player=1, clock=100))
     main.runtime[str(agent["id"])].pop("last_persisted_scoring")      # production persists identity at 1 Hz
-    await main.handle_message(agent, "lmu", "scoring", scoring(roster(), kind="Race", player=0, clock=101))
+    await main.handle_message(agent, "lmu", "scoring", scoring(roster(), kind="Race", player=0, clock=101), EPOCH)
     async with db.acquire() as conn:   # the existing COALESCE mapping keeps the stale slot: two slots, one driver
         owned = {r["local_vehicle_id"] for r in await conn.fetch(
             "SELECT local_vehicle_id FROM session_participants WHERE driver_id=$1", agent["driver_id"])}
@@ -310,9 +311,10 @@ async def test_stale_player_vehicle_id_cannot_turn_foreign_placeholders_into_own
     for lap in (5, 6):
         assert_unknown(await lap_row(db, sid, 1, lap))
     assert await flag(db, sid, 1) is False
-    # The real own car still works (complete real tyres are the proof of ownership).
+    # The driver maps to two slots: every own-car claim is ambiguous, so nothing is accepted for either (fail closed).
     await send(agent, checkpoint(0))
-    assert_owner_values(await lap_row(db, sid, 0))
+    assert_unknown(await lap_row(db, sid, 0))
+    assert await flag(db, sid, 0) is False
     # The correct driver of slot 1 cannot take the slot over: the existing identity rules refuse a different
     # driver on a resolved slot (no session is resolved for that agent). Re-assigning participants would be an
     # identity decision, deliberately not made here (docs/ARCHITECTURE.md).
@@ -392,3 +394,116 @@ async def test_a_failure_between_insert_and_completion_is_repaired_by_the_next_c
     monkeypatch.setattr(main, "complete_lap_sensors", real)
     await send(owner, checkpoint(0))                                       # Pitwall repeats the frozen snapshot
     assert_owner_values(await lap_row(db, sid, 0))
+
+
+# ---- Pitwall connection generation (source_epoch), session binding, flag contract ----------------------------------
+
+async def test_pitwall_restart_within_five_seconds_invalidates_the_observed_crossing(db):
+    owner, observer, sid = await field(db)
+    await start_lap(owner, 0, 5)                                    # crossing 4 -> 5 watched on generation 1
+    # The Pitwall socket reconnects (new epoch) while the uplink stays up; the first-seen snapshot repeats lap 5
+    # with the same time, sectors and stops but later readings.
+    await send(owner, checkpoint(0, fuel=(17.0, 100.0)), epoch="pitwall-connection-2")
+    assert_unknown(await lap_row(db, sid, 0))
+    assert await flag(db, sid, 0) is False
+    await frame(owner, 0, 5, epoch="pitwall-connection-2")          # scoring of the new generation, no crossing yet
+    await send(owner, checkpoint(0, fuel=(17.0, 100.0)), epoch="pitwall-connection-2")
+    assert_unknown(await lap_row(db, sid, 0))
+    await start_lap(owner, 0, 6, epoch="pitwall-connection-2")      # a genuine crossing on the new generation
+    await send(owner, checkpoint(0, lap=6), epoch="pitwall-connection-2")
+    assert_owner_values(await lap_row(db, sid, 0, 6))
+
+
+async def test_new_epoch_does_not_combine_old_tyres_with_new_fuel(db):
+    owner, observer, sid = await field(db)
+    await start_lap(owner, 0, 5)
+    await send(owner, checkpoint(0, fuel=None))                     # tyres only (fuel absent)
+    assert (await lap_row(db, sid, 0))["fuel_remaining_l"] is None
+    await send(owner, checkpoint(0, fuel=(17.0, 100.0)), epoch="pitwall-connection-2")
+    row = await lap_row(db, sid, 0)
+    assert row["fuel_remaining_l"] is None and row["tyre_remaining_fl"] == pytest.approx(.9)
+
+
+async def test_epoch_announced_by_a_snapshot_first_still_forgets_the_scoring_evidence(db):
+    owner, observer, sid = await field(db)
+    await start_lap(owner, 0, 5)
+    await send(owner, checkpoint(0, lap=9), epoch="pitwall-connection-2")
+    await send(owner, checkpoint(0), epoch=EPOCH)                   # an old generation cannot come back
+    assert_unknown(await lap_row(db, sid, 0))
+
+
+async def test_agents_without_a_source_epoch_keep_scoring_but_get_no_sensor_provenance(db):
+    owner, observer, sid = await field(db)
+    await start_lap(owner, 0, 5, epoch=None)
+    await send(owner, checkpoint(0), epoch=None)
+    row = await lap_row(db, sid, 0)
+    assert_unknown(row)
+    assert (row["lap_time"], row["sector1"], row["position"], row["compound_front"]) == (90.5, 30.0, 1, "Medium")
+    assert main.runtime[str(owner["id"])]["scoring"]["vehicles"], "live scoring is unaffected"
+    assert await flag(db, sid, 0) is False
+
+
+async def test_a_scoring_frame_of_the_previous_session_never_confirms_a_crossing_in_the_next(db):
+    owner = await make_agent(db, "switcher")
+    first = await deliver(owner, scoring(roster(), kind="Race", player=0, clock=500), track="Track A")
+    await frame(owner, 0, 4, session_clock=500)                     # lap 4 in session A, generation EPOCH
+    await main.handle_message(owner, "lmu", "session_info", {"track_name": "Track B"})
+    other = roster()
+    for vehicle in other:
+        vehicle["driver_name"] = vehicle["driver_name"] + " B"      # a different race: rosters do not converge
+    payload = scoring(other, kind="Race", player=0, clock=501)
+    for vehicle in payload["vehicles"]:
+        vehicle["total_laps"] = 5 if vehicle["id"] == 0 else 0
+    await main.handle_message(owner, "lmu", "scoring", payload, EPOCH)
+    state = main.runtime[str(owner["id"])]
+    assert state["session_id"] != first
+    assert state.get("lap_crossings", {}) == {}, "4 -> 5 across two sessions is not a crossing"
+    await send(owner, checkpoint(0, lap=5, fuel=(22.0, 100.0)))
+    assert_unknown(await lap_row(db, state["session_id"], 0, 5))
+
+
+async def test_a_rejected_checkpoint_never_sets_the_participant_flag(db):
+    owner, observer, sid = await field(db)
+    await start_lap(owner, 0, 5)
+    await send(observer, checkpoint(0, wheels=PLACEHOLDER, fuel=(50.0, 100.0)))     # row 5 / 90.5 s
+    await send(owner, checkpoint(0, lap_time=92.0))                                 # contradicting, otherwise valid
+    row = await lap_row(db, sid, 0)
+    assert_unknown(row)
+    assert row["lap_time"] == 90.5
+    assert await flag(db, sid, 0) is False
+    await send(owner, checkpoint(0))                                                # the compatible one is accepted
+    assert await flag(db, sid, 0) is True
+
+
+async def test_repeated_identical_owner_checkpoint_is_idempotent(db):
+    owner, observer, sid = await field(db)
+    await start_lap(owner, 0, 5)
+    for _ in range(3):
+        await send(owner, checkpoint(0))
+    assert_owner_values(await lap_row(db, sid, 0))
+    assert await flag(db, sid, 0) is True
+
+
+async def test_different_valid_owner_payloads_behind_one_held_row_lock_keep_one_consistent_row(db):
+    owner, observer, sid = await field(db)
+    await start_lap(owner, 0, 5)
+    await send(observer, checkpoint(0, wheels=PLACEHOLDER))
+    other_tyres = [dict(remaining=r, temp_inner=70.0, temp_mid=75.0, temp_outer=80.0, pressure=160.0)
+                   for r in (.5, .6, .55, .65)]
+    async with db.acquire() as holder:
+        transaction = holder.transaction()
+        await transaction.start()
+        await holder.fetchrow("SELECT 1 FROM laps WHERE lap_number=5 FOR UPDATE")
+        a = asyncio.create_task(send(owner, checkpoint(0)))
+        b = asyncio.create_task(send(owner, checkpoint(0, wheels=other_tyres, fuel=(33.0, 90.0))))
+        await asyncio.sleep(.3)
+        assert not (a.done() and b.done())
+        await transaction.commit()
+    await asyncio.gather(a, b)
+    row = await lap_row(db, sid, 0)
+    tyres = [row[f"tyre_remaining_{c}"] for c in ("fl", "fr", "rl", "rr")]
+    fuel = (row["fuel_remaining_l"], row["fuel_capacity_l"])
+    first = tyres == pytest.approx([.9, .8, .85, .75]) and fuel == (41.5, 100.0)
+    second = tyres == pytest.approx([.5, .6, .55, .65]) and fuel == (33.0, 90.0)
+    assert first or second, "one complete, internally consistent set; never a mixture of the two payloads"
+    assert json.loads(row["tyre_snapshot"])[0]["remaining"] == pytest.approx(tyres[0])

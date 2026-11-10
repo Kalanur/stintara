@@ -3,6 +3,11 @@
 The Agent is versioned independently of the Stintara server. Releases are tagged
 `agent-vX.Y.Z`. The wire protocol is `stintara-agent-v1` for all versions below.
 
+## Unreleased
+
+- Adds `source_epoch` (random per Pitwall socket connection) to the envelope of every forwarded message, so the server can tell a Pitwall restart from a continuous stream (#59). Payloads and the protocol name `stintara-agent-v1` are unchanged.
+- Compatibility: old servers ignore the key. A server with this change treats lap tyre/fuel data of agents without this field as unverified (stored as unknown); update the server first, then the agents.
+
 ## 0.2.0
 
 First Track Map / Race Control agent.

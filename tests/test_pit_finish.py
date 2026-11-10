@@ -109,12 +109,12 @@ async def test_full_field_sectors_tyre_and_damage_live_and_from_checkpoint(db):
     # The agent watched the car start this lap (27 -> 28), so its checkpoint is a crossing snapshot (#59).
     for laps in (27, 28):
         await main.handle_message(agent, "lmu", "scoring", {**scoring, "session_time": 100 + laps - 27,
-            "vehicles": [{**scoring["vehicles"][0], "total_laps": laps}]})
+            "vehicles": [{**scoring["vehicles"][0], "total_laps": laps}]}, "pitwall-connection-1")
     payload = LapSnapshots.model_validate(dict(session_type="Race", session_time=100, drivers=[dict(
         id=7, total_laps=28, last_lap_time=122.9, last_sector1=36.9, last_sector2=50.6, last_sector3=35.4,
         has_telemetry=True, tire_compound_front_name="Medium", wheels=wheels,
         damage={"dent_severity": [0, 1, 0, 0, 1, 0, 0, 0]})])).model_dump()
-    await main.handle_message(agent, "lmu", "lap_snapshots", payload)
+    await main.handle_message(agent, "lmu", "lap_snapshots", payload, "pitwall-connection-1")
     p = (await main.api_session_live(sid))["participants"][0]
     assert (p["sector1"], p["sector2"], p["sector3"]) == (36.9, 50.6, 35.4)
     assert (p["tyre_compound"], p["tyre_remaining_min"], p["damage_regions"], p["damage_max"]) == ("Medium", 0.7, 2, 1)

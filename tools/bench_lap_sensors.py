@@ -24,6 +24,7 @@ from tests.test_convergence import roster, scoring
 
 WHEELS = [dict(remaining=.9, temp_inner=80.0, temp_mid=85.0, temp_outer=90.0, pressure=170.0)] * 4
 PLACEHOLDER = [dict(remaining=1.0)] * 4
+EPOCH = "bench-pitwall-connection"
 
 
 def payload(laps, wheels_for_car0, clock):
@@ -59,7 +60,7 @@ async def watch(owner, lap, clock):
         frame = scoring(roster(), kind="Race", player=0, clock=clock)
         for vehicle in frame["vehicles"]:
             vehicle["total_laps"] = laps if vehicle["id"] == 0 else 0
-        await main.handle_message(owner, "lmu", "scoring", frame)
+        await main.handle_message(owner, "lmu", "scoring", frame, EPOCH)
 
 
 async def run():
@@ -84,7 +85,7 @@ async def run():
         async def first_insert(i):
             await watch(owner, i + 1, clock)
             started = time.perf_counter()
-            await main.store_lap_snapshots(owner, sid, payload(i + 1, WHEELS, clock))
+            await main.store_lap_snapshots(owner, sid, payload(i + 1, WHEELS, clock), EPOCH)
             return time.perf_counter() - started
 
         # first_insert times only the store call (the scoring frames of `watch` are not part of the measurement).
@@ -95,8 +96,8 @@ async def run():
         print(f"{'first_insert':16} median {statistics.median(samples):6.2f}  p95 {samples[int(len(samples) * .95)]:6.2f}  "
               f"max {samples[-1]:6.2f} ms")
         last = total
-        await measure("repeat_owner", lambda i: main.store_lap_snapshots(owner, sid, payload(last, WHEELS, clock)))
-        await measure("repeat_observer", lambda i: main.store_lap_snapshots(observer, sid, payload(last, PLACEHOLDER, clock)))
+        await measure("repeat_owner", lambda i: main.store_lap_snapshots(owner, sid, payload(last, WHEELS, clock), EPOCH))
+        await measure("repeat_observer", lambda i: main.store_lap_snapshots(observer, sid, payload(last, PLACEHOLDER, clock), EPOCH))
         async with main.pool.acquire() as conn:
             await conn.execute("""UPDATE laps SET tyre_snapshot=NULL,tyre_remaining_fl=NULL,tyre_remaining_fr=NULL,
                 tyre_remaining_rl=NULL,tyre_remaining_rr=NULL,fuel_remaining_l=NULL,fuel_capacity_l=NULL""")
@@ -107,7 +108,7 @@ async def run():
             async with main.pool.acquire() as conn:   # re-open the row so every iteration performs a real completion
                 await conn.execute("""UPDATE laps SET tyre_snapshot=NULL,fuel_remaining_l=NULL,fuel_capacity_l=NULL
                     WHERE lap_number=$1""", last)
-            await main.store_lap_snapshots(owner, sid, payload(last, WHEELS, clock))
+            await main.store_lap_snapshots(owner, sid, payload(last, WHEELS, clock), EPOCH)
         await measure("complete_owner", complete)
     finally:
         await main.pool.close()

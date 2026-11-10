@@ -126,6 +126,10 @@ async def test_compiled_replay_real_ingest_database_and_fuel(db, unused_tcp_port
         config = AgentConfig(f"ws://127.0.0.1:{unused_tcp_port}/ws/ingest", "test-token-one")
         # Exercise handshake + actual compiled messages; no production-clock bypass.
         _, rows, _ = compile_capture(*scenario())
+        # Compiled files carry no Pitwall connection generation (they behave like an agent without `source_epoch`
+        # and get no lap sensor provenance); this test replays them as one continuous connection of a current agent.
+        for row in rows:
+            row["message"]["source_epoch"] = "replay-connection"
         async with websockets.connect(config.server_ws, proxy=None) as socket:
             await replay(socket, config, rows, immediate=True)
             async with asyncio.timeout(10):

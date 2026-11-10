@@ -110,7 +110,7 @@ def test_invalid_provider_payload_is_dropped_then_valid_frame_processed(ingest_c
             ws.receive_json()
         assert exc.value.code == 1008
     assert handler.await_count == 1
-    assert handler.call_args.args[2:] == ("telemetry", main.PAYLOADS["telemetry"](fuel=42).model_dump())
+    assert handler.call_args.args[2:4] == ("telemetry", main.PAYLOADS["telemetry"](fuel=42).model_dump())
     logs = [json.loads(r.message) for r in caplog.records if r.name == "stintara.ingest"]
     assert logs[0]["agent_id"] == "test-agent" and logs[0]["message_type"] == kind
     assert logs[0]["error_class"] == "ValidationError" and logs[0]["validation"]
@@ -437,3 +437,55 @@ async def test_bridge_reconnects_after_clean_close(monkeypatch):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+
+
+async def test_every_pitwall_connection_gets_its_own_source_epoch_on_the_same_uplink():
+    """The Stintara uplink stays up across Pitwall reconnects; the generation must change (#59)."""
+    sent = []
+    connections = 0
+    done = asyncio.Event()
+
+    async def source(socket):
+        nonlocal connections
+        connections += 1
+        await socket.send(json.dumps({"type": "SessionInfo", "track_name": "Imola"}))
+        await socket.send(json.dumps({"type": "ScoringUpdate", "session_type": "Race", "vehicles": []}))
+        await socket.close()
+
+    class Uplink:
+        async def send(self, raw):
+            sent.append(json.loads(raw))
+            if connections >= 3 and len(sent) >= 6:
+                done.set()
+
+    async with websockets.serve(source, "127.0.0.1", 0) as server:
+        config = AgentConfig("ws://localhost", "test-secret", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
+        task = asyncio.create_task(stintara_agent.bridge(Uplink(), config))
+        try:
+            await asyncio.wait_for(done.wait(), timeout=10)
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+    epochs = [m["source_epoch"] for m in sent]
+    assert all(isinstance(e, str) and len(e) >= 8 for e in epochs)
+    assert epochs[0] == epochs[1] and epochs[2] == epochs[3] and epochs[4] == epochs[5], "one epoch per connection"
+    assert len({epochs[0], epochs[2], epochs[4]}) == 3, "a new Pitwall connection is a new generation"
+    assert set(sent[0]) == {"protocol", "message_type", "payload", "source_epoch"}
+
+
+@pytest.mark.parametrize("sent,expected", [("pitwall-gen_1", "pitwall-gen_1"), (None, None), ("short", None),
+                                           ("has space in it", None), ("x" * 65, None), (12345678, None)])
+def test_server_takes_the_source_epoch_from_the_envelope_and_ignores_malformed_values(ingest_client, sent, expected):
+    client, handler = ingest_client
+    with client.websocket_connect("/ws/ingest") as ws:
+        hello(ws)
+        assert ws.receive_json()["type"] == "agent_welcome"
+        message = {"protocol": "stintara-agent-v1", "message_type": "telemetry", "payload": {"fuel": 42}}
+        if sent is not None:
+            message["source_epoch"] = sent
+        ws.send_json(message)
+        frame(ws, protocol="invalid-test-protocol")
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+    assert handler.await_args_list[0].args[4] == expected

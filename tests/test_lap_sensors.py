@@ -45,7 +45,16 @@ def test_incomplete_or_unproven_tyres_are_never_trusted(wheels):
 def test_complete_real_tyres_are_trusted_by_display_and_persistence_alike():
     assert wheels_trusted(REAL) and stored_wheels_trusted(json.dumps(REAL))
     assert field_status("Medium", REAL, None)["tyre_remaining_min"] == .75
-    assert wheels_trusted([dict(remaining=0.0, pressure=0.0)] * 4), "0.0 remaining and a measured 0 kPa are real values"
+    assert wheels_trusted([dict(remaining=0.0, pressure=170.0)] * 4), "0.0 remaining is a real value"
+
+
+@pytest.mark.parametrize("wheel", [dict(remaining=1.0, pressure=0.0, flat=True), dict(remaining=1.0, pressure=0.0, detached=True),
+                                   dict(remaining=1.0, pressure=0.0, temp_inner=None, temp_mid=None, temp_outer=None)])
+def test_zero_pressure_with_a_damage_marker_is_not_ownership_evidence(wheel):
+    wheels = [wheel] * 4
+    assert not wheels_trusted(wheels)
+    assert accepted_sensors(snapshot(wheels=wheels, fuel_remaining=50.0), True, True) == {"wheels": None, "fuel": None}
+    assert wheels_trusted([dict(wheel, temp_mid=85.0)] * 4), "a real temperature still proves a sensor"
 
 
 def test_acceptance_needs_owner_crossing_flag_and_real_tyres():
