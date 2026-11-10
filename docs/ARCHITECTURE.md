@@ -297,3 +297,20 @@ There is no red: the provider reports no lap validity, so no invalid-lap rule is
 Tyre and damage use the live snapshot while it is under 30 s old, otherwise the last completed-lap checkpoint. They are never persisted beyond the existing lap rows.
 
 Known data limits: `ScoringUpdate` also carries live `cur_sector*`, but those are not used. `best_sector3` looks unreliable, and `best_sector*` is unused. The replay compiler accepts `race_control` (PR #51), so `VehicleStatusUpdate` captures compile unchanged.
+
+## Driver Live V2, work package 2 (implemented; synthetic and replay-free verification only)
+
+`/api/drivers/{slug}/live` gains one additive top-level field, `focus`, for the unique own participant of the followed driver (`null` when the own participant is missing or ambiguous; every existing field is unchanged). It is built by `server/app/driver_live.py` from data the endpoint already holds plus **one** extra read: the own participant's last stored completed lap (lap number, lap time, S1/S2/S3) and last pit lap, via the unique `(session_participant_id, lap_number)` index. The heavy session endpoint is not polled and no migration or protocol field is involved.
+
+| Field | Source and rule |
+|---|---|
+| `status` | `PIT`/`TRACK`/`FIN`/`DNF`/`DSQ` with the semantics of `participantStatus`; unknown codes or a missing pit flag give `null` |
+| `position`, `gap_to_leader`, `gap_laps`, `interval` | the existing conservative `project_timing` semantics, computed on copies |
+| `completed_laps`, `current_lap` | live scoring total; `current_lap` = completed + 1 only while `finish_status == 0`, else `null` |
+| `last_lap`, `last_lap_number`, `last_lap_time` | `last_lap_number`/`last_lap_time` are the live scoring's last completed lap (one frame, always a pair). `last_lap` (number, time, `sector1..3`) is the stored `laps` row and is present **only** when its lap number equals the scoring's completed laps and, when both times are known, the times agree within 5 ms; otherwise it is `null` and no sectors are claimed. This covers scoring ahead of or behind the persisted checkpoint. Non-positive or non-finite sectors become `null` |
+| `best_lap_time`, `pitstops` | live scoring / participant counters, unknown as `null` |
+| `last_pit_lap` | The stored checkpoint (completed-lap snapshot) with the highest lap number whose stop counter is **greater than every earlier stored counter**; i.e. the first checkpoint seen after the latest increase. It is not pit entry/exit: a missing checkpoint delays it to the next stored lap, and a counter already above zero at the first stored checkpoint has no baseline and is not detected. Reported only while the live stop counter is > 0, else `null` |
+| `player_sector` | 1-3 only from fresh race control (≤ 5 s) and scoring (≤ 1 s) of this driver's **own** agent in exactly this session, whose player vehicle is the tracked own participant and which is not in the pits; several own observations must agree. Never from a spectating agent of another driver |
+| `live_age_s` | age of the newest scoring of the session; the page treats missing or > 5 s as stale |
+
+Running sector times are not provided (the provider does not deliver reliable current-sector values). Tyre history stays out of scope until the lap tyre snapshot quality issue (#59) is resolved; the root-cause analysis is documented there. `live.html` renders the focus strip (status, position, gap/interval, lap, last/best lap, last-lap sectors, current sector when known), keeps the existing tyre/fuel/weather/standings content, preserves disclosure state, keyboard focus and scroll position across the 500 ms refresh, and is covered by `tests/ui.test.cjs` (vm) and the Chromium gate `tools/driver_live_demo.cjs --viewports` at 1920×911 and 2560×1271 with synthetic fixtures. No real LMU session has verified this view yet.

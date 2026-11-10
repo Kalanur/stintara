@@ -69,12 +69,16 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Check real-browser engineer viewports
         run: node tools/engineer_demo.cjs --viewports
+      - name: Check real-browser Driver Live viewports
+        run: node tools/driver_live_demo.cjs --viewports
       - name: Upload synthetic browser diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: engineer-browser-diagnostics
-          path: build/engineer-v02-*.png
+          path: |
+            build/engineer-v02-*.png
+            build/driver-live-*.png
           if-no-files-found: warn
           retention-days: 5
 
