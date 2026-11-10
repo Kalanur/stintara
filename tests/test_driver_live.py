@@ -65,9 +65,37 @@ def test_focus_block_for_the_unique_own_participant():
     assert (f["participant_id"], f["status"], f["position"]) == ("b", "TRACK", 2)
     assert (f["completed_laps"], f["current_lap"], f["best_lap_time"]) == (5, 6, 89.0)
     assert f["last_lap"] == {"lap_number": 5, "lap_time": 90.0, "sector1": 30.0, "sector2": 31.0, "sector3": None}
+    assert (f["last_lap_number"], f["last_lap_time"]) == (5, 90.0)
     assert (f["pitstops"], f["last_pit_lap"], f["player_sector"]) == (1, 3, 2)
     assert f["gap_to_leader"] == 8.0 and f["interval"] == 8.0
     assert [p["gap_to_leader"] for p in people] == [0.0, 8.0, 12.0], "existing participant fields stay untouched"
+
+
+def stored(lap, time_=90.0):
+    return {"lap_number": lap, "lap_time": time_, "sector1": 30.0, "sector2": 31.0, "sector3": 29.0, "last_pit_lap": None}
+
+
+def test_sectors_belong_only_to_the_lap_the_scoring_reports():
+    people = [participant("a", 1), participant("b", 2, is_stintara_driver=True, total_laps=6, last_lap_time=91.5)]
+    # Scoring ahead of the stored checkpoint (stored lap 5, scoring says lap 6 completed): no sectors, live time kept.
+    f = focus_block("one", SESSION, people, stored(5), [], 100.0)
+    assert f["last_lap"] is None and (f["last_lap_number"], f["last_lap_time"]) == (6, 91.5)
+    # Scoring behind the stored checkpoint (stored lap 7, scoring still at 6): also none.
+    assert focus_block("one", SESSION, people, stored(7), [], 100.0)["last_lap"] is None
+    # Same lap number but a different time is not the same lap record.
+    assert focus_block("one", SESSION, people, stored(6, 95.0), [], 100.0)["last_lap"] is None
+    # Exact match (within single-precision noise) yields the complete triple.
+    f = focus_block("one", SESSION, people, stored(6, 91.5004), [], 100.0)
+    assert f["last_lap"]["lap_number"] == 6 and f["last_lap"]["sector2"] == 31.0
+    # Unknown live time with a matching lap number: the stored time is used, never mixed with another lap.
+    people[1]["last_lap_time"] = None
+    f = focus_block("one", SESSION, people, stored(6, 91.5), [], 100.0)
+    assert f["last_lap"]["lap_time"] == 91.5 and f["last_lap_time"] is None
+    # No stored lap at all, or no completed lap yet: nothing is claimed.
+    assert focus_block("one", SESSION, people, None, [], 100.0)["last_lap"] is None
+    people[1]["total_laps"] = 0
+    f = focus_block("one", SESSION, people, stored(0), [], 100.0)
+    assert f["last_lap"] is None and f["last_lap_number"] is None
 
 
 def test_focus_unknowns_and_ambiguity_never_invent_values():
@@ -81,7 +109,8 @@ def test_focus_unknowns_and_ambiguity_never_invent_values():
     assert f["live_age_s"] is None
     # last_pit_lap without any recorded stop is not reported; zero/invalid sectors become unknown.
     me = participant("b", 2, is_stintara_driver=True, pitstops=0)
-    f = focus_block("one", SESSION, [me], {"lap_number": 4, "lap_time": 80.0, "sector1": 0, "sector2": -2,
+    me["last_lap_time"] = 80.0
+    f = focus_block("one", SESSION, [me], {"lap_number": 5, "lap_time": 80.0, "sector1": 0, "sector2": -2,
                                           "sector3": float("nan"), "last_pit_lap": 2}, [], now)
     assert f["last_pit_lap"] is None
     assert (f["last_lap"]["sector1"], f["last_lap"]["sector2"], f["last_lap"]["sector3"]) == (None, None, None)
@@ -115,7 +144,14 @@ async def test_api_adds_focus_for_the_own_participant_only_and_keeps_existing_fi
         data = (await client.get(f"/api/drivers/{agent['slug']}/live")).json()
     focus = data["focus"]
     assert focus["participant_id"] == str(mine) and focus["current_lap"] == 2 and focus["status"] == "TRACK"
-    assert focus["last_lap"]["lap_number"] == 4 and focus["last_lap"]["sector3"] == 33.0
+    # Scoring says 1 completed lap while laps 1-4 are stored: the stored lap 4 must not be shown as the last lap.
+    assert focus["last_lap"] is None and focus["last_lap_number"] == 1
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE session_participants SET total_laps=4,last_lap_time=94.0 WHERE id=$1", mine)
+    state_["scoring"]["vehicles"][0].update(total_laps=4, last_lap_time=94.0)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://localhost") as client:
+        matched = (await client.get(f"/api/drivers/{agent['slug']}/live")).json()["focus"]
+    assert matched["last_lap"]["lap_number"] == 4 and matched["last_lap"]["sector3"] == 33.0
     # The participant's own stop counter is 0 (not yet reported by a lap snapshot), so no last stop is reported.
     assert focus["last_pit_lap"] is None
     assert focus["player_sector"] == 3
@@ -134,3 +170,25 @@ async def test_api_spectating_agent_of_another_driver_supplies_no_sector(db):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://localhost") as client:
         data = (await client.get(f"/api/drivers/{agent['slug']}/live")).json()
     assert data["focus"]["player_sector"] is None
+
+
+async def test_last_pit_lap_is_the_first_stored_checkpoint_after_a_counter_increase(db):
+    agent, sid, _ = await scoring_session(db, "focus-driver")
+    async with db.acquire() as conn:
+        mine = await conn.fetchval("SELECT id FROM session_participants WHERE session_id=$1 AND driver_id=$2",
+                                   sid, agent["driver_id"])
+
+        async def last_pit(counters):
+            await conn.execute("DELETE FROM laps WHERE session_participant_id=$1", mine)
+            for lap, stops in counters.items():
+                await conn.execute("INSERT INTO laps(id,session_participant_id,lap_number,pitstops) "
+                                   "VALUES(gen_random_uuid(),$1,$2,$3)", mine, lap, stops)
+            return (await conn.fetchrow(main.OWN_LAP_HISTORY_SQL, mine))["last_pit_lap"]
+
+        assert await last_pit({1: 0, 2: 0, 3: 1, 4: 1, 5: 1}) == 3
+        assert await last_pit({1: 0, 2: 1, 3: 1, 4: 2, 5: 2}) == 4, "the latest increase wins"
+        # A missing checkpoint delays the detection: the stop happened before lap 4 but is first seen at lap 5.
+        assert await last_pit({1: 0, 2: 0, 5: 1}) == 5
+        # A counter already above zero at the first stored checkpoint has no earlier baseline and is not a detection.
+        assert await last_pit({3: 1, 4: 1}) is None
+        assert await last_pit({1: 0, 2: 0}) is None

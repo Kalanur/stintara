@@ -29,20 +29,22 @@ function participants(tick, focusPosition = 7, overrides = {}) {
 function driverLive(scenario, tick = 0) {
   const base = {driver:{id:id(800),slug:'synthetic',display_name:'Synthetic Driver'},live:true,session:sessionA,strategy};
   const focus = {participant_id:id(7),status:'TRACK',position:7,gap_to_leader:22.4+tick%3*.001,gap_laps:null,interval:3.2,
-    completed_laps:12,current_lap:13,last_lap:{lap_number:12,lap_time:91.512,sector1:29.101,sector2:34.226,sector3:28.185},
+    completed_laps:12,current_lap:13,last_lap_number:12,last_lap_time:91.512,last_lap:{lap_number:12,lap_time:91.512,sector1:29.101,sector2:34.226,sector3:28.185},
     best_lap_time:90.612,pitstops:1,last_pit_lap:6,player_sector:2,live_age_s:.3};
   switch (scenario) {
     case 'offline': return {driver:base.driver,live:false};
     case 'pit': return {...base,participants:participants(tick,7,{in_pits:true}),focus:{...focus,status:'PIT',player_sector:null}};
     case 'stale': return {...base,participants:participants(tick),focus:{...focus,live_age_s:42}};
     case 'unknown': return {...base,participants:participants(tick,7,{last_lap_time:null,best_lap_time:null,total_laps:null}),
-      focus:{...focus,status:null,position:null,gap_to_leader:null,interval:null,completed_laps:null,current_lap:null,last_lap:null,
+      focus:{...focus,status:null,position:null,gap_to_leader:null,interval:null,completed_laps:null,current_lap:null,last_lap_number:null,last_lap_time:null,last_lap:null,
         best_lap_time:null,pitstops:null,last_pit_lap:null,player_sector:null}};
     case 'fin': case 'dnf': case 'dsq': {
       const code = {fin:1,dnf:2,dsq:3}[scenario];
       return {...base,participants:participants(tick,7,{finish_status:code}),
         focus:{...focus,status:scenario.toUpperCase(),current_lap:null,player_sector:null}};
     }
+    case 'lagging': return {...base,participants:participants(tick,7,{total_laps:13,last_lap_time:92.004}),
+      focus:{...focus,completed_laps:13,current_lap:14,last_lap_number:13,last_lap_time:92.004,last_lap:null}};
     case 'other-session': return {...base,session:sessionB,participants:participants(tick,3),
       focus:{...focus,participant_id:id(3),position:3,interval:1.1,current_lap:5,completed_laps:4,player_sector:3}};
     default: return {...base,participants:participants(tick),focus};
@@ -143,6 +145,10 @@ async function verifyDriverLive(channel) {
       assert.doesNotMatch(await text(),/S2 · now/,`${label}: no current sector`);
       const m = await measure(); assert.ok(m.docH <= 911 && !m.overlaps.length,`${label}: layout intact`);
     }
+    await settle('lagging');
+    const lagging = await text();
+    assert.ok(lagging.includes('1:32.004') && lagging.includes('L13'),'live time and number shown');
+    assert.doesNotMatch(lagging,/29\.101|34\.226|28\.185|Last timed lap sectors · lap/,'no sectors of another lap');
     await settle('stale');
     assert.match(await text(),/stale or unavailable/); assert.doesNotMatch(await text(),/S2 · now/);
     let m = await measure(); assert.ok(m.docH <= 911 && !m.overlaps.length,'stale banner: no document scrolling or overlap');

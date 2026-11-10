@@ -6,6 +6,7 @@ unknown (None): nothing here estimates, interpolates or invents values, and no r
 from .timing import finite_number, lap_count, newest_state, project_timing
 from .trackmap import SECTOR_SAMPLE_MAX_AGE_SECONDS, player_vehicle, public_race_control
 
+LAP_TIME_TOLERANCE_S = 0.005   # provider times are single precision floats
 FINISH_LABELS = {1: "FIN", 2: "DNF", 3: "DSQ"}
 
 
@@ -74,8 +75,15 @@ def focus_block(slug, session, participants, history, states, now):
     timed = next(p for p in projected if p["id"] == me["participant_id"])
     history = history or {}
     last = None
-    if type(history.get("lap_number")) is int and history["lap_number"] > 0:
-        last = {"lap_number": history["lap_number"], "lap_time": positive(history.get("lap_time")),
+    completed = me.get("total_laps") if lap_count(me.get("total_laps")) else None
+    stored_time = positive(history.get("lap_time"))
+    live_time = positive(me.get("last_lap_time"))
+    # Lap time, number and sectors must describe one lap. The stored row is used only when it is exactly the
+    # lap the live scoring reports as last completed (and, when both times are known, agrees on the time);
+    # a scoring ahead of or behind the stored checkpoint yields no sectors rather than a mixed lap.
+    if (completed and history.get("lap_number") == completed and stored_time is not None
+            and (live_time is None or abs(live_time - stored_time) <= LAP_TIME_TOLERANCE_S)):
+        last = {"lap_number": completed, "lap_time": stored_time,
                 "sector1": positive(history.get("sector1")), "sector2": positive(history.get("sector2")),
                 "sector3": positive(history.get("sector3"))}
     pit = history.get("last_pit_lap")
@@ -87,7 +95,9 @@ def focus_block(slug, session, participants, history, states, now):
         "gap_to_leader": timed["gap_to_leader"], "gap_laps": timed["gap_laps"], "interval": timed["interval"],
         "completed_laps": me["total_laps"] if lap_count(me.get("total_laps")) else None,
         "current_lap": current_lap_of(me),
-        "last_lap": last,
+        "last_lap": last,   # complete triple (number, time, sectors) of the scoring's last lap, else None
+        "last_lap_number": completed if completed else None,
+        "last_lap_time": live_time,
         "best_lap_time": positive(me.get("best_lap_time")),
         "pitstops": stops if lap_count(stops) else None,
         # First persisted completed-lap snapshot with an increased stop counter; not the exact pit entry/exit.

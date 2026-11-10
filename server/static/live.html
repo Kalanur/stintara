@@ -122,12 +122,14 @@ function focusStrip(d, me) {
   // Without server focus (older server or ambiguous own participant) only the plain participant fields are shown.
   if (fallback) Object.assign(f, {position:int(me.position, 1), completed_laps:int(me.total_laps), pitstops:int(me.pitstops),
     best_lap_time:me.best_lap_time, gap_to_leader:me.gap_to_leader, gap_laps:me.laps_behind_leader, interval:null,
-    last_lap:null, current_lap:null, player_sector:null});
+    last_lap:null, current_lap:null, player_sector:null,
+    last_lap_number:int(me.total_laps, 1), last_lap_time:me.last_lap_time});
   const last = f.last_lap || {};
   const lapNo = int(f.current_lap, 1), done = int(f.completed_laps);
   const stale = !fallback && !(Number.isFinite(f.live_age_s) && f.live_age_s <= STALE_AFTER_S);
   const sector = [1,2,3].includes(f.player_sector) && !stale ? f.player_sector : null;
-  const lastTime = Number.isFinite(me.last_lap_time) && me.last_lap_time > 0 ? me.last_lap_time : last.lap_time;
+  // Time and number come from the same scoring frame; sectors only when the stored lap is exactly that lap.
+  const lastNo = int(f.last_lap_number, 1);
   const sectors = ['sector1','sector2','sector3'].map((key,i) =>
     `<div class="sector${sector === i+1 ? ' now' : ''}"><div class="label">S${i+1}${sector === i+1 ? ' · now' : ''}</div><div class="big">${sectorFmt(last[key])}</div></div>`).join('');
   return `<section class="panel focus-strip" aria-label="Driver focus">
@@ -136,7 +138,7 @@ function focusStrip(d, me) {
     <div class="card"><div class="label">Position</div><div class="big">${int(f.position, 1) === null ? '—' : 'P' + f.position}</div><div class="small">Gap ${esc(gapText(f))}</div></div>
     <div class="card"><div class="label">Interval</div><div class="big">${esc(intervalText(f))}</div><div class="small">to car ahead</div></div>
     <div class="card"><div class="label">Lap</div><div class="big">${lapNo === null ? '—' : lapNo}</div><div class="small">${done === null ? '—' : done} completed</div></div>
-    <div class="card"><div class="label">Last lap</div><div class="big">${fmt(lastTime)}</div><div class="small">${int(last.lap_number, 1) === null ? '—' : 'L' + last.lap_number}</div></div>
+    <div class="card"><div class="label">Last lap</div><div class="big">${fmt(f.last_lap_time)}</div><div class="small">${lastNo === null ? '—' : 'L' + lastNo}</div></div>
     <div class="card"><div class="label">Best lap</div><div class="big">${fmt(f.best_lap_time)}</div><div class="small">&nbsp;</div></div>
     <div class="card" aria-label="Last timed lap sectors"><div class="label">Last timed lap sectors${int(last.lap_number, 1) === null ? '' : ` · lap ${last.lap_number}`}</div><div class="sectors">${sectors}</div></div></section>`;
 }

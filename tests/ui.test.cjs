@@ -299,7 +299,7 @@ const focusFixture = (focus, me={}) => ({live:true, driver:{display_name:'Synthe
      last_lap_time:90.123,best_lap_time:89.5,in_pits:false,finish_status:0,...me}],
   focus});
 const baseFocus = {participant_id:syntheticId(2),status:'TRACK',position:2,gap_to_leader:8.25,gap_laps:null,interval:8.25,
-  completed_laps:5,current_lap:6,last_lap:{lap_number:5,lap_time:90.123,sector1:30.111,sector2:31.222,sector3:28.79},
+  completed_laps:5,current_lap:6,last_lap_number:5,last_lap_time:90.123,last_lap:{lap_number:5,lap_time:90.123,sector1:30.111,sector2:31.222,sector3:28.79},
   best_lap_time:89.5,pitstops:1,last_pit_lap:3,player_sector:2,live_age_s:0.3};
 
 test('driver focus shows status, position, gaps, laps, last lap, sectors, best, stops and the current sector', async () => {
@@ -313,7 +313,7 @@ test('driver focus shows status, position, gaps, laps, last lap, sectors, best, 
 
 test('driver focus never invents values: unknowns stay a dash and no sector is highlighted', async () => {
   const unknown = {participant_id:syntheticId(2),status:null,position:null,gap_to_leader:null,gap_laps:null,interval:null,
-    completed_laps:null,current_lap:null,last_lap:null,best_lap_time:null,pitstops:null,last_pit_lap:null,
+    completed_laps:null,current_lap:null,last_lap_number:null,last_lap_time:null,last_lap:null,best_lap_time:null,pitstops:null,last_pit_lap:null,
     player_sector:null,live_age_s:0.2};
   const html = (await render('live.html', focusFixture(unknown, {last_lap_time:null,best_lap_time:null}))).innerHTML;
   assert.doesNotMatch(html, /sector now|badge|P\d|NaN|undefined|null|0:00/);
@@ -341,6 +341,16 @@ test('driver focus: FIN, DNF, DSQ and PIT badges, no current sector outside live
   assert.match(legacy, /Driver focus/);
   assert.match(legacy, /badge track">TRACK/);
   assert.doesNotMatch(legacy, /sector now|stale or unavailable/);
+});
+
+test('last lap time never borrows sectors of another lap', async () => {
+  // Server found no stored lap matching the scoring's last lap: time and number stay, sectors are unknown.
+  const html = (await render('live.html', focusFixture({...baseFocus,last_lap:null,last_lap_number:6,last_lap_time:91.5},
+    {last_lap_time:91.5}))).innerHTML;
+  assert.match(html, /1:31\.500/);
+  assert.match(html, />L6</);
+  assert.doesNotMatch(html, /30\.111|31\.222|28\.790|Last timed lap sectors · lap/);
+  assert.equal((html.match(/class="big">—<\/div><\/div>/g) || []).length, 3, 'three empty sectors');
 });
 
 test('driver focus escapes provider text', async () => {
