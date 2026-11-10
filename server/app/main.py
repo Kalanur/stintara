@@ -23,6 +23,7 @@ from . import history, track_repo
 from .build import APP_VERSION, build_info, inject_build_label
 from .chain import CHAIN_COLUMNS, CHAIN_JOINS, pop_chain
 from .domain import sample_due
+from .driver_live import focus_block
 from .fuel import fuel_report
 from .lifecycle import end_observation, expire_observations, resolve_session
 from .lmu_resources import energy_diagnostics, lmu_resources, pit_settings
@@ -567,6 +568,20 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
     return result
 
 
+OWN_LAP_HISTORY_SQL = """
+    SELECT lap.lap_number, lap.lap_time, lap.sector1, lap.sector2, lap.sector3, pit.last_pit_lap
+    FROM (SELECT 1) one
+    LEFT JOIN LATERAL (SELECT lap_number,lap_time,sector1,sector2,sector3 FROM laps
+        WHERE session_participant_id=$1 AND lap_number > 0 ORDER BY lap_number DESC LIMIT 1) lap ON true
+    LEFT JOIN LATERAL (
+        SELECT max(lap_number) AS last_pit_lap FROM (
+            SELECT lap_number,pitstops,
+                   max(pitstops) OVER (ORDER BY lap_number ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_max
+            FROM laps WHERE session_participant_id=$1 AND lap_number > 0 AND pitstops >= 0
+        ) history WHERE pitstops > previous_max
+    ) pit ON true"""
+
+
 @app.get("/api/drivers/{slug}/live")
 async def api_driver_live(slug: str) -> dict[str, Any]:
     assert pool
@@ -607,6 +622,13 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
             """, session["id"], driver["id"]
         )
     participants = [dict(p) for p in participants]
+    own = [p for p in participants if p["is_stintara_driver"]]
+    history = None
+    if len(own) == 1:
+        # One extra indexed read of the own participant only (unique (participant, lap_number) index); the session
+        # endpoint's all-field laterals are deliberately not reused here (500 ms polling).
+        async with pool.acquire() as conn:
+            history = await conn.fetchrow(OWN_LAP_HISTORY_SQL, own[0]["participant_id"])
     for state in runtime.values():
         if state.get("session_id") == session["id"] and time.monotonic() - state.get("last_scoring_at", 0) < 15:
             by_vehicle = {v["id"]: v for v in state.get("scoring", {}).get("vehicles", [])}
@@ -619,9 +641,11 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
     participants.sort(key=lambda p: p["position"] if p["position"] is not None else 9999)
     for participant in participants:
         participant.update(vehicle_identity(participant))
+    now = time.monotonic()
     return {
         "driver": dict(driver),
         "live": True,
+        "focus": focus_block(driver["slug"], dict(session), participants, history, list(runtime.values()), now),
         "session": {**dict(session), "weather": normalize_weather(session["weather"], session["simulator_provider"])},
         "participants": participants,
         "strategy": dict(strategy) if strategy else None,

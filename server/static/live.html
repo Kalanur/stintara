@@ -1,17 +1,75 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stintara Live</title>
 <style>
-body{font-family:system-ui,sans-serif;max-width:1200px;margin:28px auto;padding:0 16px;background:#111;color:#eee}.muted{color:#999}.live{color:#57d68d;font-weight:700}.hero{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}.metrics{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin:16px 0}.metric{background:#1d1d1d;border:1px solid #333;border-radius:12px;padding:12px}.value{font-size:24px;font-weight:700}table{width:100%;border-collapse:collapse;background:#171717}th,td{text-align:left;padding:8px;border-bottom:1px solid #2b2b2b}tr.me{background:#242424}a{color:white}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}table{font-size:12px}}
+:root{color-scheme:dark;--bg:#0b1017;--panel:#121b26;--raised:#1a2635;--line:#304153;--text:#edf3f9;--muted:#a9bacb;--live:#ff626b;--attention:#f4ce63;--info:#83b6ff;--ok:#7bdba7;--pit:#ffb56b;--best:#dda2ff;--focus:#72e3eb;--focus-bg:#19343e}
+*{box-sizing:border-box}
+body{margin:0;padding:10px 18px 8px;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,sans-serif;font-variant-numeric:tabular-nums}
+a{color:var(--focus)}
+h1,h2,h3,p{margin:0}
+h1{font-size:24px;line-height:1.15}
+h2{font-size:15px;margin-bottom:6px}
+h3{font-size:13px;margin:6px 0 2px}
+p{margin:4px 0}
+.muted{color:var(--muted)}
+.live{color:var(--live);font-weight:750;letter-spacing:.08em}
+a:focus-visible,summary:focus-visible,.table-scroll:focus-visible{outline:2px solid var(--focus);outline-offset:3px}
+.dash{display:grid;gap:10px;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);grid-template-rows:auto auto minmax(0,1fr);min-height:0}
+#root.plain{display:block}
+@media(min-width:1101px) and (min-height:701px){body{height:100dvh;display:flex;flex-direction:column;overflow:hidden}.dash{flex:1}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:10px 12px;min-width:0;min-height:0}
+.head{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:20px}
+.head .context{min-width:0;overflow-wrap:anywhere}
+.head .side{display:flex;align-items:center;gap:18px;flex:none}
+.notice{grid-column:1/-1;border:1px solid var(--attention);color:var(--attention);border-radius:5px;padding:3px 10px;font-weight:650}
+.focus-strip{grid-column:1/-1;display:grid;gap:10px;grid-template-columns:minmax(150px,.9fr) repeat(5,minmax(0,1fr)) minmax(0,2.4fr);border-left:3px solid var(--focus);background:var(--focus-bg)}
+.card{min-width:0;border-left:2px solid var(--line);padding-left:10px}
+.card:first-child{border-left:0;padding-left:0}
+.label{color:var(--muted);font-size:12px}
+.big{font-size:28px;font-weight:750;line-height:1.15;white-space:nowrap}
+.small{font-size:13px;color:var(--muted);white-space:nowrap}
+.sectors{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.sector{border:1px solid var(--line);border-radius:5px;padding:2px 8px;background:var(--panel)}
+.sector.now{border-color:var(--focus);box-shadow:inset 0 0 0 1px var(--focus)}
+.sector .big{font-size:22px}
+.badge{display:inline-block;font-size:18px;font-weight:750;border:1px solid currentColor;padding:1px 10px;border-radius:5px;letter-spacing:.04em}
+.pit{color:var(--pit)}.track{color:var(--ok)}.finished{color:var(--info)}.retired{color:var(--live)}.disqualified{color:var(--best)}
+.standings{display:flex;flex-direction:column;overflow:hidden;padding:0}
+.standings h2{padding:10px 12px 0}
+.table-scroll{overflow:auto;min-height:0;min-width:0;flex:1;scrollbar-color:var(--line) var(--panel)}
+.side-col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0;overflow:auto}
+table{width:100%;border-collapse:separate;border-spacing:0}
+th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
+th{font-size:12px;color:var(--muted);background:var(--raised);position:sticky;top:0;z-index:1}
+td:nth-child(2),td:nth-child(3){white-space:normal;overflow-wrap:anywhere}
+tr.me{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus)}
+.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:6px}
+.metric{border-left:2px solid var(--line);padding-left:8px}
+.value{font-size:20px;font-weight:700}
+.tyres td,.tyres th{padding:3px 8px}
+details summary{cursor:pointer}
+section[aria-label="Weather"] p{margin:2px 0}
+section[aria-label="Weather"] ul{margin:2px 0;padding-left:18px}
+footer{margin-top:4px;font-size:12px;overflow-wrap:anywhere}
+@media(max-width:1100px),(max-height:700px){
+  .dash{display:flex;flex-direction:column}
+  .focus-strip{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .card:first-child,.card{border-left:0;padding-left:0}
+  .standings .table-scroll{max-height:60vh}
+  .side-col{overflow:visible}
+}
 </style></head><body>
-<a href="/">← Stintara</a><div id="root" class="muted">Loading…</div>
-<footer class="muted" style="margin-top:24px;font-size:12px;overflow-wrap:anywhere">__BUILD_LABEL__</footer>
+<div id="root" class="muted plain">Loading…</div>
+<footer class="muted">__BUILD_LABEL__</footer>
 <script>
 __WEATHER_UI__
 
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = t => Number.isFinite(t) && t > 0 ? `${Math.floor(t/60)}:${(t%60).toFixed(3).padStart(6,'0')}` : '—';
+const sectorFmt = t => Number.isFinite(t) && t > 0 ? (t < 60 ? t.toFixed(3) : fmt(t)) : '—';
 const num = (value, unit='', digits=1) => Number.isFinite(value) ? value.toFixed(digits) + unit : '—';
-const metric = (label, value) => `<div class="metric"><div class="muted">${esc(label)}</div><div>${esc(value)}</div></div>`;
+const seconds = t => `+${t.toFixed(3)} s`;
+const metric = (label, value) => `<div class="metric"><div class="muted">${esc(label)}</div><div class="value">${esc(value)}</div></div>`;
+const STALE_AFTER_S = 5;
 async function getJSON(url) {
   const response = await fetch(url, {cache:'no-store'});
   if (!response.ok) throw new Error(response.status === 404 ? 'Driver not found.' : 'Live data unavailable. Retrying…');
@@ -35,44 +93,113 @@ function vehicleCell(p) {
   const {label, value} = vehicleLabel(p);
   return label ? `<div class="muted">${esc(label)}</div><div>${esc(value)}</div>` : '—';
 }
+// Status semantics as in session.html participantStatus(p, true); the server `focus.status` wins when present.
+const STATUS_STYLE = {PIT:'pit', TRACK:'track', FIN:'finished', DNF:'retired', DSQ:'disqualified'};
+function statusOf(focus, me) {
+  if (focus && Object.hasOwn(focus, 'status')) return focus.status;
+  const finish = {1:'FIN', 2:'DNF', 3:'DSQ'}[me.finish_status];
+  if (finish) return finish;
+  if (me.in_pits === true) return 'PIT';
+  return me.finish_status === 0 && me.in_pits === false ? 'TRACK' : null;
+}
+const statusBadge = status => Object.hasOwn(STATUS_STYLE, status)
+  ? `<span class="badge ${STATUS_STYLE[status]}">${status}</span>` : '<span class="big">—</span>';
+const int = (v, min=0) => Number.isSafeInteger(v) && v >= min ? v : null;
+function gapText(f) {
+  if (int(f.gap_laps, 1) !== null) return `${f.gap_laps} L`;
+  return Number.isFinite(f.gap_to_leader) && f.gap_to_leader >= 0 ? (f.position === 1 ? 'Leader' : seconds(f.gap_to_leader)) : '—';
+}
+const intervalText = f => !int(f.gap_laps, 1) && Number.isFinite(f.interval) && f.interval >= 0 ? seconds(f.interval) : '—';
+function stopsText(f) {
+  const stops = int(f.pitstops);
+  if (stops === null) return 'Stops —';
+  const last = stops > 0 ? int(f.last_pit_lap, 1) : null;
+  return `${stops} ${stops === 1 ? 'stop' : 'stops'}${last === null ? '' : ` · last stop L${last}`}`;
+}
+function focusStrip(d, me) {
+  const f = {...(d.focus || {})};
+  const fallback = !d.focus;
+  // Without server focus (older server or ambiguous own participant) only the plain participant fields are shown.
+  if (fallback) Object.assign(f, {position:int(me.position, 1), completed_laps:int(me.total_laps), pitstops:int(me.pitstops),
+    best_lap_time:me.best_lap_time, gap_to_leader:me.gap_to_leader, gap_laps:me.laps_behind_leader, interval:null,
+    last_lap:null, current_lap:null, player_sector:null});
+  const last = f.last_lap || {};
+  const lapNo = int(f.current_lap, 1), done = int(f.completed_laps);
+  const stale = !fallback && !(Number.isFinite(f.live_age_s) && f.live_age_s <= STALE_AFTER_S);
+  const sector = [1,2,3].includes(f.player_sector) && !stale ? f.player_sector : null;
+  const lastTime = Number.isFinite(me.last_lap_time) && me.last_lap_time > 0 ? me.last_lap_time : last.lap_time;
+  const sectors = ['sector1','sector2','sector3'].map((key,i) =>
+    `<div class="sector${sector === i+1 ? ' now' : ''}"><div class="label">S${i+1}${sector === i+1 ? ' · now' : ''}</div><div class="big">${sectorFmt(last[key])}</div></div>`).join('');
+  return `<section class="panel focus-strip" aria-label="Driver focus">
+    ${stale ? '<div class="notice" role="status">Live scoring is stale or unavailable — values may be outdated.</div>' : ''}
+    <div class="card"><div class="label">Status</div><div>${statusBadge(statusOf(d.focus, me))}</div><div class="small">${esc(stopsText(f))}</div></div>
+    <div class="card"><div class="label">Position</div><div class="big">${int(f.position, 1) === null ? '—' : 'P' + f.position}</div><div class="small">Gap ${esc(gapText(f))}</div></div>
+    <div class="card"><div class="label">Interval</div><div class="big">${esc(intervalText(f))}</div><div class="small">to car ahead</div></div>
+    <div class="card"><div class="label">Lap</div><div class="big">${lapNo === null ? '—' : lapNo}</div><div class="small">${done === null ? '—' : done} completed</div></div>
+    <div class="card"><div class="label">Last lap</div><div class="big">${fmt(lastTime)}</div><div class="small">${int(last.lap_number, 1) === null ? '—' : 'L' + last.lap_number}</div></div>
+    <div class="card"><div class="label">Best lap</div><div class="big">${fmt(f.best_lap_time)}</div><div class="small">&nbsp;</div></div>
+    <div class="card" aria-label="Last timed lap sectors"><div class="label">Last timed lap sectors${int(last.lap_number, 1) === null ? '' : ` · lap ${last.lap_number}`}</div><div class="sectors">${sectors}</div></div></section>`;
+}
 function tyreTable(s) {
-  return `<h2>Tyres</h2><table><thead><tr><th>Corner</th><th>Remaining</th><th>Pressure</th>
+  return `<h2>Tyres</h2><table class="tyres"><thead><tr><th>Corner</th><th>Remaining</th><th>Pressure</th>
     <th>Inner / Mid / Outer</th><th>Brake</th></tr></thead><tbody>${['fl','fr','rl','rr'].map(c =>
     `<tr><td>${c.toUpperCase()}</td><td>${num(s['tyre_remaining_'+c] == null ? null : s['tyre_remaining_'+c]*100, '%')}</td>
     <td>${num(s['tyre_pressure_'+c+'_kpa'], ' kPa')}</td>
     <td>${['inner','mid','outer'].map(p => num(s['tyre_temp_'+p+'_'+c+'_c'], ' °C')).join(' / ')}</td>
     <td>${num(s['tyre_brake_temp_'+c+'_c'], ' °C')}</td></tr>`).join('')}</tbody></table>`;
 }
-async function refresh() {
+const PRESERVED = ['full-field-link', 'standings-scroll'];
+let lastHtml = null;
+function render(d) {
   const root = document.querySelector('#root');
-  try {
-    const d = await getJSON(`/api/drivers/${encodeURIComponent(slug)}/live`);
-    if (!d.live) {
-      root.innerHTML = `<h1>${esc(d.driver.display_name)}</h1><p class="muted">Offline</p>`;
-      return;
-    }
-    const me = d.participants.find(p => p.is_stintara_driver) || {};
-    const ownParticipants = d.participants.filter(p => p.is_stintara_driver);
-    const focusQuery = ownParticipants.length === 1 && ownParticipants[0].participant_id
-      ? `?focus=${encodeURIComponent(ownParticipants[0].participant_id)}` : '';
-    const s = d.strategy || {};
-    const forecastOpen = document.querySelector('#weather-forecast')?.open || false;
-    root.className = '';
-    root.innerHTML = `<div class="live">● LIVE</div><h1>${esc(d.driver.display_name)}</h1>
-      <div>${esc(d.session.track_name)} · ${esc(d.session.session_type)} · ${esc(vehicleText(me))}</div>
-      <div class="metrics">${metric('Position', me.position)}${metric('Lap', me.total_laps)}
-      ${metric('Fuel', num(s.fuel_l, ' L'))}${metric('Fuel/lap', num(s.fuel_avg_consumption_lap, ' L', 2))}
-      ${metric('Fuel laps remaining', num(s.fuel_laps_remaining))}</div>
-      <p><a href="/sessions/${esc(encodeURIComponent(d.session.id))}/live${esc(focusQuery)}">Watch full field →</a></p>${weatherWidget(d.session.weather, d.live, true)}${tyreTable(s)}<h2>Standings</h2><table><thead><tr><th>P</th><th>Driver</th><th>Vehicle / entry</th>
+  const me = d.participants.find(p => p.is_stintara_driver) || {};
+  const ownParticipants = d.participants.filter(p => p.is_stintara_driver);
+  const focusQuery = ownParticipants.length === 1 && ownParticipants[0].participant_id
+    ? `?focus=${encodeURIComponent(ownParticipants[0].participant_id)}` : '';
+  const s = d.strategy || {};
+  const html = `<header class="panel head"><div class="context"><h1>${esc(d.driver.display_name)}</h1>
+      <div>${esc(d.session.track_name)} · ${esc(d.session.session_type)} · ${esc(vehicleText(me))}</div></div>
+      <div class="side"><span class="live">● LIVE</span><a id="full-field-link" href="/sessions/${esc(encodeURIComponent(d.session.id))}/live${esc(focusQuery)}">Watch full field →</a><a href="/">← Stintara</a></div></header>
+    ${focusStrip(d, me)}
+    <section class="panel standings" aria-label="Standings"><h2>Standings</h2><div class="table-scroll" id="standings-scroll" tabindex="0"><table><thead><tr><th>P</th><th>Driver</th><th>Vehicle / entry</th>
       <th>Gap</th><th>Last</th><th>Best</th><th>Laps</th><th>Pit</th></tr></thead><tbody>
       ${d.participants.map(p => `<tr class="${p.is_stintara_driver ? 'me' : ''}"><td>${esc(p.position)}</td>
         <td>${esc(p.display_name)}</td><td>${vehicleCell(p)}</td>
         <td>${p.laps_behind_leader > 0 ? esc(p.laps_behind_leader)+' L' : num(p.gap_to_leader, ' s')}</td>
         <td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${esc(p.total_laps)}</td>
-        <td>${p.in_pits ? 'PIT' : ''}</td></tr>`).join('')}</tbody></table>`;
-    const forecast = document.querySelector('#weather-forecast');
-    if (forecast) forecast.open = forecastOpen;
-  } catch (error) { root.textContent = error.message; }
+        <td>${p.in_pits ? 'PIT' : ''}</td></tr>`).join('')}</tbody></table></div></section>
+    <div class="side-col"><section class="panel" aria-label="Tyres and fuel"><div class="metrics">${metric('Fuel', num(s.fuel_l, ' L'))}${metric('Fuel/lap', num(s.fuel_avg_consumption_lap, ' L', 2))}
+      ${metric('Fuel laps remaining', num(s.fuel_laps_remaining))}</div>${tyreTable(s)}</section>
+      <section class="panel">${weatherWidget(d.session.weather, d.live, true)}</section></div>`;
+  if (html === lastHtml) return;   // identical frame: leave focus, disclosures and scroll untouched
+  lastHtml = html;
+  const scroll = document.querySelector('#standings-scroll');
+  const keep = {left: scroll?.scrollLeft || 0, top: scroll?.scrollTop || 0};
+  const activeId = PRESERVED.includes(document.activeElement?.id) ? document.activeElement.id
+    : document.activeElement?.parentElement?.id === 'weather-forecast' ? 'weather-summary' : null;
+  const forecastOpen = document.querySelector('#weather-forecast')?.open || false;
+  root.className = 'dash';
+  root.innerHTML = html;
+  const forecast = document.querySelector('#weather-forecast');
+  if (forecast) forecast.open = forecastOpen;
+  const next = document.querySelector('#standings-scroll');
+  if (next) { next.scrollLeft = keep.left; next.scrollTop = keep.top; }
+  const target = activeId === 'weather-summary' ? document.querySelector('#weather-forecast > summary')
+    : activeId ? document.querySelector('#' + activeId) : null;
+  target?.focus?.({preventScroll:true});
+}
+async function refresh() {
+  const root = document.querySelector('#root');
+  try {
+    const d = await getJSON(`/api/drivers/${encodeURIComponent(slug)}/live`);
+    if (!d.live) {
+      lastHtml = null;
+      root.className = 'plain';
+      root.innerHTML = `<h1>${esc(d.driver.display_name)}</h1><p class="muted">Offline</p><p><a href="/">← Stintara</a></p>`;
+      return;
+    }
+    render(d);
+  } catch (error) { lastHtml = null; root.className = 'plain muted'; root.textContent = error.message; }
   finally { setTimeout(refresh, 500); }
 }
 refresh();
