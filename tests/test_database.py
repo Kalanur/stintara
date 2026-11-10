@@ -154,7 +154,8 @@ async def test_lap_snapshot_idempotence_damage_and_no_live_regression(db):
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM laps") == 1
         row = await conn.fetchrow("SELECT * FROM laps")
-        assert row["id"].version == 7 and row["tyre_remaining_fl"] == 1
+        # One wheel, no observed lap crossing: sensor values stay unknown, never a placeholder (#59).
+        assert row["id"].version == 7 and row["tyre_remaining_fl"] is None
         assert json.loads(row["damage"])["dent_severity"] == [1, 0]
         assert await conn.fetchval("SELECT position FROM session_participants WHERE local_vehicle_id=7") == 1
 

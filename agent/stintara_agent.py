@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import uuid
 from time import monotonic
 
 import websockets
@@ -18,7 +19,9 @@ except ImportError:  # python agent/stintara_agent.py
     from version import PROTOCOL, version_text
 
 
-async def forward(pitwall, uplink):
+async def forward(pitwall, uplink, source_epoch=None):
+    # source_epoch identifies this Pitwall connection; the server uses it to tell a Pitwall restart from a
+    # continuous stream while the Stintara uplink stays open.
     last_sent = {}
     async for raw in pitwall:
         if not isinstance(raw, str):
@@ -34,10 +37,10 @@ async def forward(pitwall, uplink):
         interval = {"scoring": 0.2, "telemetry": 1.0, "race_control": 0.1}.get(kind, 0.0)
         if kind in last_sent and now - last_sent[kind] < interval:
             continue
-        await uplink.send(json.dumps({
-            "protocol": PROTOCOL, "message_type": kind,
-            "payload": payload,
-        }, allow_nan=False, separators=(",", ":")))
+        message = {"protocol": PROTOCOL, "message_type": kind, "payload": payload}
+        if source_epoch:
+            message["source_epoch"] = source_epoch
+        await uplink.send(json.dumps(message, allow_nan=False, separators=(",", ":")))
         last_sent[kind] = now
 
 
@@ -46,7 +49,7 @@ async def bridge(uplink, config):
         try:
             async with websockets.connect(config.pitwall_ws, max_size=32 * 1024 * 1024, proxy=None) as pitwall:
                 print("Connected to LMU Pitwall")
-                await forward(pitwall, uplink)
+                await forward(pitwall, uplink, uuid.uuid4().hex)   # new generation per Pitwall connection
         except (OSError, WebSocketException, TimeoutError):
             if getattr(uplink, "close_code", None) is not None:
                 return  # run_once reports the uplink close, not a Pitwall failure
