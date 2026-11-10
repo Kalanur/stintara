@@ -145,7 +145,8 @@ async def test_compiled_replay_real_ingest_database_and_fuel(db, unused_tcp_port
                 assert len(data["participants"]) == 6
                 fuel = (await client.get(f"/api/sessions/{session}/participants/{participant}/fuel")).json()
                 assert fuel["estimate"]["consumption_l_per_lap"] == 3
-                assert fuel["estimate"]["sample_count"] == 5
+                # The first checkpoint follows the agent connecting mid-lap: its start was not observed, so no fuel (#59).
+                assert fuel["estimate"]["sample_count"] == 4
                 assert fuel["current"]["fuel_l"] is not None
     finally:
         server.should_exit = True

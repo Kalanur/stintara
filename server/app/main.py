@@ -25,7 +25,13 @@ from .chain import CHAIN_COLUMNS, CHAIN_JOINS, pop_chain
 from .domain import sample_due
 from .driver_live import focus_block
 from .fuel import fuel_report
-from .lap_sensors import accepted_sensors, owns_sensor_fields, stored_wheels_have_sensors
+from .lap_sensors import (
+    accepted_sensors,
+    checkpoint_compatible,
+    completion_updates,
+    observe_crossing,
+    owns_sensor_fields,
+)
 from .lifecycle import end_observation, expire_observations, resolve_session
 from .lmu_resources import energy_diagnostics, lmu_resources, pit_settings
 from .migrations import migrate_sample_ids
@@ -690,7 +696,7 @@ async def current_or_create_session(agent, payload):
             state[key] = resolution_state[key]
     if session_id != state.get("session_id"):
         for key in ("last_sample_at", "last_persisted_scoring", "scoring", "snapshots", "snapshots_at",
-                    "participant_index"):
+                    "participant_index", "lap_crossings"):
             state.pop(key, None)
     state["session_id"] = session_id
     if session_id:
@@ -767,35 +773,33 @@ INSERT_LAP_SQL = """
 """
 
 
-async def complete_lap_sensors(conn, participant_id, lap_no, wheels, fuel):
+async def complete_lap_sensors(conn, participant_id, lap_no, snapshot, accepted):
     """Owner checkpoint for a lap another observer already stored: fill only what is missing or unusable.
 
-    The row is locked, so concurrent writers serialise; the decision is made on the locked values, nothing but
-    the player-only columns is touched, a valid stored value is never replaced and nothing is ever set to NULL.
+    The row is locked, so concurrent writers serialise; the decision is made on the locked values. Only a
+    checkpoint describing the same lap record (time, sectors, stop counter) may complete it; nothing but the
+    player-only columns is touched, a valid stored value is never replaced and nothing is set to NULL.
     Repeating the same checkpoint changes nothing.
     """
+    select = """SELECT lap_time,sector1,sector2,sector3,pitstops,tyre_snapshot,
+        fuel_remaining_l,fuel_capacity_l FROM laps WHERE session_participant_id=$1 AND lap_number=$2"""
+    # Steady state (the owner repeats a frozen snapshot every second): a complete row never changes again, because
+    # valid values are never replaced, so an unlocked read may conclude "nothing to do" without a transaction.
+    row = await conn.fetchrow(select, participant_id, lap_no)
+    if row is None or not checkpoint_compatible(row, snapshot) or not completion_updates(row, accepted):
+        return
     async with conn.transaction():
-        await _complete_locked(conn, participant_id, lap_no, wheels, fuel)
-
-
-async def _complete_locked(conn, participant_id, lap_no, wheels, fuel):
-    row = await conn.fetchrow("""SELECT tyre_snapshot,fuel_remaining_l,fuel_capacity_l FROM laps
-        WHERE session_participant_id=$1 AND lap_number=$2 FOR UPDATE""", participant_id, lap_no)
-    if row is None:
-        return
-    updates = {}
-    if wheels is not None and not stored_wheels_have_sensors(row["tyre_snapshot"]):
-        for corner, wheel in zip(("fl", "fr", "rl", "rr"), wheels):
-            updates[f"tyre_remaining_{corner}"] = wheel.get("remaining")
-        updates["tyre_snapshot"] = json.dumps(wheels)
-    if fuel is not None and row["fuel_remaining_l"] is None:
-        updates["fuel_remaining_l"], updates["fuel_capacity_l"] = fuel
-    if not updates:
-        return
-    # Column names come from the fixed set above; values are bound parameters.
-    sets = ",".join(f"{name}=${i}" + ("::jsonb" if name == "tyre_snapshot" else "") for i, name in enumerate(updates, 3))
-    await conn.execute(f"UPDATE laps SET {sets},has_telemetry=true WHERE session_participant_id=$1 AND lap_number=$2",
-                       participant_id, lap_no, *updates.values())
+        row = await conn.fetchrow(select + " FOR UPDATE", participant_id, lap_no)
+        if row is None or not checkpoint_compatible(row, snapshot):
+            return
+        updates = completion_updates(row, accepted)
+        if not updates:
+            return
+        # Column names come from the fixed set in completion_updates; values are bound parameters.
+        sets = ",".join(f"{name}=${i}" + ("::jsonb" if name == "tyre_snapshot" else "")
+                        for i, name in enumerate(updates, 3))
+        await conn.execute(f"UPDATE laps SET {sets},has_telemetry=true WHERE session_participant_id=$1 AND lap_number=$2",
+                           participant_id, lap_no, *updates.values())
 
 
 async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any]) -> None:
@@ -812,17 +816,18 @@ async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: d
             if not p:
                 continue
             # Tyre and fuel sensor values are real only for the car this agent drives (#59): accepted exclusively
-            # from the agent whose server-side driver is the participant's resolved driver.
+            # from the owning agent, for a lap whose start it observed, and only complete real data (lap_sensors).
             owner = owns_sensor_fields(agent["driver_id"], p["driver_id"])
-            accepted = accepted_sensors(d, owner)
+            crossing = int(d.get("total_laps") or 0) in state.get("lap_crossings", {}).get(local_id, ())
+            accepted = accepted_sensors(d, owner, crossing)
             telemetry = accepted["wheels"] is not None or accepted["fuel"] is not None
             # Accepted snapshot state is independent of completed-lap insertability.
             # Keep scoring positions/pit occupancy and checkpoint freshness untouched.
-            # has_telemetry follows accepted owner telemetry only; other observers never change it.
+            # Participant has_telemetry: trusted own-agent sensor data was ever accepted (never reset, not a freshness flag).
             await conn.execute("""UPDATE session_participants SET
-                pitstops=GREATEST(pitstops,$2),finish_status=$3,has_telemetry=CASE WHEN $5 THEN $4 ELSE has_telemetry END
+                pitstops=GREATEST(pitstops,$2),finish_status=$3,has_telemetry=has_telemetry OR $4
                 WHERE id=$1""", p["id"], d.get("num_pitstops", 0),
-                d.get("finish_status", 0), telemetry, owner)
+                d.get("finish_status", 0), telemetry)
             lap_no = int(d.get("total_laps") or 0)
             if lap_no <= 0 or not d.get("last_lap_time") or d["last_lap_time"] <= 0:
                 continue
@@ -843,7 +848,7 @@ async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: d
                 checkpoint_energy(state, local_id),
             )
             if status.endswith(" 0") and telemetry:
-                await complete_lap_sensors(conn, p["id"], lap_no, accepted["wheels"], accepted["fuel"])
+                await complete_lap_sensors(conn, p["id"], lap_no, d, accepted)
 
 
 async def store_strategy_sample(agent, session_id, payload):
@@ -937,6 +942,7 @@ async def handle_message(agent, provider, kind, payload):
         # Receive at 2-5 Hz; only persist current scoring at 1 Hz (no scoring history).
         now = time.monotonic()
         previous = state.get("scoring", {})
+        previous_at = state.get("last_scoring_at")
         changed = (previous.get("session_type") != payload["session_type"]
                    or state.get("persisted_track") != state.get("track_name")
                    or (previous.get("session_time") is not None and payload.get("session_time") is not None
@@ -951,6 +957,7 @@ async def handle_message(agent, provider, kind, payload):
                 await conn.execute("UPDATE agents SET last_seen_at=now() WHERE id=$1", agent["id"])
         state["scoring"] = payload
         state["last_scoring_at"] = now
+        observe_crossing(state.setdefault("lap_crossings", {}), previous, previous_at, payload, now)
         state["scoring_seq"] = next_sample_seq()
         feed_scoring(state, payload, reset=changed)
         await sync_track_store(state)

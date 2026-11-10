@@ -19,8 +19,7 @@ async def setup_field(db):
 async def snapshot(agent, lap=10, stops=0, finish=0, lap_time=90, **context):
     payload = LapSnapshots.model_validate(dict(session_type="Race", session_time=100, drivers=[dict(
         id=7, total_laps=lap, num_pitstops=stops, finish_status=finish, last_lap_time=lap_time,
-        has_telemetry=True, fuel_remaining=40.0, fuel_capacity=100.0, in_pits=True, position=9)],
-        **context)).model_dump()
+        has_telemetry=True, in_pits=True, position=9)], **context)).model_dump()
     await main.handle_message(agent, "lmu", "lap_snapshots", payload)
 
 
@@ -31,7 +30,8 @@ async def test_snapshot_state_without_valid_lap_and_scoring_remains_authoritativ
     await snapshot(agent, lap=lap, lap_time=None, stops=1, finish=finish)
     data = await main.api_session_live(sid)
     p = data["participants"][0]
-    assert (p["pitstops"], p["finish_status"], p["has_telemetry"]) == (1, finish, True)
+    # has_telemetry means trusted own-agent sensor data was accepted; this snapshot carries none (#59).
+    assert (p["pitstops"], p["finish_status"], p["has_telemetry"]) == (1, finish, False)
     assert p["last_pit_lap"] is None
     assert p["in_pits"] is False and p["position"] == 1
     assert p["gap_to_leader"] == 0
@@ -104,8 +104,12 @@ async def test_new_session_starts_with_independent_pit_finish_state(db):
 
 
 async def test_full_field_sectors_tyre_and_damage_live_and_from_checkpoint(db):
-    agent, sid, _ = await setup_field(db)
+    agent, sid, scoring = await setup_field(db)
     wheels = [dict(remaining=r, temp_mid=85.0) for r in (0.9, 0.7, 0.8, 0.85)]  # LMU mWear: tyre remaining, 1.0 = new
+    # The agent watched the car start this lap (27 -> 28), so its checkpoint is a crossing snapshot (#59).
+    for laps in (27, 28):
+        await main.handle_message(agent, "lmu", "scoring", {**scoring, "session_time": 100 + laps - 27,
+            "vehicles": [{**scoring["vehicles"][0], "total_laps": laps}]})
     payload = LapSnapshots.model_validate(dict(session_type="Race", session_time=100, drivers=[dict(
         id=7, total_laps=28, last_lap_time=122.9, last_sector1=36.9, last_sector2=50.6, last_sector3=35.4,
         has_telemetry=True, tire_compound_front_name="Medium", wheels=wheels,

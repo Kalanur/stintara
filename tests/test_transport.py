@@ -385,7 +385,8 @@ async def test_pitwall_agent_server_database_api(db, monkeypatch, unused_tcp_por
                 assert (await client.get("/api/drivers/missing/live")).status_code == 404
                 async with db.acquire() as conn:
                     lap = await conn.fetchrow("SELECT * FROM laps")
-                    assert lap["sector2"] == 30 and lap["tyre_remaining_fl"] == 1
+                    # One wheel and no observed lap crossing: facts are stored, sensor values stay unknown (#59).
+                    assert lap["sector2"] == 30 and lap["tyre_remaining_fl"] is None
                 await frames.put({"type": "ConnectionStatus", "game_connected": False})
                 async with asyncio.timeout(10):
                     while (await client.get("/api/live")).json():

@@ -120,6 +120,16 @@ def tyre_sensors_present(wheels):
     return any(finite_number(w.get(k)) for w in wheels or [] if isinstance(w, dict) for k in SENSOR_KEYS)
 
 
+def wheels_trusted(wheels):
+    """Four corners, each `remaining` a finite value in [0, 1], and at least one real sensor value.
+
+    The single criterion for usable tyre data, shared by the display (`field_status`) and lap persistence.
+    """
+    wheels = [w for w in wheels or [] if isinstance(w, dict)]
+    return (len(wheels) == 4 and tyre_sensors_present(wheels)
+            and all(finite_number(w.get("remaining")) and 0 <= w["remaining"] <= 1 for w in wheels))
+
+
 def field_status(compound, wheels, dents):
     """Compact tyre/damage view of one checkpoint or snapshot; unknown stays None, nothing is guessed.
 
@@ -131,8 +141,7 @@ def field_status(compound, wheels, dents):
     """
     wheels = [w for w in wheels or [] if isinstance(w, dict)]
     corners = [w.get("remaining") for w in wheels]
-    sensors = tyre_sensors_present(wheels)
-    trusted = len(corners) == 4 and sensors and all(finite_number(v) and 0 <= v <= 1 for v in corners)
+    trusted = wheels_trusted(wheels)
     regions = [v for v in dents if type(v) is int and v >= 0] if isinstance(dents, list) else []
     known_dents = bool(regions) and len(regions) == len(dents)
     return {"tyre_compound": compound if isinstance(compound, str) and compound.strip() else None,

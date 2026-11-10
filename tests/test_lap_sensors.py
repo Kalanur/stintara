@@ -1,57 +1,25 @@
-"""Provenance of tyre/fuel sensor fields in persisted lap checkpoints (#59). Synthetic data only.
-
-Agent "owner" drives car 0, agent "observer" (another driver) drives car 1 and merely sees car 0. Pitwall reports
-placeholders (wear 1.0, no sensors, default fuel) for every car except the one the observing agent drives.
-"""
-import asyncio
+"""Unit tests of the lap sensor provenance rules (#59). Pure functions, no database."""
 import json
 
 import pytest
 
-from server.app import main
-from server.app.lap_sensors import accepted_sensors, owns_sensor_fields, stored_wheels_have_sensors
-from tests.conftest import make_agent
-from tests.test_convergence import deliver, roster, scoring
+from server.app.lap_sensors import (
+    accepted_sensors,
+    checkpoint_compatible,
+    completion_updates,
+    fuel_valid,
+    observe_crossing,
+    owns_sensor_fields,
+    stored_wheels_trusted,
+)
+from server.app.timing import field_status, wheels_trusted
 
 REAL = [dict(remaining=r, temp_inner=80.0, temp_mid=85.0, temp_outer=90.0, pressure=170.0) for r in (.9, .8, .85, .75)]
-PLACEHOLDER = [dict(remaining=1.0)] * 4          # what the adapter hands over for a car without real tyre data
+PLACEHOLDER = [dict(remaining=1.0)] * 4
 
 
-def checkpoint(car, lap=5, wheels=REAL, fuel=(41.5, 100.0), telemetry=True, **extra):
-    snap = dict(id=car, total_laps=lap, last_lap_time=90.5, last_sector1=30.0, last_sector2=31.0, last_sector3=29.5,
-                position=car + 1, num_pitstops=1, has_telemetry=telemetry, tire_compound_front_name="Medium",
-                wheels=wheels, fuel_remaining=fuel[0] if fuel else None, fuel_capacity=fuel[1] if fuel else None,
-                damage={"dent_severity": [0, 1]}, **extra)
-    return dict(session_type="Race", session_time=100, drivers=[snap])
-
-
-async def send(agent, payload):
-    await main.handle_message(agent, "lmu", "lap_snapshots", payload)
-
-
-async def field(db, track="Synthetic Circuit"):
-    owner, observer = await make_agent(db, "owner"), await make_agent(db, "observer")
-    sid = await deliver(owner, scoring(roster(), kind="Race", player=0), track=track)
-    assert await deliver(observer, scoring(roster(), kind="Race", player=1), track=track) == sid
-    return owner, observer, sid
-
-
-async def lap_row(db, sid, car, lap=5):
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""SELECT l.* FROM laps l JOIN session_participants p ON p.id=l.session_participant_id
-            WHERE p.session_id=$1 AND p.local_vehicle_id=$2 AND l.lap_number=$3""", sid, car, lap)
-
-
-def assert_owner_values(row):
-    assert [row[f"tyre_remaining_{c}"] for c in ("fl", "fr", "rl", "rr")] == pytest.approx([.9, .8, .85, .75])
-    assert (row["fuel_remaining_l"], row["fuel_capacity_l"], row["has_telemetry"]) == (41.5, 100.0, True)
-    assert stored_wheels_have_sensors(row["tyre_snapshot"])
-
-
-def assert_placeholder_free(row):
-    assert all(row[f"tyre_remaining_{c}"] is None for c in ("fl", "fr", "rl", "rr"))
-    assert row["tyre_snapshot"] is None and row["fuel_remaining_l"] is None and row["fuel_capacity_l"] is None
-    assert row["has_telemetry"] is False
+def snapshot(**extra):
+    return {"has_telemetry": True, "wheels": REAL, "fuel_remaining": 41.5, "fuel_capacity": 100.0, **extra}
 
 
 def test_ownership_requires_two_resolved_equal_identities():
@@ -60,170 +28,119 @@ def test_ownership_requires_two_resolved_equal_identities():
     assert not owns_sensor_fields(None, None) and not owns_sensor_fields(None, "a")
 
 
-def test_accepted_sensors_need_ownership_flag_and_real_values():
-    snap = checkpoint(0)["drivers"][0]
-    assert accepted_sensors(snap, True)["fuel"] == (41.5, 100.0) and accepted_sensors(snap, True)["wheels"] is not None
-    assert accepted_sensors(snap, False) == {"wheels": None, "fuel": None}
-    assert accepted_sensors({**snap, "has_telemetry": False}, True) == {"wheels": None, "fuel": None}
-    assert accepted_sensors({**snap, "wheels": PLACEHOLDER}, True)["wheels"] is None     # wear 1.0 alone proves nothing
-    assert accepted_sensors({**snap, "wheels": REAL[:2]}, True)["wheels"] is not None   # short lists are padded
-    for level, capacity in ((None, 100.0), (-1.0, 100.0), (40.0, 0.0), (float("nan"), 100.0), (40.0, None)):
-        assert accepted_sensors({**snap, "fuel_remaining": level, "fuel_capacity": capacity}, True)["fuel"] is None
-    # No heuristic on the level: exactly half a tank from the owner is a measurement.
-    assert accepted_sensors({**snap, "fuel_remaining": 50.0, "fuel_capacity": 100.0}, True)["fuel"] == (50.0, 100.0)
+@pytest.mark.parametrize("wheels", [
+    REAL[:1], REAL[:2], REAL[:3], [], None, PLACEHOLDER,
+    [dict(temp_mid=85.0)] + REAL[1:],                      # a corner without remaining
+    [dict(remaining=None, temp_mid=85.0)] + REAL[1:],
+    [dict(remaining=1.1, temp_mid=85.0)] + REAL[1:], [dict(remaining=-.1, temp_mid=85.0)] + REAL[1:],
+    [dict(remaining=float("nan"), temp_mid=85.0)] + REAL[1:],
+    [dict(remaining=.5)] * 4,                              # complete remaining but not one sensor value
+])
+def test_incomplete_or_unproven_tyres_are_never_trusted(wheels):
+    assert not wheels_trusted(wheels) and not stored_wheels_trusted(json.dumps(wheels))
+    assert accepted_sensors(snapshot(wheels=wheels), True, True) == {"wheels": None, "fuel": None}
+    assert field_status("Medium", wheels, None)["tyre_remaining_min"] is None   # display and persistence agree
 
 
-@pytest.mark.parametrize("order", ["owner_first", "observer_first"])
-async def test_both_arrival_orders_end_with_the_owners_values_and_shared_facts(db, order):
-    owner, observer, sid = await field(db)
-    seen = checkpoint(0, wheels=PLACEHOLDER, fuel=(50.0, 100.0))          # the observer's placeholder view of car 0
-    own = checkpoint(0)
-    first, second = ((owner, own), (observer, seen)) if order == "owner_first" else ((observer, seen), (owner, own))
-    await send(*first)
-    await send(*second)
-    row = await lap_row(db, sid, 0)
-    assert_owner_values(row)
-    assert (row["lap_time"], row["sector1"], row["sector3"], row["position"], row["pitstops"]) == (90.5, 30.0, 29.5, 1, 1)
-    assert row["compound_front"] == "Medium"
-    async with db.acquire() as conn:
-        assert await conn.fetchval("SELECT count(*) FROM laps") == 1
+def test_complete_real_tyres_are_trusted_by_display_and_persistence_alike():
+    assert wheels_trusted(REAL) and stored_wheels_trusted(json.dumps(REAL))
+    assert field_status("Medium", REAL, None)["tyre_remaining_min"] == .75
+    assert wheels_trusted([dict(remaining=0.0, pressure=0.0)] * 4), "0.0 remaining and a measured 0 kPa are real values"
 
 
-async def test_observer_alone_persists_facts_but_no_placeholder_sensors(db):
-    owner, observer, sid = await field(db)
-    await send(observer, checkpoint(0, wheels=PLACEHOLDER, fuel=(50.0, 100.0)))
-    row = await lap_row(db, sid, 0)
-    assert_placeholder_free(row)
-    assert (row["lap_time"], row["sector2"], row["compound_front"], row["position"]) == (90.5, 31.0, "Medium", 1)
-    async with db.acquire() as conn:
-        assert await conn.fetchval("SELECT has_telemetry FROM session_participants WHERE local_vehicle_id=0") is False
-    # Even sensor-looking values from a non-owner are not accepted, and the other car is its owner's data.
-    await send(observer, checkpoint(0, lap=6, wheels=REAL))
-    assert_placeholder_free(await lap_row(db, sid, 0, 6))
-    await send(observer, checkpoint(1, lap=5))
-    assert_owner_values(await lap_row(db, sid, 1))
+def test_acceptance_needs_owner_crossing_flag_and_real_tyres():
+    full = accepted_sensors(snapshot(), True, True)
+    assert full["fuel"] == (41.5, 100.0) and len(full["wheels"]) == 4
+    for owner, crossing, flag in ((False, True, True), (True, False, True), (True, True, False)):
+        assert accepted_sensors(snapshot(has_telemetry=flag), owner, crossing) == {"wheels": None, "fuel": None}
+    # Fuel is accepted only together with real tyre data (proof of the agent's own car), never on its own.
+    assert accepted_sensors(snapshot(wheels=PLACEHOLDER), True, True) == {"wheels": None, "fuel": None}
 
 
-async def test_owner_telemetry_is_idempotent_and_never_overwritten_by_null_or_placeholders(db):
-    owner, observer, sid = await field(db)
-    await send(owner, checkpoint(0))
-    before = dict(await lap_row(db, sid, 0))
-    await send(owner, checkpoint(0))                                                    # same checkpoint again
-    await send(owner, checkpoint(0, wheels=PLACEHOLDER, fuel=None))                     # garage-like placeholder
-    await send(owner, checkpoint(0, telemetry=False, wheels=[]))
-    await send(owner, checkpoint(0, wheels=[dict(remaining=.1, temp_inner=20.0)] * 4, fuel=(5.0, 100.0)))  # valid but later
-    await send(observer, checkpoint(0, wheels=PLACEHOLDER, fuel=(50.0, 100.0)))
-    assert dict(await lap_row(db, sid, 0)) == before
+@pytest.mark.parametrize("level,capacity,valid", [
+    (0.0, 100.0, True), (50.0, 100.0, True), (100.0, 100.0, True), (100.9, 100.0, True),
+    (101.5, 100.0, False), (150.0, 100.0, False), (-0.1, 100.0, False), (40.0, 0.0, False), (40.0, -5.0, False),
+    (None, 100.0, False), (40.0, None, False), (float("nan"), 100.0, False), (float("inf"), 100.0, False),
+    (40.0, float("inf"), False), (True, 100.0, False),
+])
+def test_fuel_plausibility(level, capacity, valid):
+    assert fuel_valid(level, capacity) is valid
+    assert (accepted_sensors(snapshot(fuel_remaining=level, fuel_capacity=capacity), True, True)["fuel"] is not None) is valid
 
 
-async def test_owner_repairs_only_missing_or_unusable_values(db):
-    owner, observer, sid = await field(db)
-    await send(observer, checkpoint(0, wheels=PLACEHOLDER))
-    async with db.acquire() as conn:   # a row as written before this fix: placeholder tyres, plausible-looking fuel
-        await conn.execute("""UPDATE laps SET tyre_snapshot=$1::jsonb,tyre_remaining_fl=1,tyre_remaining_fr=1,
-            tyre_remaining_rl=1,tyre_remaining_rr=1,fuel_remaining_l=60,fuel_capacity_l=120,has_telemetry=true""",
-                           json.dumps(PLACEHOLDER))
-    await send(owner, checkpoint(0))
-    row = await lap_row(db, sid, 0)
-    assert [row[f"tyre_remaining_{c}"] for c in ("fl", "fr", "rl", "rr")] == pytest.approx([.9, .8, .85, .75])
-    assert (row["fuel_remaining_l"], row["fuel_capacity_l"]) == (60, 120), "a stored fuel value is never replaced"
-    # Fuel arrives later than tyres: a missing fuel value is completed, valid tyres stay.
-    await send(owner, checkpoint(0, lap=6, fuel=None))
-    await send(observer, checkpoint(0, lap=6, wheels=PLACEHOLDER, fuel=(50.0, 100.0)))
-    partial = await lap_row(db, sid, 0, 6)
-    assert partial["fuel_remaining_l"] is None and partial["has_telemetry"] is True
-    await send(owner, checkpoint(0, lap=6, wheels=REAL[:1] * 4, fuel=(33.0, 100.0)))
-    done = await lap_row(db, sid, 0, 6)
-    assert done["fuel_remaining_l"] == 33.0
-    assert done["tyre_remaining_fl"] == pytest.approx(.9) and done["tyre_remaining_rr"] == pytest.approx(.75), "the first valid tyres are kept"
+def row(**extra):
+    return {"lap_time": 90.5, "sector1": 30.0, "sector2": 31.0, "sector3": 29.5, "pitstops": 1, "tyre_snapshot": None,
+            "fuel_remaining_l": None, "fuel_capacity_l": None, **extra}
 
 
-async def test_concurrent_writers_converge_on_one_row_with_owner_values(db):
-    owner, observer, sid = await field(db)
-    for lap in range(1, 9):
-        await asyncio.gather(send(observer, checkpoint(0, lap=lap, wheels=PLACEHOLDER, fuel=(50.0, 100.0))),
-                             send(owner, checkpoint(0, lap=lap)), send(observer, checkpoint(0, lap=lap, wheels=PLACEHOLDER)))
-    async with db.acquire() as conn:
-        assert await conn.fetchval("SELECT count(*) FROM laps l JOIN session_participants p ON p.id=l.session_participant_id "
-                                   "WHERE p.local_vehicle_id=0") == 8
-    for lap in range(1, 9):
-        assert_owner_values(await lap_row(db, sid, 0, lap))
+def test_checkpoint_compatibility_requires_the_same_lap_record():
+    base = {"last_lap_time": 90.5, "last_sector1": 30.0, "last_sector2": 31.0, "last_sector3": 29.5, "num_pitstops": 1}
+    assert checkpoint_compatible(row(), base)
+    assert checkpoint_compatible(row(), {**base, "last_lap_time": 90.5003})
+    assert checkpoint_compatible(row(sector2=None), {**base, "last_sector2": 31.7}), "unknown on one side is not a conflict"
+    for change in ({"last_lap_time": 92.0}, {"last_lap_time": None}, {"last_sector3": 30.5}, {"num_pitstops": 2}):
+        assert not checkpoint_compatible(row(), {**base, **change})
 
 
-async def test_reconnects_keep_provenance_from_the_database_not_runtime_state(db):
-    owner, observer, sid = await field(db)
-    await send(observer, checkpoint(0, wheels=PLACEHOLDER))
-    main.runtime.clear()                                    # server restart or lost sockets
-    assert await deliver(owner, scoring(roster(), kind="Race", player=0, clock=101)) == sid
-    await send(owner, checkpoint(0))
-    assert_owner_values(await lap_row(db, sid, 0))
-    main.runtime.clear()
-    assert await deliver(observer, scoring(roster(), kind="Race", player=1, clock=102)) == sid
-    await send(observer, checkpoint(0, wheels=PLACEHOLDER, fuel=(50.0, 100.0)))
-    assert_owner_values(await lap_row(db, sid, 0))
-    await send(observer, checkpoint(0, lap=6, wheels=PLACEHOLDER))
-    assert_placeholder_free(await lap_row(db, sid, 0, 6))
+def test_completion_fills_only_what_is_missing_and_never_overwrites_valid_values():
+    both = accepted_sensors(snapshot(), True, True)
+    plan = completion_updates(row(), both)
+    assert plan["fuel_remaining_l"] == 41.5 and plan["fuel_capacity_l"] == 100.0 and "tyre_snapshot" in plan
+    assert completion_updates(row(tyre_snapshot=json.dumps(REAL), fuel_remaining_l=30.0, fuel_capacity_l=100.0), both) == {}
+    # Unusable stored tyres (placeholder, short) are replaced; trusted ones are kept.
+    for bad in (json.dumps(PLACEHOLDER), json.dumps(REAL[:1]), "not json", None):
+        assert "tyre_snapshot" in completion_updates(row(tyre_snapshot=bad, fuel_remaining_l=30.0, fuel_capacity_l=100.0), both)
+    # Missing or unusable capacity next to a valid stored level: only the capacity is completed.
+    for capacity in (None, 0.0, -1.0):
+        assert completion_updates(row(tyre_snapshot=json.dumps(REAL), fuel_remaining_l=40.0, fuel_capacity_l=capacity), both) \
+            == {"fuel_capacity_l": 100.0}
+    # ... unless the stored level is inconsistent with the incoming capacity; then the pair is replaced as a whole.
+    plan = completion_updates(row(tyre_snapshot=json.dumps(REAL), fuel_remaining_l=140.0, fuel_capacity_l=None), both)
+    assert plan == {"fuel_remaining_l": 41.5, "fuel_capacity_l": 100.0}
+    # A stored level above its own capacity is unusable and replaced.
+    assert completion_updates(row(tyre_snapshot=json.dumps(REAL), fuel_remaining_l=150.0, fuel_capacity_l=100.0), both) \
+        == {"fuel_remaining_l": 41.5, "fuel_capacity_l": 100.0}
+    # Nothing accepted, nothing written: placeholders and NULL never reach the row.
+    assert completion_updates(row(), {"wheels": None, "fuel": None}) == {}
 
 
-async def test_unresolved_participant_never_gets_sensor_values(db):
-    owner, observer, sid = await field(db)
-    async with db.acquire() as conn:
-        assert await conn.fetchval("SELECT driver_id FROM session_participants WHERE local_vehicle_id=5") is None
-    for agent in (owner, observer):
-        await send(agent, checkpoint(5, wheels=REAL, fuel=(20.0, 100.0)))
-    row = await lap_row(db, sid, 5)
-    assert_placeholder_free(row)
-    assert (row["lap_time"], row["compound_front"]) == (90.5, "Medium")
-    async with db.acquire() as conn:
-        assert await conn.fetchval("SELECT driver_id FROM session_participants WHERE local_vehicle_id=5") is None
+def frame(laps, player=0, clock=100.0, kind="Race", other=3):
+    return {"player_vehicle_id": player, "session_type": kind, "session_time": clock,
+            "vehicles": [{"id": 0, "total_laps": laps}, {"id": 1, "total_laps": other}]}
 
 
-async def test_other_drivers_agent_never_completes_a_car_it_does_not_own(db):
-    owner, observer, sid = await field(db)
-    await send(observer, checkpoint(0, wheels=PLACEHOLDER))
-    await send(observer, checkpoint(0, wheels=REAL, fuel=(41.5, 100.0)))      # same lap, plausible values, wrong owner
-    assert_placeholder_free(await lap_row(db, sid, 0))
-    async with db.acquire() as conn:
-        mine = await conn.fetchval("SELECT driver_id FROM session_participants WHERE local_vehicle_id=0")
-    assert mine == owner["driver_id"] != observer["driver_id"]
+def test_crossing_is_remembered_only_for_an_observed_increment_without_discontinuity():
+    seen = {}
+    observe_crossing(seen, {}, None, frame(4), 10.0)
+    assert seen == {}                                                   # first frame: nothing observed yet
+    observe_crossing(seen, frame(4), 10.0, frame(4, clock=101), 10.5)
+    assert seen == {}
+    observe_crossing(seen, frame(4, clock=101), 10.5, frame(5, clock=102), 11.0)
+    assert seen == {0: [5]}
+    observe_crossing(seen, frame(5, clock=102), 11.0, frame(6, clock=103), 11.5)
+    assert seen == {0: [5, 6]}
+    for n in range(7, 12):
+        observe_crossing(seen, frame(n - 1, clock=100 + n), 12.0, frame(n, clock=101 + n), 12.5)
+    assert seen[0] == [8, 9, 10, 11], "bounded memory"
 
 
-async def test_separate_races_with_the_same_local_vehicle_ids_stay_separate(db):
-    owner, observer, first = await field(db, track="Synthetic Circuit")
-    other = await make_agent(db, "other-split")
-    second = await deliver(other, scoring(roster(), kind="Race", player=0), track="Another Synthetic Circuit")
-    assert second != first
-    await send(owner, checkpoint(0))
-    assert_owner_values(await lap_row(db, first, 0))
-    assert await lap_row(db, second, 0) is None
-    await send(other, checkpoint(0, wheels=REAL[:2] * 2, fuel=(10.0, 80.0)))
-    assert (await lap_row(db, second, 0))["fuel_remaining_l"] == 10.0
-    assert_owner_values(await lap_row(db, first, 0))                       # the first race is untouched
-    async with db.acquire() as conn:   # one driver in two races: each participant keeps its own checkpoints
-        assert await conn.fetchval("SELECT count(DISTINCT session_id) FROM session_participants WHERE driver_id=$1",
-                                   other["driver_id"]) == 1
-
-
-async def test_damage_handling_is_unchanged_experimental_and_observer_independent(db):
-    owner, observer, sid = await field(db)
-    await send(observer, checkpoint(0, wheels=PLACEHOLDER))
-    assert json.loads((await lap_row(db, sid, 0))["damage"]) == {"dent_severity": [0, 1]}
-    await send(owner, checkpoint(0, **{}))
-    assert json.loads((await lap_row(db, sid, 0))["damage"]) == {"dent_severity": [0, 1]}
-
-
-async def test_participant_has_telemetry_follows_accepted_owner_telemetry_only(db):
-    owner, observer, sid = await field(db)
-
-    async def flag(car):
-        async with db.acquire() as conn:
-            return await conn.fetchval("SELECT has_telemetry FROM session_participants WHERE session_id=$1 "
-                                       "AND local_vehicle_id=$2", sid, car)
-    await send(observer, checkpoint(0, wheels=PLACEHOLDER))
-    assert await flag(0) is False
-    await send(owner, checkpoint(0))
-    assert await flag(0) is True
-    await send(observer, checkpoint(0, lap=6, wheels=PLACEHOLDER, fuel=(50.0, 100.0)))
-    assert await flag(0) is True, "a non-owner observation cannot flip the flag"
-    await send(owner, checkpoint(0, lap=7, wheels=PLACEHOLDER, fuel=None))
-    assert await flag(0) is False, "the owner's own snapshot without usable telemetry is accepted state too"
+@pytest.mark.parametrize("case", ["gap", "clock_back", "other_player", "other_type", "jump", "lap_back", "unknown_player"])
+def test_any_discontinuity_forgets_observed_crossings(case):
+    seen = {0: [5]}
+    previous, current, gap = frame(5, clock=110), frame(6, clock=111), 0.5
+    if case == "gap":
+        gap = 6.0
+    elif case == "clock_back":
+        current = frame(6, clock=50)
+    elif case == "other_player":
+        current = frame(6, player=1, clock=111)
+    elif case == "other_type":
+        current = frame(6, kind="Qualifying", clock=111)
+    elif case == "jump":
+        current = frame(7, clock=111)
+    elif case == "lap_back":
+        current = frame(4, clock=111)
+    else:
+        previous, current = frame(5, player=-1, clock=110), frame(6, player=-1, clock=111)
+    observe_crossing(seen, previous, 20.0, current, 20.0 + gap)
+    assert seen == {}
