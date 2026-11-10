@@ -115,6 +115,11 @@ def finite_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def tyre_sensors_present(wheels):
+    """True when at least one wheel carries a real sensor value (the only evidence of real tyre telemetry)."""
+    return any(finite_number(w.get(k)) for w in wheels or [] if isinstance(w, dict) for k in SENSOR_KEYS)
+
+
 def field_status(compound, wheels, dents):
     """Compact tyre/damage view of one checkpoint or snapshot; unknown stays None, nothing is guessed.
 
@@ -126,7 +131,7 @@ def field_status(compound, wheels, dents):
     """
     wheels = [w for w in wheels or [] if isinstance(w, dict)]
     corners = [w.get("remaining") for w in wheels]
-    sensors = any(finite_number(w.get(k)) for w in wheels for k in SENSOR_KEYS)
+    sensors = tyre_sensors_present(wheels)
     trusted = len(corners) == 4 and sensors and all(finite_number(v) and 0 <= v <= 1 for v in corners)
     regions = [v for v in dents if type(v) is int and v >= 0] if isinstance(dents, list) else []
     known_dents = bool(regions) and len(regions) == len(dents)

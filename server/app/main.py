@@ -25,6 +25,7 @@ from .chain import CHAIN_COLUMNS, CHAIN_JOINS, pop_chain
 from .domain import sample_due
 from .driver_live import focus_block
 from .fuel import fuel_report
+from .lap_sensors import accepted_sensors, owns_sensor_fields, stored_wheels_have_sensors
 from .lifecycle import end_observation, expire_observations, resolve_session
 from .lmu_resources import energy_diagnostics, lmu_resources, pit_settings
 from .migrations import migrate_sample_ids
@@ -755,6 +756,48 @@ def checkpoint_energy(state: dict[str, Any], local_id: int) -> float | None:
     return fraction(vehicle.get("energy_current_fraction")) if vehicle else None
 
 
+INSERT_LAP_SQL = """
+    INSERT INTO laps(
+        id,session_participant_id,lap_number,position,lap_time,sector1,sector2,sector3,
+        gap_to_leader,gap_ahead,fuel_remaining_l,fuel_capacity_l,compound_front,compound_rear,
+        tyre_remaining_fl,tyre_remaining_fr,tyre_remaining_rl,tyre_remaining_rr,in_pits,pitstops,finish_status,has_telemetry,tyre_snapshot,damage,
+        energy_remaining_fraction)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,$24::jsonb,$25)
+    ON CONFLICT(session_participant_id,lap_number) DO NOTHING
+"""
+
+
+async def complete_lap_sensors(conn, participant_id, lap_no, wheels, fuel):
+    """Owner checkpoint for a lap another observer already stored: fill only what is missing or unusable.
+
+    The row is locked, so concurrent writers serialise; the decision is made on the locked values, nothing but
+    the player-only columns is touched, a valid stored value is never replaced and nothing is ever set to NULL.
+    Repeating the same checkpoint changes nothing.
+    """
+    async with conn.transaction():
+        await _complete_locked(conn, participant_id, lap_no, wheels, fuel)
+
+
+async def _complete_locked(conn, participant_id, lap_no, wheels, fuel):
+    row = await conn.fetchrow("""SELECT tyre_snapshot,fuel_remaining_l,fuel_capacity_l FROM laps
+        WHERE session_participant_id=$1 AND lap_number=$2 FOR UPDATE""", participant_id, lap_no)
+    if row is None:
+        return
+    updates = {}
+    if wheels is not None and not stored_wheels_have_sensors(row["tyre_snapshot"]):
+        for corner, wheel in zip(("fl", "fr", "rl", "rr"), wheels):
+            updates[f"tyre_remaining_{corner}"] = wheel.get("remaining")
+        updates["tyre_snapshot"] = json.dumps(wheels)
+    if fuel is not None and row["fuel_remaining_l"] is None:
+        updates["fuel_remaining_l"], updates["fuel_capacity_l"] = fuel
+    if not updates:
+        return
+    # Column names come from the fixed set above; values are bound parameters.
+    sets = ",".join(f"{name}=${i}" + ("::jsonb" if name == "tyre_snapshot" else "") for i, name in enumerate(updates, 3))
+    await conn.execute(f"UPDATE laps SET {sets},has_telemetry=true WHERE session_participant_id=$1 AND lap_number=$2",
+                       participant_id, lap_no, *updates.values())
+
+
 async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any]) -> None:
     assert pool
     drivers = payload.get("drivers") or []
@@ -768,39 +811,39 @@ async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: d
             )
             if not p:
                 continue
+            # Tyre and fuel sensor values are real only for the car this agent drives (#59): accepted exclusively
+            # from the agent whose server-side driver is the participant's resolved driver.
+            owner = owns_sensor_fields(agent["driver_id"], p["driver_id"])
+            accepted = accepted_sensors(d, owner)
+            telemetry = accepted["wheels"] is not None or accepted["fuel"] is not None
             # Accepted snapshot state is independent of completed-lap insertability.
             # Keep scoring positions/pit occupancy and checkpoint freshness untouched.
+            # has_telemetry follows accepted owner telemetry only; other observers never change it.
             await conn.execute("""UPDATE session_participants SET
-                pitstops=GREATEST(pitstops,$2),finish_status=$3,has_telemetry=$4
+                pitstops=GREATEST(pitstops,$2),finish_status=$3,has_telemetry=CASE WHEN $5 THEN $4 ELSE has_telemetry END
                 WHERE id=$1""", p["id"], d.get("num_pitstops", 0),
-                d.get("finish_status", 0), bool(d.get("has_telemetry", False)))
-            wheels = d.get("wheels") or [{}, {}, {}, {}]
-            while len(wheels) < 4:
-                wheels.append({})
-            has_tel = bool(d.get("has_telemetry", False))
+                d.get("finish_status", 0), telemetry, owner)
             lap_no = int(d.get("total_laps") or 0)
             if lap_no <= 0 or not d.get("last_lap_time") or d["last_lap_time"] <= 0:
                 continue
+            wheels = accepted["wheels"] or [{}, {}, {}, {}]
+            fuel = accepted["fuel"] or (None, None)
+            raw_telemetry = bool(d.get("has_telemetry", False))   # damage keeps its experimental, unchanged handling
             # LMU mWear is tread remaining: 1.0=new, 0.0=destroyed. Preserve that explicit meaning.
-            await conn.execute(
-                """
-                INSERT INTO laps(
-                    id,session_participant_id,lap_number,position,lap_time,sector1,sector2,sector3,
-                    gap_to_leader,gap_ahead,fuel_remaining_l,fuel_capacity_l,compound_front,compound_rear,
-                    tyre_remaining_fl,tyre_remaining_fr,tyre_remaining_rl,tyre_remaining_rr,in_pits,pitstops,finish_status,has_telemetry,tyre_snapshot,damage,
-                    energy_remaining_fraction)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,$24::jsonb,$25)
-                ON CONFLICT(session_participant_id,lap_number) DO NOTHING
-                """,
+            status = await conn.execute(
+                INSERT_LAP_SQL,
                 uuid7(), p["id"], lap_no, d.get("position"), d.get("last_lap_time"),
                 d.get("last_sector1"), d.get("last_sector2"), d.get("last_sector3"), d.get("gap_to_leader"),
-                d.get("gap_ahead"), d.get("fuel_remaining"), d.get("fuel_capacity"),
+                d.get("gap_ahead"), fuel[0], fuel[1],
                 d.get("tire_compound_front_name"), d.get("tire_compound_rear_name"),
                 wheels[0].get("remaining"), wheels[1].get("remaining"), wheels[2].get("remaining"), wheels[3].get("remaining"),
-                bool(d.get("in_pits", False)), d.get("num_pitstops", 0), d.get("finish_status", 0), has_tel,
-                json.dumps(wheels) if has_tel else None, json.dumps(d.get("damage")) if has_tel else None,
+                bool(d.get("in_pits", False)), d.get("num_pitstops", 0), d.get("finish_status", 0), telemetry,
+                json.dumps(wheels) if accepted["wheels"] else None,
+                json.dumps(d.get("damage")) if raw_telemetry else None,
                 checkpoint_energy(state, local_id),
             )
+            if status.endswith(" 0") and telemetry:
+                await complete_lap_sensors(conn, p["id"], lap_no, accepted["wheels"], accepted["fuel"])
 
 
 async def store_strategy_sample(agent, session_id, payload):

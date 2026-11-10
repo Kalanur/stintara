@@ -19,7 +19,8 @@ async def setup_field(db):
 async def snapshot(agent, lap=10, stops=0, finish=0, lap_time=90, **context):
     payload = LapSnapshots.model_validate(dict(session_type="Race", session_time=100, drivers=[dict(
         id=7, total_laps=lap, num_pitstops=stops, finish_status=finish, last_lap_time=lap_time,
-        has_telemetry=True, in_pits=True, position=9)], **context)).model_dump()
+        has_telemetry=True, fuel_remaining=40.0, fuel_capacity=100.0, in_pits=True, position=9)],
+        **context)).model_dump()
     await main.handle_message(agent, "lmu", "lap_snapshots", payload)
 
 
