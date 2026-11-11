@@ -32,12 +32,11 @@ class Stream:
         self.now += dt
         resolved = self.epoch if epoch == "same" else epoch
         accepted = None
+        candidate = self.state.pop("meta_candidate", None)  # current_or_create_session takes it out first
         if session_id is not None:
             accepted = session_meta.confirm(
-                self.state, provider=self.provider, resolved_session_id=session_id,
+                self.state, candidate, provider=self.provider, resolved_session_id=session_id,
                 scoring=dict(session_time=clock, session_type=kind), changed=changed, source_epoch=resolved, now=self.now)
-        else:
-            self.state.pop("meta_candidate", None)
         self.state["session_id"] = session_id
         self.accepted.append(accepted)
         return accepted
@@ -245,6 +244,8 @@ def test_unresolved_frame_consumes_the_candidate():
     s.phase("green")
     s.info(0.0833)
     assert s.frame(None, 0.0) is None and "meta_candidate" not in s.state
+    assert session_meta.confirm(s.state, None, provider="lmu", resolved_session_id=race,
+                                scoring=dict(session_time=1.0), changed=False, source_epoch=None, now=s.now) is None
 
 
 def test_other_providers_define_no_end_clock():

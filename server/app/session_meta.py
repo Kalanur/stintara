@@ -58,12 +58,12 @@ def observe(state, provider, payload, source_epoch, now):
         laps=lap_limit(payload), epoch=source_epoch, at=now, phase=phase_of(state, now))
 
 
-def confirm(state, *, provider, resolved_session_id, scoring, changed, source_epoch, now):
-    """Resolve the pending candidate against the scoring frame that has just been resolved.
+def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed, source_epoch, now):
+    """Resolve a candidate against the scoring frame that has just been resolved.
 
-    Returns the accepted values (a dict with any of end_et, duration, laps) or None. Always consumes the candidate.
+    The caller removes the candidate from the runtime state before resolving, so a failed resolution can never
+    leave stale evidence behind. Returns the accepted values (a dict with any of end_et, duration, laps) or None.
     """
-    candidate = state.pop("meta_candidate", None)
     if not candidate:
         return None
     bracketed = (resolved_session_id is not None and candidate["session_id"] == resolved_session_id

@@ -673,6 +673,8 @@ async def authenticate_agent(token: str) -> asyncpg.Record | None:
 
 async def current_or_create_session(agent, payload, *, changed=False, source_epoch=None):
     state = runtime.setdefault(str(agent["id"]), {})
+    # Taken out of the runtime state first: whatever happens during resolution, the evidence is used at most once.
+    candidate = state.pop("meta_candidate", None)
     resolution_state = state.copy()
     known = {}
     async with pool.acquire() as conn, conn.transaction():
@@ -690,9 +692,7 @@ async def current_or_create_session(agent, payload, *, changed=False, source_epo
                     session_id, state.get("track_length_m"), state.get("weather_json", "{}"))
     if session_id:
         state.pop("session_meta_pending", None)
-        await bind_session_meta(state, agent, session_id, payload, changed, source_epoch)
-    else:
-        state.pop("meta_candidate", None)
+        await bind_session_meta(state, candidate, session_id, payload, changed, source_epoch)
     for key in ("pending_convergence", "convergence_invalidated", "post_finish_idle"):
         state.pop(key, None)
         if key in resolution_state:
@@ -708,10 +708,10 @@ async def current_or_create_session(agent, payload, *, changed=False, source_epo
     return session_id
 
 
-async def bind_session_meta(state, agent, session_id, payload, changed, source_epoch):
+async def bind_session_meta(state, candidate, session_id, payload, changed, source_epoch):
     """Commit SessionInfo limits only when the candidate is bracketed by frames of this very session (#20)."""
     accepted = session_meta.confirm(
-        state, provider=state["provider"], resolved_session_id=session_id, scoring=payload, changed=changed,
+        state, candidate, provider=state["provider"], resolved_session_id=session_id, scoring=payload, changed=changed,
         source_epoch=source_epoch, now=time.monotonic())
     if not accepted:
         return
