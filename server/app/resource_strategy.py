@@ -75,21 +75,17 @@ def finish_projection(completed, timing, lap_times, race=True):
     result = dict(kind="unavailable", finish_lap=None, pace_seconds=None)
     if not race or type(completed) is not int or completed < 0:
         return result
-    duration = nonnegative(timing.get("configured_minutes"))
-    if duration:
+    remaining_seconds = nonnegative(timing.get("remaining_seconds"))
+    if timing.get("end_et_seconds"):
         pace = [v for v in lap_times if finite_number(v) and v > 0][-5:]
-        elapsed = nonnegative(timing.get("elapsed_seconds"))
-        if len(pace) < 3 or elapsed is None:
-            return result
-        seconds = duration * 60
-        if not math.isfinite(seconds):
+        if len(pace) < 3 or remaining_seconds is None or not math.isfinite(remaining_seconds):
             return result
         typical = median(pace)
         if not math.isfinite(typical):
             ordered = sorted(pace)
             low, high = ordered[len(ordered)//2-1:len(ordered)//2+1]
             typical = low + (high - low) / 2
-        remaining = max(0, seconds - elapsed) / typical
+        remaining = remaining_seconds / typical
         if not math.isfinite(remaining):
             return result
         return dict(kind="timed_estimate", finish_lap=completed + math.ceil(remaining) + 1,

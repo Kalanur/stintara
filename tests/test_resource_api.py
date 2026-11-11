@@ -98,7 +98,7 @@ async def test_resource_stale_session_clock_and_samples(db):
 async def test_resource_timed_projection_api(db):
     _, sid, pid = await prepared(db)
     async with db.acquire() as conn:
-        await conn.execute('UPDATE sessions SET session_minutes=20 WHERE id=$1', sid)
+        await conn.execute('UPDATE sessions SET session_end_et_seconds=1200 WHERE id=$1', sid)
     p = await main.api_participant_strategy(sid, pid, 32)
     assert p['finish_projection'] == dict(kind='timed_estimate', finish_lap=40, pace_seconds=100)
 
@@ -106,7 +106,7 @@ async def test_resource_timed_projection_api(db):
 async def test_timed_pace_excludes_only_identified_pit_context(db):
     _, sid, pid = await prepared(db)
     async with db.acquire() as conn:
-        await conn.execute('UPDATE sessions SET session_minutes=20 WHERE id=$1', sid)
+        await conn.execute('UPDATE sessions SET session_end_et_seconds=1200 WHERE id=$1', sid)
         await conn.execute('DELETE FROM laps WHERE session_participant_id=$1', pid)
         for lap, seconds, in_pits in [(20, 90, False), (21, 100, False), (22, 110, False), (23, 400, True)]:
             await conn.execute('''INSERT INTO laps(id,session_participant_id,lap_number,lap_time,in_pits)

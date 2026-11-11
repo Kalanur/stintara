@@ -454,7 +454,7 @@ test('race full-field gaps, lap deficits and signed H2H use validated adjacency'
     gap_laps:null,laps_behind_leader:0,interval:i ? [null,.5,1.3][i] : null,
     interval_preceding_id:i ? syntheticId(i) : null}));
   const data={...sessionData(field),session:{session_type:'Race',track_name:'Synthetic Circuit'},
-    timing:{configured_laps:20,configured_minutes:null,elapsed_seconds:3661.9}};
+    timing:{configured_laps:20,configured_duration_seconds:null,end_et_seconds:null,remaining_seconds:null,elapsed_seconds:3661.9}};
   const page=await sessionHarness(data,`?focus=${field[1].id}`);
   for (const value of ['14.8 s','0.5 s','Interval to focus</dt><dd>-0.5 s',
     'Interval to focus</dt><dd>+1.3 s','20 laps','1:01:01','Completed laps']) assert.ok(page.root.innerHTML.includes(value),value);
@@ -473,13 +473,13 @@ test('session clock and focused persisted sectors label completed laps without p
   const field=syntheticField(1);
   Object.assign(field[0],{total_laps:0,sector_lap_number:2,sector1:30.5,sector2:31.25,sector3:null});
   const data={...sessionData(field),session:{session_type:'Race'},
-    timing:{configured_minutes:30,configured_laps:null,elapsed_seconds:0}};
+    timing:{configured_duration_seconds:1800,end_et_seconds:1934,remaining_seconds:1934,configured_laps:null,elapsed_seconds:0}};
   const page=await sessionHarness(data,`?focus=${field[0].id}`);
-  for (const value of ['30 min','0:00:00','0 completed laps','checkpoint lap 2','0:30.500','0:31.250'])
+  for (const value of ['30:00','0:00:00','Time remaining: 0:32:14','0 completed laps','checkpoint lap 2','0:30.500','0:31.250'])
     assert.ok(page.root.innerHTML.includes(value),value);
   assert.match(page.root.innerHTML,/Last timed lap sectors/);
   assert.doesNotMatch(page.root.innerHTML,/Last completed lap sectors/);
-  assert.doesNotMatch(page.root.innerHTML,/remaining laps|Current lap|Remaining time|official remaining/i);
+  assert.doesNotMatch(page.root.innerHTML,/remaining laps|Current lap|official remaining/i);
   await page.poll({...data,live:false,timing:{...data.timing,elapsed_seconds:123}});
   assert.match(page.root.innerHTML,/Elapsed session time: —/);
   const h=helpers();
@@ -636,7 +636,7 @@ test('compact focus status reuses timing rules, escapes names and distinguishes 
 });
 
 test('focus summary follows UUID selection and precedes larger sections without removing context', async () => {
-  const field=syntheticField(2), data={...sessionData(field),timing:{configured_minutes:80,elapsed_seconds:120}};
+  const field=syntheticField(2), data={...sessionData(field),timing:{configured_duration_seconds:4800,end_et_seconds:4956,remaining_seconds:4836,elapsed_seconds:120}};
   data.session.session_type='Race';
   const page=await sessionHarness(data);
   assert.doesNotMatch(page.root.innerHTML,/aria-label="Focus status"/);
@@ -644,7 +644,7 @@ test('focus summary follows UUID selection and precedes larger sections without 
   let html=page.root.innerHTML;
   assert.ok(html.indexOf('class="status"') < html.indexOf('aria-label="Focus status"'));
   assert.ok(html.indexOf('aria-label="Focus status"') < html.indexOf('aria-label="Weather"'));
-  for (const value of ['80 min','0:02:00','Focused timing','Relative','Head-to-Head','Full field']) assert.ok(html.includes(value),value);
+  for (const value of ['80:00','0:02:00','Focused timing','Relative','Head-to-Head','Full field']) assert.ok(html.includes(value),value);
   await page.poll({...data,participants:[field[1]]});
   assert.doesNotMatch(page.root.innerHTML,/aria-label="Focus status"/);
 });

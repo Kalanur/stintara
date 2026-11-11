@@ -77,6 +77,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_seen_at timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Session limits (#20), written only after a SessionInfo is bracketed by frames of this very session.
+-- session_end_et_seconds: end of the session on the provider's session clock (same clock as the scoring
+-- session_time), NOT a duration. session_duration_seconds: configured duration, only when derived reliably.
+-- Legacy session_minutes is no longer written; its old values are not trustworthy and are never read.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_end_et_seconds double precision
+    CHECK (session_end_et_seconds IS NULL OR session_end_et_seconds > 0);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_duration_seconds double precision
+    CHECK (session_duration_seconds IS NULL OR session_duration_seconds > 0);
 -- Persisted Practice -> Qualifying -> Race order (#43): set only from a directly observed same-agent
 -- transition, never inferred afterwards. One successor per session; races/events carry the shared context.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id uuid

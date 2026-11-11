@@ -13,9 +13,14 @@ async def at(agent, kind, clock=100, track=TRACK, laps=0, minutes=None):
     info = {"track_name": track}
     if minutes is not None:
         info["session_minutes"] = minutes
-    await main.handle_message(agent, "lmu", "session_info", info)
-    main.runtime.get(str(agent["id"]), {}).pop("last_persisted_scoring", None)  # production persists at 1 Hz
-    await main.handle_message(agent, "lmu", "scoring", scoring(vehicles, clock=clock, player=1, kind=kind))
+    # With a limit the info/scoring pair is repeated: session limits are bound only after a bracketed,
+    # repeated SessionInfo while the race is green (#20).
+    for _ in range(3 if minutes is not None else 1):
+        if minutes is not None:
+            await main.handle_message(agent, "lmu", "race_control", {"phase": "green"})
+        await main.handle_message(agent, "lmu", "session_info", info)
+        main.runtime.get(str(agent["id"]), {}).pop("last_persisted_scoring", None)  # production persists at 1 Hz
+        await main.handle_message(agent, "lmu", "scoring", scoring(vehicles, clock=clock, player=1, kind=kind))
     return main.runtime[str(agent["id"])]["session_id"]
 
 

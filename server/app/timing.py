@@ -99,13 +99,23 @@ def project_timing(participants, session_type):
 
 
 def session_timing(session, scoring):
+    """Elapsed clock, remaining time and the configured limits of a session.
+
+    ``end_et_seconds`` is the end of the session on the provider's session clock (not a duration);
+    ``remaining_seconds`` follows from it. ``configured_duration_seconds`` is only known when it was derived
+    reliably. Unknown stays None; nothing here guesses a limit.
+    """
     elapsed = scoring.get("session_time")
-    minutes, laps = session.get("session_minutes"), session.get("session_laps")
-    duration = minutes if nonnegative(minutes) and minutes > 0 else None
-    # Positive duration takes precedence; a simultaneous lap value may be a projection/sentinel.
-    distance = laps if session.get("session_type") == "Race" and not duration and lap_count(laps) and laps > 0 else None
-    return dict(elapsed_seconds=elapsed if nonnegative(elapsed) else None,
-                configured_laps=distance, configured_minutes=duration)
+    elapsed = elapsed if nonnegative(elapsed) else None
+    end, laps = session.get("session_end_et_seconds"), session.get("session_laps")
+    end = end if nonnegative(end) and end > 0 else None
+    duration = session.get("session_duration_seconds")
+    duration = duration if nonnegative(duration) and duration > 0 else None
+    # A known end takes precedence; a simultaneous lap value may be a projection/sentinel.
+    distance = laps if session.get("session_type") == "Race" and not end and lap_count(laps) and laps > 0 else None
+    return dict(elapsed_seconds=elapsed, configured_laps=distance, end_et_seconds=end,
+                remaining_seconds=max(0, end - elapsed) if end is not None and elapsed is not None else None,
+                configured_duration_seconds=duration)
 
 
 SENSOR_KEYS = ("temp_inner", "temp_mid", "temp_outer", "carcass_temp", "brake_temp", "pressure")

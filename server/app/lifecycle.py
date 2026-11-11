@@ -27,8 +27,9 @@ async def race_ran_its_course(conn, previous):
     clock = previous["last_session_time"]
     if previous["session_type"] != "Race" or not finite(clock):
         return False
-    minutes, laps = previous["session_minutes"], previous["session_laps"]
-    if minutes and minutes > 0 and clock >= minutes * 60:
+    # Only a bound end of the session clock counts (#20); an unknown end never claims the race is over.
+    end, laps = previous["session_end_et_seconds"], previous["session_laps"]
+    if finite(end) and end > 0 and clock >= end:
         return True
     if laps and laps > 0:
         done = await conn.fetchval("SELECT max(total_laps) FROM session_participants WHERE session_id=$1", previous["id"])
@@ -217,11 +218,10 @@ async def resolve_session(conn, agent, state, scoring, timeout_seconds):
         session_id = uuid7()
         await conn.execute("""
             INSERT INTO sessions(id,simulator_provider,session_type,track_name,
-                track_length_m,game_version,session_laps,session_minutes,weather)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+                track_length_m,game_version,weather)
+            VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
         """, session_id, provider, scoring["session_type"], track,
-            state.get("track_length_m"), state.get("game_version"),
-            state.get("session_laps"), state.get("session_minutes"), state.get("weather_json", "{}"))
+            state.get("track_length_m"), state.get("game_version"), state.get("weather_json", "{}"))
         await attach_observation(conn, session_id, agent["id"])
         # Exactly one live session of this agent was just left by a genuine transition (#43).
         if len(rows) == 1 and chain_continues(
