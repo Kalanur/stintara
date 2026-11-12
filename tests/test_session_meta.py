@@ -126,6 +126,87 @@ def test_duration_stays_unknown_without_a_consistent_pre_race_reference():
     assert accepted == {"end_et": pytest.approx(1934.0)}  # the end is known, the duration is not guessed
 
 
+@pytest.mark.parametrize("wait", [5.0, 60.0])  # within the expiry (clock mismatch) and beyond it (expired)
+def test_stale_pre_race_reference_keeps_the_end_but_not_the_duration(wait):
+    """Codex P2 (#65): reference at clock 64, race green at 134, end 1934 must not yield 1870 s."""
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 64.0, 64 / 60)  # consistent with its own clock, but not the clock of the green transition
+    s.now += wait
+    s.phase("formation")
+    s.frame(race, 130.0)
+    s.phase("green")
+    s.pair(race, 134.0, 32.2333333)
+    assert s.pair(race, 135.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+    assert session_meta.merge(row(), s.accepted[-1]) == (pytest.approx(1934.0), None, None)
+
+
+def test_reference_from_another_session_or_epoch_is_not_used():
+    for kind in ("session", "epoch"):
+        s, race, other = Stream(epoch=3), uuid7(), uuid7()
+        s.frame(race, 0.0)
+        s.phase("formation")
+        s.pair(race, 134.0, 134 / 60)
+        if kind == "session":
+            s.frame(other, 134.2)  # the stream resolved to another session in between
+            race = other
+        else:
+            s.epoch = 4  # Pitwall reconnected
+            s.frame(race, 134.2)
+        s.phase("green")
+        s.pair(race, 135.0, 32.2333333)
+        assert s.pair(race, 136.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}, kind
+
+
+def test_changed_frame_discards_the_reference():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 134.0, 134 / 60)
+    s.frame(race, 3.0, changed=True)
+    s.phase("green")
+    s.pair(race, 135.0, 32.2333333)
+    assert s.pair(race, 136.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_reference_expires_before_a_late_green():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 134.0, 134 / 60)
+    s.now += session_meta.PRE_MAX_AGE_SECONDS + 5
+    s.phase("green")
+    s.frame(race, 140.0)
+    assert s.pair(race, 141.0, 32.2333333) is None
+    assert s.pair(race, 142.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}  # clock 134 vs green 140: no duration
+
+
+def test_missing_phase_before_green_means_no_observed_transition():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 134.0, 134 / 60)
+    s.now += 2
+    s.state.pop("race_control")  # race control silent: the transition itself was not observed
+    s.frame(race, 135.5)
+    s.phase("green")
+    s.pair(race, 136.0, 32.2333333)
+    assert s.pair(race, 137.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_green_clock_is_taken_once_at_the_first_green_frame():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 134.0, 134 / 60)
+    s.phase("green")
+    s.frame(race, 135.0)
+    green = s.state["meta_pre"]["green_clock"]
+    s.frame(race, 200.0)
+    assert s.state["meta_pre"]["green_clock"] == green == 135.0
+
+
 def test_joining_a_running_race_knows_the_end_but_not_the_duration():
     s, race = Stream(), uuid7()
     assert all(a is None or "duration" not in a for a in bound_race(s, race))

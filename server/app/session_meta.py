@@ -23,6 +23,7 @@ PRE_PHASES = ("pre_session", "formation")
 MIN_DURATION_SECONDS = 60.0
 PRE_CLOCK_TOLERANCE_SECONDS = 5.0  # the pre-race end must coincide with the clock at which the race goes green
 END_EPSILON_SECONDS = 0.5
+PRE_MAX_AGE_SECONDS = 30.0         # a pre-race reference expires unless it is refreshed this shortly before green
 
 
 def finite(value):
@@ -58,12 +59,38 @@ def observe(state, provider, payload, source_epoch, now):
         laps=lap_limit(payload), epoch=source_epoch, at=now, phase=phase_of(state, now))
 
 
+def track_green(state, *, resolved_session_id, scoring, changed, source_epoch, now):
+    """Observe the pre-race -> green transition of the confirmed session on every resolved scoring frame.
+
+    The reference (``meta_pre``) belongs to one session and one connection generation and expires. Its
+    ``green_clock`` is the session clock of the first frame whose fresh phase is timed, and only when the frame
+    before it (same session and epoch) was observed in a pre-race phase. A missing, stale or delayed transition
+    leaves no ``green_clock``, so the duration stays unknown.
+    """
+    phase = phase_of(state, now)
+    clock = scoring.get("session_time")
+    previous = state.get("meta_phase")
+    state["meta_phase"] = dict(session_id=resolved_session_id, epoch=source_epoch, phase=phase)
+    pre = state.get("meta_pre")
+    if pre and (changed or resolved_session_id is None or pre["session_id"] != resolved_session_id
+                or pre["epoch"] != source_epoch or now - pre["at"] < 0
+                or ("green_clock" not in pre and now - pre["at"] > PRE_MAX_AGE_SECONDS)):
+        state.pop("meta_pre", None)
+        pre = None
+    if (pre and "green_clock" not in pre and phase in TIMED_PHASES and finite(clock) and clock >= pre["clock"]
+            and previous and previous["phase"] in PRE_PHASES
+            and previous["session_id"] == resolved_session_id and previous["epoch"] == source_epoch):
+        pre["green_clock"], pre["green_at"] = clock, now
+
+
 def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed, source_epoch, now):
     """Resolve a candidate against the scoring frame that has just been resolved.
 
     The caller removes the candidate from the runtime state before resolving, so a failed resolution can never
     leave stale evidence behind. Returns the accepted values (a dict with any of end_et, duration, laps) or None.
     """
+    track_green(state, resolved_session_id=resolved_session_id, scoring=scoring, changed=changed,
+                source_epoch=source_epoch, now=now)
     if not candidate:
         return None
     bracketed = (resolved_session_id is not None and candidate["session_id"] == resolved_session_id
@@ -80,7 +107,8 @@ def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed
     clock = scoring.get("session_time")
     if candidate["phase"] in PRE_PHASES and candidate["end_et"] is not None and finite(clock):
         # Pre-race countdown: never an end, only the reference point for deriving the race duration later.
-        state["meta_pre"] = dict(session_id=resolved_session_id, end_et=candidate["end_et"], clock=clock)
+        state["meta_pre"] = dict(session_id=resolved_session_id, epoch=source_epoch, end_et=candidate["end_et"],
+                                 clock=clock, at=now)
     accepted = {}
     if count < CONFIRMATIONS:
         return None
@@ -91,8 +119,13 @@ def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed
             and finite(clock) and end > clock):
         accepted["end_et"] = end
         pre = state.get("meta_pre")
+        # The reference must belong to the actual green transition of this session: same session and epoch, a
+        # green clock observed right after it, and a pre-race end that coincides with that clock.
         if (scoring.get("session_type") == "Race" and pre and pre["session_id"] == resolved_session_id
+                and pre["epoch"] == source_epoch and "green_clock" in pre
                 and abs(pre["end_et"] - pre["clock"]) <= PRE_CLOCK_TOLERANCE_SECONDS
+                and abs(pre["end_et"] - pre["green_clock"]) <= PRE_CLOCK_TOLERANCE_SECONDS
+                and 0 <= pre["green_at"] - pre["at"] <= PRE_MAX_AGE_SECONDS
                 and end - pre["end_et"] >= MIN_DURATION_SECONDS):
             accepted["duration"] = round(end - pre["end_et"], 3)
     return accepted or None

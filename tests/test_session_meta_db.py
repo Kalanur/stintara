@@ -82,6 +82,20 @@ async def test_race_never_inherits_the_qualifying_end_and_derives_its_own(db):
     assert (await limits(db, race))["session_minutes"] is None  # the legacy column is no longer written
 
 
+async def test_stale_pre_race_reference_binds_the_end_but_leaves_the_duration_unknown(db):
+    """Codex P2 (#65): last countdown at clock 64, race green at 134, end 1934 must not store 1870 s."""
+    agent = await make_agent(db)
+    await qualifying(agent)
+    race = await send(agent, 0.0, minutes=10.5, phase="pre_session")
+    await send(agent, 64.0, minutes=64 / 60, phase="formation")
+    await send(agent, 130.0, phase="formation")  # later pre-race metadata is missing
+    for clock in (134.0, 135.0, 136.0, 137.0):
+        await send(agent, clock, minutes=32.2333333, phase="green")
+    bound = await limits(db, race)
+    assert bound["session_end_et_seconds"] == pytest.approx(RACE_END)
+    assert bound["session_duration_seconds"] is None
+
+
 async def test_api_timing_separates_configured_duration_from_remaining_time(db):
     agent = await make_agent(db)
     _, race = await race_from_qualifying(agent)
