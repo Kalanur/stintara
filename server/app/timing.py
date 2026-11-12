@@ -2,6 +2,8 @@
 import math
 from collections import Counter
 
+from . import session_meta
+
 
 def nonnegative(value):
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -107,7 +109,7 @@ def session_timing(session, scoring):
     """
     elapsed = scoring.get("session_time")
     elapsed = elapsed if nonnegative(elapsed) else None
-    end, laps = session.get("session_end_et_seconds"), session.get("session_laps")
+    end, laps = session.get("session_end_et_seconds"), session_meta.trusted_laps(session)
     end = end if nonnegative(end) and end > 0 else None
     duration = session.get("session_duration_seconds")
     duration = duration if nonnegative(duration) and duration > 0 else None

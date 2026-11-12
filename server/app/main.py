@@ -446,7 +446,7 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     async with pool.acquire() as conn:
         session = await conn.fetchrow(f"""SELECT s.id, s.track_name, s.session_type,
             s.simulator_provider, s.started_at, s.last_seen_at, s.status,
-            s.session_laps, s.session_end_et_seconds, s.session_duration_seconds, s.weather, s.track_length_m, ({SESSION_LIVE_SQL}) AS live,
+            s.session_laps, s.session_laps_confirmed, s.session_end_et_seconds, s.session_duration_seconds, s.weather, s.track_length_m, ({SESSION_LIVE_SQL}) AS live,
             {CHAIN_COLUMNS}
             FROM sessions s {CHAIN_JOINS} WHERE s.id=$1""", session_id)
         if not session:
@@ -542,7 +542,7 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
     # The GET is entirely read-only, including local Engineer overrides.
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         context = await conn.fetchrow(f"""SELECT p.total_laps,p.finish_status,p.local_vehicle_id,
-            s.session_type,s.session_laps,s.session_end_et_seconds,s.session_duration_seconds,s.simulator_provider,({SESSION_LIVE_SQL}) AS live
+            s.session_type,s.session_laps,s.session_laps_confirmed,s.session_end_et_seconds,s.session_duration_seconds,s.simulator_provider,({SESSION_LIVE_SQL}) AS live
             FROM sessions s JOIN session_participants p ON p.session_id=s.id
             WHERE s.id=$1 AND p.id=$2""", session_id, participant_id)
         if not context:
@@ -716,14 +716,15 @@ async def bind_session_meta(state, candidate, session_id, payload, changed, sour
     if not accepted:
         return
     async with pool.acquire() as conn, conn.transaction():
-        row = await conn.fetchrow("""SELECT session_end_et_seconds,session_duration_seconds,session_laps
-            FROM sessions WHERE id=$1 AND status='live' FOR UPDATE""", session_id)
+        row = await conn.fetchrow("""SELECT session_end_et_seconds,session_duration_seconds,session_laps,
+            session_laps_confirmed FROM sessions WHERE id=$1 AND status='live' FOR UPDATE""", session_id)
         if not row:
             return
-        end, duration, laps = session_meta.merge(row, accepted)
-        if (end, duration, laps) != (row["session_end_et_seconds"], row["session_duration_seconds"], row["session_laps"]):
+        end, duration, laps, confirmed = session_meta.merge(row, accepted)
+        if (end, duration, laps, confirmed) != (row["session_end_et_seconds"], row["session_duration_seconds"],
+                                                row["session_laps"], row["session_laps_confirmed"]):
             await conn.execute("""UPDATE sessions SET session_end_et_seconds=$2,session_duration_seconds=$3,
-                session_laps=$4 WHERE id=$1""", session_id, end, duration, laps)
+                session_laps=$4,session_laps_confirmed=$5 WHERE id=$1""", session_id, end, duration, laps, confirmed)
 
 
 def remember_participants(state, session_id, known):

@@ -8,6 +8,7 @@ from .convergence import (
     matching_rosters,
     namespace_key,
 )
+from . import session_meta
 from .domain import same_session
 from .uuid7 import uuid7
 
@@ -28,7 +29,7 @@ async def race_ran_its_course(conn, previous):
     if previous["session_type"] != "Race" or not finite(clock):
         return False
     # Only a bound end of the session clock counts (#20); an unknown end never claims the race is over.
-    end, laps = previous["session_end_et_seconds"], previous["session_laps"]
+    end, laps = previous["session_end_et_seconds"], session_meta.trusted_laps(previous)
     if finite(end) and end > 0 and clock >= end:
         return True
     if laps and laps > 0:

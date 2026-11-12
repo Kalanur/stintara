@@ -43,6 +43,16 @@ def lap_limit(payload):
     return laps if type(laps) is int and 0 < laps < 2**31 - 1 else None
 
 
+def trusted_laps(row):
+    """The lap limit of a session row, only when it was confirmed by the binding rule (provenance, #20).
+
+    One definition for merge(), race_ran_its_course() and session_timing(): a stored ``session_laps`` whose
+    ``session_laps_confirmed`` is not true (legacy rows, placeholders) is unknown, never a race length.
+    """
+    laps = row.get("session_laps")
+    return laps if row.get("session_laps_confirmed") is True and lap_limit({"session_laps": laps}) is not None else None
+
+
 def phase_of(state, now):
     """Fresh simulator-neutral race-control phase, else None."""
     control = state.get("race_control")
@@ -59,24 +69,28 @@ def observe(state, provider, payload, source_epoch, now):
         laps=lap_limit(payload), epoch=source_epoch, at=now, phase=phase_of(state, now))
 
 
-def track_green(state, *, resolved_session_id, scoring, changed, source_epoch, now):
+def drop_foreign_reference(state, *, resolved_session_id, changed, source_epoch, now):
+    """Forget a pre-race reference that cannot belong to the frame being resolved or that has expired."""
+    pre = state.get("meta_pre")
+    if pre and (changed or resolved_session_id is None or pre["session_id"] != resolved_session_id
+                or pre["epoch"] != source_epoch or now - pre["at"] < 0
+                or ("green_clock" not in pre and now - pre["at"] > PRE_MAX_AGE_SECONDS)):
+        state.pop("meta_pre", None)
+
+
+def track_green(state, *, resolved_session_id, scoring, source_epoch, now):
     """Observe the pre-race -> green transition of the confirmed session on every resolved scoring frame.
 
-    The reference (``meta_pre``) belongs to one session and one connection generation and expires. Its
     ``green_clock`` is the session clock of the first frame whose fresh phase is timed, and only when the frame
-    before it (same session and epoch) was observed in a pre-race phase. A missing, stale or delayed transition
-    leaves no ``green_clock``, so the duration stays unknown.
+    before it (same session and epoch) was observed in a pre-race phase. It is taken once and never replaced. A
+    missing, stale or delayed transition leaves no ``green_clock``, so the duration stays unknown. Runs on every
+    resolved frame, with or without a SessionInfo candidate, and after the reference of this frame was recorded.
     """
     phase = phase_of(state, now)
     clock = scoring.get("session_time")
     previous = state.get("meta_phase")
     state["meta_phase"] = dict(session_id=resolved_session_id, epoch=source_epoch, phase=phase)
     pre = state.get("meta_pre")
-    if pre and (changed or resolved_session_id is None or pre["session_id"] != resolved_session_id
-                or pre["epoch"] != source_epoch or now - pre["at"] < 0
-                or ("green_clock" not in pre and now - pre["at"] > PRE_MAX_AGE_SECONDS)):
-        state.pop("meta_pre", None)
-        pre = None
     if (pre and "green_clock" not in pre and phase in TIMED_PHASES and finite(clock) and clock >= pre["clock"]
             and previous and previous["phase"] in PRE_PHASES
             and previous["session_id"] == resolved_session_id and previous["epoch"] == source_epoch):
@@ -89,26 +103,31 @@ def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed
     The caller removes the candidate from the runtime state before resolving, so a failed resolution can never
     leave stale evidence behind. Returns the accepted values (a dict with any of end_et, duration, laps) or None.
     """
-    track_green(state, resolved_session_id=resolved_session_id, scoring=scoring, changed=changed,
-                source_epoch=source_epoch, now=now)
-    if not candidate:
-        return None
-    bracketed = (resolved_session_id is not None and candidate["session_id"] == resolved_session_id
-                 and not changed and candidate["epoch"] == source_epoch
-                 and candidate["track"] == state.get("track_name")
-                 and 0 <= now - candidate["at"] <= BIND_MAX_AGE_SECONDS)
-    if not bracketed:
-        state.pop("meta_seen", None)
-        return None
-    claim = (resolved_session_id, candidate["end_et"], candidate["laps"])
-    seen = state.get("meta_seen")
-    count = seen["count"] + 1 if seen and seen["claim"] == claim else 1
-    state["meta_seen"] = dict(claim=claim, count=count)
+    drop_foreign_reference(state, resolved_session_id=resolved_session_id, changed=changed,
+                           source_epoch=source_epoch, now=now)
+    bracketed = bool(candidate) and (
+        resolved_session_id is not None and candidate["session_id"] == resolved_session_id
+        and not changed and candidate["epoch"] == source_epoch
+        and candidate["track"] == state.get("track_name")
+        and 0 <= now - candidate["at"] <= BIND_MAX_AGE_SECONDS)
     clock = scoring.get("session_time")
-    if candidate["phase"] in PRE_PHASES and candidate["end_et"] is not None and finite(clock):
-        # Pre-race countdown: never an end, only the reference point for deriving the race duration later.
-        state["meta_pre"] = dict(session_id=resolved_session_id, epoch=source_epoch, end_et=candidate["end_et"],
-                                 clock=clock, at=now)
+    count = 0
+    if bracketed:
+        claim = (resolved_session_id, candidate["end_et"], candidate["laps"])
+        seen = state.get("meta_seen")
+        count = seen["count"] + 1 if seen and seen["claim"] == claim else 1
+        state["meta_seen"] = dict(claim=claim, count=count)
+        pre = state.get("meta_pre")
+        if (candidate["phase"] in PRE_PHASES and candidate["end_et"] is not None and finite(clock)
+                and not (pre and "green_clock" in pre)):  # an already observed transition is never overwritten
+            # Pre-race countdown: never an end, only the reference point for deriving the race duration later.
+            state["meta_pre"] = dict(session_id=resolved_session_id, epoch=source_epoch, end_et=candidate["end_et"],
+                                     clock=clock, at=now)
+    elif candidate:
+        state.pop("meta_seen", None)
+    track_green(state, resolved_session_id=resolved_session_id, scoring=scoring, source_epoch=source_epoch, now=now)
+    if not bracketed:
+        return None
     accepted = {}
     if count < CONFIRMATIONS:
         return None
@@ -132,19 +151,22 @@ def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed
 
 
 def merge(row, accepted):
-    """New (end_et, duration, laps) for a session row given accepted values.
+    """New (end_et, duration, laps, laps_confirmed) for a session row given accepted values.
 
     Write-once per dimension: a limit that is already known is never replaced by a later claim, because the
     legitimate flow (pre-race countdown -> green) never accepts a value before the real end is known. A session
-    is limited by time or by laps, never both, so the first confirmed dimension wins.
+    is limited by time or by laps, never both, so the first confirmed dimension wins. Only a *confirmed* lap
+    limit counts as known: a legacy, unverified ``session_laps`` neither blocks a confirmed end (it is left
+    untouched) nor survives a newly confirmed lap limit (which then replaces it).
     """
-    end, duration, laps = row["session_end_et_seconds"], row["session_duration_seconds"], row["session_laps"]
-    laps_known = laps is not None and laps > 0
+    end, duration = row["session_end_et_seconds"], row["session_duration_seconds"]
+    laps, confirmed = row["session_laps"], row.get("session_laps_confirmed") is True
+    laps_known = trusted_laps(row) is not None
     if "end_et" in accepted and end is None and not laps_known:
         end = accepted["end_et"]
         duration = accepted.get("duration", duration)
     elif "duration" in accepted and duration is None and end is not None and abs(accepted["end_et"] - end) <= END_EPSILON_SECONDS:
         duration = accepted["duration"]
     if "laps" in accepted and not laps_known and end is None:
-        laps = accepted["laps"]
-    return end, duration, laps
+        laps, confirmed = accepted["laps"], True
+    return end, duration, laps, confirmed

@@ -139,7 +139,7 @@ def test_stale_pre_race_reference_keeps_the_end_but_not_the_duration(wait):
     s.phase("green")
     s.pair(race, 134.0, 32.2333333)
     assert s.pair(race, 135.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
-    assert session_meta.merge(row(), s.accepted[-1]) == (pytest.approx(1934.0), None, None)
+    assert session_meta.merge(row(), s.accepted[-1]) == (pytest.approx(1934.0), None, None, False)
 
 
 def test_reference_from_another_session_or_epoch_is_not_used():
@@ -205,6 +205,64 @@ def test_green_clock_is_taken_once_at_the_first_green_frame():
     green = s.state["meta_pre"]["green_clock"]
     s.frame(race, 200.0)
     assert s.state["meta_pre"]["green_clock"] == green == 135.0
+
+
+def test_last_pre_race_candidate_bracketed_by_the_first_green_frame_keeps_the_transition():
+    """Codex P2 (#65): the reference is consumed by the very frame that observes the green transition."""
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)  # last pre-race frame at 133
+    s.info(134 / 60)  # reference end 134, captured while the phase was still pre-race
+    s.phase("green")
+    s.frame(race, 134.5)  # first green frame brackets it
+    pre = s.state["meta_pre"]
+    assert (pre["end_et"], pre["green_clock"]) == (pytest.approx(134.0), 134.5)
+    s.pair(race, 135.5, 32.2333333)
+    accepted = s.pair(race, 136.5, 32.2333333)
+    assert accepted == {"end_et": pytest.approx(1934.0), "duration": pytest.approx(1800.0)}
+    assert session_meta.merge(row(), accepted)[:3] == (pytest.approx(1934.0), pytest.approx(1800.0), None)
+
+
+def test_track_green_works_without_any_candidate():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)
+    s.phase("green")
+    assert s.frame(race, 134.5) is None and "meta_candidate" not in s.state  # no SessionInfo at all
+    assert s.state["meta_pre"]["green_clock"] == 134.5
+
+
+@pytest.mark.parametrize("fault", ["epoch", "session", "track"])
+def test_unbracketed_candidate_neither_replaces_nor_extends_the_reference(fault):
+    s, race, other = Stream(epoch=3), uuid7(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)
+    before = dict(s.state["meta_pre"])
+    s.info(300 / 60, epoch=4 if fault == "epoch" else "same", track="Other Circuit" if fault == "track" else TRACK)
+    s.phase("green")
+    s.frame(other if fault == "session" else race, 134.5)
+    pre = s.state.get("meta_pre")
+    if fault == "session":
+        assert pre is None  # a reference never survives a session change
+    else:
+        assert pre["end_et"] == before["end_et"] and pre["green_clock"] == 134.5  # the foreign candidate is no reference
+
+
+def test_observed_transition_is_not_overwritten_by_a_later_pre_race_candidate():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)
+    s.phase("green")
+    s.frame(race, 134.5)
+    green = s.state["meta_pre"]["green_clock"]
+    s.info(500 / 60)
+    s.state["meta_candidate"]["phase"] = "formation"  # a stale candidate that still carries a pre-race phase
+    s.frame(race, 135.0)
+    assert s.state["meta_pre"]["green_clock"] == green and s.state["meta_pre"]["end_et"] == pytest.approx(134.0)
 
 
 def test_joining_a_running_race_knows_the_end_but_not_the_duration():
@@ -361,19 +419,42 @@ def test_unusable_end_values_are_never_an_end(minutes):
     assert session_meta.provider_end_clock_seconds("lmu", {"session_minutes": minutes}) is None
 
 
-def row(end=None, duration=None, laps=None):
-    return dict(session_end_et_seconds=end, session_duration_seconds=duration, session_laps=laps)
+def row(end=None, duration=None, laps=None, confirmed=None):
+    """A session row; a lap value is confirmed unless the test says it is a legacy, unverified one."""
+    return dict(session_end_et_seconds=end, session_duration_seconds=duration, session_laps=laps,
+                session_laps_confirmed=bool(laps) if confirmed is None else confirmed)
 
 
 def test_merge_is_write_once_per_dimension():
-    assert session_meta.merge(row(), {"end_et": 1934.0, "duration": 1800.0}) == (1934.0, 1800.0, None)
-    assert session_meta.merge(row(1934.0, 1800.0), {"end_et": 2400.0}) == (1934.0, 1800.0, None)  # never replaced
-    assert session_meta.merge(row(1934.0), {"end_et": 1934.2, "duration": 1800.0}) == (1934.0, 1800.0, None)
-    assert session_meta.merge(row(1934.0), {"end_et": 3000.0, "duration": 2866.0}) == (1934.0, None, None)
+    assert session_meta.merge(row(), {"end_et": 1934.0, "duration": 1800.0}) == (1934.0, 1800.0, None, False)
+    assert session_meta.merge(row(1934.0, 1800.0), {"end_et": 2400.0}) == (1934.0, 1800.0, None, False)  # never replaced
+    assert session_meta.merge(row(1934.0), {"end_et": 1934.2, "duration": 1800.0}) == (1934.0, 1800.0, None, False)
+    assert session_meta.merge(row(1934.0), {"end_et": 3000.0, "duration": 2866.0}) == (1934.0, None, None, False)
 
 
 def test_merge_keeps_one_limit_dimension_per_session():
-    assert session_meta.merge(row(laps=20), {"end_et": 5.0}) == (None, None, 20)
-    assert session_meta.merge(row(end=1934.0), {"laps": 1}) == (1934.0, None, None)
-    assert session_meta.merge(row(laps=0), {"laps": 20}) == (None, None, 20)
-    assert session_meta.merge(row(laps=20), {"laps": 30}) == (None, None, 20)
+    assert session_meta.merge(row(laps=20), {"end_et": 5.0}) == (None, None, 20, True)
+    assert session_meta.merge(row(end=1934.0), {"laps": 1}) == (1934.0, None, None, False)
+    assert session_meta.merge(row(laps=0), {"laps": 20}) == (None, None, 20, True)
+    assert session_meta.merge(row(laps=20), {"laps": 30}) == (None, None, 20, True)
+
+
+def test_legacy_lap_placeholder_does_not_block_a_confirmed_end_and_stays_untouched():
+    legacy = row(laps=999, confirmed=False)  # written before the provenance rule, e.g. a placeholder
+    assert session_meta.trusted_laps(legacy) is None
+    assert session_meta.merge(legacy, {"end_et": 4956.0, "duration": 4800.0}) == (4956.0, 4800.0, 999, False)
+
+
+def test_confirmed_lap_limit_replaces_a_legacy_value_and_is_then_write_once():
+    legacy = row(laps=999, confirmed=False)
+    assert session_meta.merge(legacy, {"laps": 20}) == (None, None, 20, True)
+    assert session_meta.merge(row(laps=20), {"laps": 30}) == (None, None, 20, True)
+    assert session_meta.merge(row(laps=20), {"end_et": 4956.0}) == (None, None, 20, True)  # confirmed laps still win
+
+
+@pytest.mark.parametrize("laps,confirmed,expected", [
+    (20, True, 20), (20, False, None), (20, None, None), (999, False, None), (0, True, None), (None, True, None),
+    (True, True, None), (2**31 - 1, True, None), (12.0, True, None)])
+def test_trusted_laps_needs_provenance_and_a_usable_value(laps, confirmed, expected):
+    assert session_meta.trusted_laps(dict(session_laps=laps, session_laps_confirmed=confirmed)) == expected
+    assert session_meta.trusted_laps(dict(session_laps=laps)) is None  # a row without the flag is unverified
