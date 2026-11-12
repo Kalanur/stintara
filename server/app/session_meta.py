@@ -24,6 +24,7 @@ MIN_DURATION_SECONDS = 60.0
 PRE_CLOCK_TOLERANCE_SECONDS = 5.0  # the pre-race end must coincide with the clock at which the race goes green
 END_EPSILON_SECONDS = 0.5
 PRE_MAX_AGE_SECONDS = 30.0         # a pre-race reference expires unless it is refreshed this shortly before green
+CLOCK_ROLLBACK_SECONDS = 2.0       # same tolerance as the ingest path uses to call a clock jump a reset
 
 
 def finite(value):
@@ -54,10 +55,18 @@ def trusted_laps(row):
 
 
 def phase_of(state, now):
-    """Fresh simulator-neutral race-control phase, else None."""
+    """Fresh race-control phase that was observed after the last session boundary, else None.
+
+    The general race-control cache is untouched; session metadata has its own generation bound
+    (``meta_phase_floor``, set by :func:`note_boundary`): a phase received before the confirmed session change,
+    clock rollback or connection change can describe the previous session and is no evidence for this one.
+    """
     control = state.get("race_control")
-    age = now - state.get("race_control_at", float("-inf"))
+    received = state.get("race_control_at", float("-inf"))
+    age = now - received
     if not isinstance(control, dict) or not 0 <= age <= RACE_CONTROL_FRESH_SECONDS:
+        return None
+    if received <= state.get("meta_phase_floor", float("-inf")):
         return None
     return control.get("phase")
 
@@ -67,6 +76,26 @@ def observe(state, provider, payload, source_epoch, now):
     state["meta_candidate"] = dict(
         session_id=state.get("session_id"), track=payload["track_name"], end_et=provider_end_clock_seconds(provider, payload),
         laps=lap_limit(payload), epoch=source_epoch, at=now, phase=phase_of(state, now))
+
+
+def note_boundary(state, *, resolved_session_id, scoring, changed, source_epoch, now):
+    """Start a new evidence generation when the resolved frame is not a continuation of the previous one.
+
+    A boundary is a changed frame (session type, track or clock rollback), another resolved session, another
+    connection generation (``source_epoch``) or a clock rollback seen against the previous resolved frame. Phase
+    evidence, repetition counts and the pre-race reference of the old generation are discarded; metadata can only be
+    bound again after a race-control observation that arrives later. The first frame of a stream is no boundary.
+    """
+    previous = state.get("meta_phase")
+    clock = scoring.get("session_time")
+    boundary = bool(changed) or (previous is not None and (
+        previous["session_id"] != resolved_session_id or previous["epoch"] != source_epoch
+        or (finite(clock) and finite(previous.get("clock")) and clock < previous["clock"] - CLOCK_ROLLBACK_SECONDS)))
+    if boundary:
+        state["meta_phase_floor"] = now
+        for key in ("meta_seen", "meta_pre", "meta_phase"):
+            state.pop(key, None)
+    return boundary
 
 
 def drop_foreign_reference(state, *, resolved_session_id, changed, source_epoch, now):
@@ -89,7 +118,7 @@ def track_green(state, *, resolved_session_id, scoring, source_epoch, now):
     phase = phase_of(state, now)
     clock = scoring.get("session_time")
     previous = state.get("meta_phase")
-    state["meta_phase"] = dict(session_id=resolved_session_id, epoch=source_epoch, phase=phase)
+    state["meta_phase"] = dict(session_id=resolved_session_id, epoch=source_epoch, phase=phase, clock=clock)
     pre = state.get("meta_pre")
     if (pre and "green_clock" not in pre and phase in TIMED_PHASES and finite(clock) and clock >= pre["clock"]
             and previous and previous["phase"] in PRE_PHASES
@@ -103,6 +132,8 @@ def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed
     The caller removes the candidate from the runtime state before resolving, so a failed resolution can never
     leave stale evidence behind. Returns the accepted values (a dict with any of end_et, duration, laps) or None.
     """
+    note_boundary(state, resolved_session_id=resolved_session_id, scoring=scoring, changed=changed,
+                  source_epoch=source_epoch, now=now)
     drop_foreign_reference(state, resolved_session_id=resolved_session_id, changed=changed,
                            source_epoch=source_epoch, now=now)
     bracketed = bool(candidate) and (
@@ -112,8 +143,11 @@ def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed
         and 0 <= now - candidate["at"] <= BIND_MAX_AGE_SECONDS)
     clock = scoring.get("session_time")
     count = 0
+    running = bracketed and candidate["phase"] in TIMED_PHASES and phase_of(state, now) in TIMED_PHASES
     if bracketed:
-        claim = (resolved_session_id, candidate["end_et"], candidate["laps"])
+        # The evidence class is part of the claim: repetitions made without a running phase (pre-race countdown,
+        # stale or missing race control) never count towards a later confirmation under a running phase.
+        claim = (resolved_session_id, candidate["end_et"], candidate["laps"], running)
         seen = state.get("meta_seen")
         count = seen["count"] + 1 if seen and seen["claim"] == claim else 1
         state["meta_seen"] = dict(claim=claim, count=count)
@@ -132,10 +166,11 @@ def confirm(state, candidate, *, provider, resolved_session_id, scoring, changed
     if count < CONFIRMATIONS:
         return None
     end = candidate["end_et"]
-    if candidate["laps"] is not None and end is None:
-        accepted["laps"] = candidate["laps"]  # a simultaneous time end wins: the lap value may be a placeholder
-    if (end is not None and candidate["phase"] in TIMED_PHASES and phase_of(state, now) in TIMED_PHASES
-            and finite(clock) and end > clock):
+    if (candidate["laps"] is not None and end is None and running and scoring.get("session_type") == "Race"):
+        # A lap limit needs the same evidence as an end: a fresh running phase of this session, never the pre-race
+        # period (a timed race reports a countdown of 0 with a lap placeholder there). A simultaneous time end wins.
+        accepted["laps"] = candidate["laps"]
+    if end is not None and running and finite(clock) and end > clock:
         accepted["end_et"] = end
         pre = state.get("meta_pre")
         # The reference must belong to the actual green transition of this session: same session and epoch, a

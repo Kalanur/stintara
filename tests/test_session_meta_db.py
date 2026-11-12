@@ -153,12 +153,58 @@ async def test_no_green_phase_means_no_end(db):
 
 async def test_lap_limited_race_binds_laps_without_an_end(db):
     agent = await make_agent(db)
-    race = await send(agent, 100.0, minutes=0.0, session_laps=20)
+    race = await send(agent, 100.0, minutes=0.0, session_laps=20, phase="green")
     for i in range(1, 4):
-        await send(agent, 100.0 + i, minutes=0.0, session_laps=20)
+        await send(agent, 100.0 + i, minutes=0.0, session_laps=20, phase="green")
     row = await limits(db, race)
     assert row["session_laps"] == 20 and row["session_end_et_seconds"] is None
     assert (await main.api_session_live(race))["timing"]["configured_laps"] == 20
+
+
+async def test_lap_placeholder_in_the_pre_race_never_blocks_the_time_end(db):
+    """Codex P2 (#65): countdown 0 with a lap placeholder, repeated in formation, is not a lap limit."""
+    agent = await make_agent(db)
+    race = await send(agent, 0.0, minutes=0.0, session_laps=999, phase="pre_session")
+    for clock in (67.0, 68.0, 69.0, 70.0):
+        await send(agent, clock, minutes=0.0, session_laps=999, phase="formation")
+    pre = await limits(db, race)
+    assert pre["session_laps"] is None and pre["session_end_et_seconds"] is None
+    for clock in (135.0, 136.0, 137.0):
+        await send(agent, clock, minutes=32.2333333, session_laps=999, phase="green")
+    bound = await limits(db, race)
+    assert bound["session_end_et_seconds"] == pytest.approx(RACE_END) and bound["session_laps"] is None
+
+
+async def test_cached_qualifying_green_never_binds_the_race_countdown(db):
+    """Codex P2 (#65): the Race arrives while the Qualifying green is still cached (< 5 s old)."""
+    agent = await make_agent(db)
+    quali = await qualifying(agent)
+    race = await send(agent, 0.0, minutes=10.5)  # no race-control message since the Qualifying green
+    assert race and race != quali
+    for clock in (1.0, 2.0, 3.0, 4.0):
+        await send(agent, clock, minutes=64 / 60)  # the pre-race countdown, still no new race-control message
+    assert (await limits(db, race))["session_end_et_seconds"] is None
+    await send(agent, 67.0, minutes=0.0, phase="formation")  # first race-control observation of this session
+    for clock in (135.0, 136.0, 137.0):
+        await send(agent, clock, minutes=32.2333333, phase="green")
+    assert (await limits(db, race))["session_end_et_seconds"] == pytest.approx(RACE_END)
+    assert (await limits(db, quali))["session_end_et_seconds"] == pytest.approx(QUALI_END)
+
+
+async def test_reconnect_after_a_boundary_and_two_agents_stay_independent(db):
+    a, b = await make_agent(db, "one"), await make_agent(db, "two")
+    quali, race = await race_from_qualifying(a, bind=False)
+    assert await send(b, 135.0, minutes=32.2333333, phase="green") == race  # B joins the same Race
+    for i in range(1, 4):
+        await send(b, 135.0 + i, minutes=32.2333333, phase="green")
+    assert (await limits(db, race))["session_end_et_seconds"] == pytest.approx(RACE_END)
+    # A sees a reconnect (new connection generation): old evidence is gone, the known end stays untouched.
+    await main.handle_message(a, "lmu", "connection", {"game_connected": False, "telemetry_valid": False})
+    await main.handle_message(a, "lmu", "connection", {"game_connected": True, "telemetry_valid": True})
+    for i in range(4):
+        await send(a, 200.0 + i, minutes=0.0, session_laps=999)
+    bound = await limits(db, race)
+    assert bound["session_end_et_seconds"] == pytest.approx(RACE_END) and bound["session_laps"] is None
 
 
 async def test_second_observer_cannot_replace_a_known_end(db):
