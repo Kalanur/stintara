@@ -1,4 +1,5 @@
 """Provider-neutral session/observation persistence; no RaceControl inference."""
+from . import session_meta
 from .convergence import (
     OBSERVATION_FRESH_SECONDS,
     TRANSITION_GRACE_SECONDS,
@@ -8,7 +9,6 @@ from .convergence import (
     matching_rosters,
     namespace_key,
 )
-from . import session_meta
 from .domain import same_session
 from .uuid7 import uuid7
 
