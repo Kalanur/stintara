@@ -172,12 +172,17 @@ def test_stale_unknown_capability_and_unavailable_finish():
 
 def test_finish_laps_timed_upper_bound_and_pace():
     assert finish_projection(28, dict(configured_laps=48), [])['finish_lap'] == 48
-    t = dict(configured_minutes=80, elapsed_seconds=2880, configured_laps=999)
+    t = dict(end_et_seconds=4800, remaining_seconds=4800 - 2880, configured_laps=999)
     f = finish_projection(28, t, [100, 102, 101, None, -1, math.nan])
     assert f == dict(kind='timed_estimate', finish_lap=49, pace_seconds=101)
     assert finish_projection(28, t, [100, 101])['kind'] == 'unavailable'
     assert finish_projection(28, t, [100]*3, race=False)['kind'] == 'unavailable'
-    assert finish_projection(28, dict(configured_minutes=1, elapsed_seconds=70), [100]*3)['finish_lap'] == 29
+    assert finish_projection(28, dict(end_et_seconds=60, remaining_seconds=0), [100]*3)['finish_lap'] == 29
+    # An unknown end (or unknown remaining time) never yields a timed estimate.
+    assert finish_projection(28, dict(end_et_seconds=None, remaining_seconds=None), [100]*3)['kind'] == 'unavailable'
+    assert finish_projection(28, dict(end_et_seconds=4800, remaining_seconds=None), [100]*3)['kind'] == 'unavailable'
+    # The stale qualifying value of the 2026-11-11 race: a 630 s end at clock 721 s gives "current lap" forever.
+    # It must never reach this function again, because it is no longer bound to the race (see test_session_meta).
 
 
 def test_lmu_capability_is_not_inferred_from_zero():
@@ -198,8 +203,64 @@ def test_setting_rounding_handles_binary_noise_without_safety_multiplier():
 
 
 def test_finite_extremes_cannot_overflow_public_projection_or_settings():
-    projection = finish_projection(1, dict(configured_minutes=10, elapsed_seconds=1), [1e308]*4)
+    projection = finish_projection(1, dict(end_et_seconds=600, remaining_seconds=599), [1e308]*4)
     assert projection['pace_seconds'] == 1e308
     p = plan([resource('fuel', 1, 1.7e308, 8e307, True, 5, 'L')], completed=1, stop=3, end=4)
     assert p['status'] == 'unsafe_plan'
     assert pit_settings(p) is None  # Expected addition overflows; no nonfinite JSON.
+
+
+def cp(lap, level, stops=0, in_pits=False):
+    return dict(lap_number=lap, energy_remaining_fraction=level, pitstops=stops, in_pits=in_pits)
+
+
+def test_checkpoint_energy_median_of_last_five_valid_transitions():
+    from server.app.resource_strategy import energy_checkpoint_estimate
+    levels = [1, .9, .8, .7, .6, .5, .35]
+    e = energy_checkpoint_estimate([cp(i + 1, v) for i, v in enumerate(levels)])
+    assert e['sample_count'] == 5 and e['consumption_per_lap'] == pytest.approx(.1)
+    short = energy_checkpoint_estimate([cp(i + 1, v) for i, v in enumerate([1, .9, .8])])
+    assert short['consumption_per_lap'] is None and short['sample_count'] == 2  # Collecting, never guessed.
+
+
+@pytest.mark.parametrize('bad', [None, -.1, 1.2, float('nan'), True, '0.5'])
+def test_checkpoint_energy_invalid_levels_are_not_bridged(bad):
+    from server.app.resource_strategy import energy_checkpoint_estimate
+    rows = [cp(1, 1), cp(2, .9), cp(3, bad), cp(4, .7), cp(5, .6), cp(6, .5)]
+    # 1->.9 valid; .9->bad and bad->.7 dropped; .7->.6 and .6->.5 valid = 3 samples only.
+    assert energy_checkpoint_estimate(rows)['sample_count'] == 3
+
+
+def test_checkpoint_energy_excludes_refill_pit_gap_and_equal_levels():
+    from server.app.resource_strategy import energy_checkpoint_estimate
+    rows = [cp(1, .5), cp(2, 1.0), cp(3, .9, in_pits=True), cp(4, .8), cp(5, .8), cp(6, .7, stops=1), cp(8, .5)]
+    assert energy_checkpoint_estimate(rows)['sample_count'] == 0
+
+
+@pytest.mark.parametrize('current,fresh,use,state', [
+    (None, True, .1, 'no_current_value'), (.5, False, .1, 'stale'),
+    (.5, True, None, 'collecting'), (.5, True, .1, 'ready')])
+def test_resource_state_distinguishes_missing_stale_collecting_ready(current, fresh, use, state):
+    r = resource('energy', current, 1, use, fresh, 3, 'fraction')
+    assert r['state'] == state and r['available'] is (state == 'ready')
+
+
+def test_lmu_energy_missing_history_withholds_plan_but_keeps_live_value():
+    fuel = dict(current=dict(fuel_l=42, capacity_l=100, fresh=True),
+                estimate=dict(consumption_l_per_lap=2.8, sample_count=5))
+    sample = dict(energy_available=True, energy_kind='VIRTUAL_ENERGY', energy_history=[],
+                  energy_current_fraction=.63)
+    rs, known = lmu_resources(fuel, sample, [])
+    assert known and rs[1]['current'] == .63 and rs[1]['state'] == 'collecting'
+    p = plan_resources(rs, 28, dict(kind='exact', finish_lap=38), manual_stop=32)
+    assert p['status'] == 'collecting_or_stale'  # Never a fuel-only plan while VE is true.
+    assert pit_settings(p) is None
+    laps = [cp(i, 1 - i * .035) for i in range(1, 6)]
+    rs, _ = lmu_resources(fuel, sample, laps)
+    assert rs[1]['state'] == 'ready' and rs[1]['consumption_per_lap'] == pytest.approx(.035)
+    # Out-of-range or non-numeric current VE is unknown, not displayed as a level.
+    for bad in (1.5, -.2, 'x', True):
+        rs, _ = lmu_resources(fuel, dict(sample, energy_current_fraction=bad), laps)
+        assert rs[1]['current'] is None and rs[1]['state'] == 'no_current_value'
+    stale = dict(fuel, current=dict(fuel['current'], fresh=False))
+    assert lmu_resources(stale, sample, laps)[0][1]['state'] == 'stale'

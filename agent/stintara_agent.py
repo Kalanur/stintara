@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import uuid
 from time import monotonic
 
 import websockets
@@ -11,12 +12,16 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 try:
     from .config import load_config
     from .pitwall import normalize
+    from .version import PROTOCOL, version_text
 except ImportError:  # python agent/stintara_agent.py
     from config import load_config
     from pitwall import normalize
+    from version import PROTOCOL, version_text
 
 
-async def forward(pitwall, uplink):
+async def forward(pitwall, uplink, source_epoch=None):
+    # source_epoch identifies this Pitwall connection; the server uses it to tell a Pitwall restart from a
+    # continuous stream while the Stintara uplink stays open.
     last_sent = {}
     async for raw in pitwall:
         if not isinstance(raw, str):
@@ -29,13 +34,13 @@ async def forward(pitwall, uplink):
             continue
         kind, payload = normalized
         now = monotonic()
-        interval = {"scoring": 0.2, "telemetry": 1.0}.get(kind, 0.0)
+        interval = {"scoring": 0.2, "telemetry": 1.0, "race_control": 0.1}.get(kind, 0.0)
         if kind in last_sent and now - last_sent[kind] < interval:
             continue
-        await uplink.send(json.dumps({
-            "protocol": "stintara-agent-v1", "message_type": kind,
-            "payload": payload,
-        }, allow_nan=False, separators=(",", ":")))
+        message = {"protocol": PROTOCOL, "message_type": kind, "payload": payload}
+        if source_epoch:
+            message["source_epoch"] = source_epoch
+        await uplink.send(json.dumps(message, allow_nan=False, separators=(",", ":")))
         last_sent[kind] = now
 
 
@@ -44,7 +49,7 @@ async def bridge(uplink, config):
         try:
             async with websockets.connect(config.pitwall_ws, max_size=32 * 1024 * 1024, proxy=None) as pitwall:
                 print("Connected to LMU Pitwall")
-                await forward(pitwall, uplink)
+                await forward(pitwall, uplink, uuid.uuid4().hex)   # new generation per Pitwall connection
         except (OSError, WebSocketException, TimeoutError):
             if getattr(uplink, "close_code", None) is not None:
                 return  # run_once reports the uplink close, not a Pitwall failure
@@ -72,7 +77,7 @@ async def run_once(config):
 async def connected_run(config):
     async with websockets.connect(config.server_ws, max_size=1024 * 1024) as uplink:
         await uplink.send(json.dumps({
-            "type": "agent_hello", "protocol": "stintara-agent-v1",
+            "type": "agent_hello", "protocol": PROTOCOL,
             "token": config.token, "simulator": "lmu",
         }))
         welcome = json.loads(await asyncio.wait_for(uplink.recv(), timeout=10))
@@ -110,9 +115,9 @@ class SafeArgumentParser(argparse.ArgumentParser):
 
 
 def cli(argv=None):
-    parser = SafeArgumentParser(description="Stintara test agent; keep your JSON configuration private.")
+    parser = SafeArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter, description="Stintara test agent; keep your JSON configuration private.")
     parser.add_argument("--config", metavar="PATH", help="JSON config (default: beside the executable or agent script)")
-    parser.add_argument("--version", action="version", version="Stintara Agent 0.1.0")
+    parser.add_argument("--version", action="version", version=version_text())
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)

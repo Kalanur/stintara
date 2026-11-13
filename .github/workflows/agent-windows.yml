@@ -20,16 +20,27 @@ jobs:
       - run: python -m pip install -r agent/requirements-build.txt
       - name: Build onefile agent
         shell: pwsh
-        run: ./agent/build-windows.ps1
+        run: |
+          # The checked-out commit (PR builds check out a merge commit, not github.sha's head).
+          $rev = (git rev-parse HEAD).Trim()
+          ./agent/build-windows.ps1 -Channel ci -Revision $rev
+          "REVISION=$rev" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Smoke test without configuration or network
         shell: pwsh
         run: |
           ./dist/StintaraAgent.exe --help
           if ($LASTEXITCODE -ne 0) { throw 'Agent help failed' }
+      - name: Package and verify (version, revision, ZIP content, SHA256)
+        shell: pwsh
+        run: |
+          python tools/agent_release.py package --dist dist
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
+          python tools/agent_release.py verify --dist dist --channel ci --revision $env:REVISION
+          if ($LASTEXITCODE -ne 0) { throw 'Verification failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: StintaraAgent-windows
           if-no-files-found: error
           path: |
-            dist/StintaraAgent.exe
-            dist/stintara-agent.example.json
+            dist/StintaraAgent-*-windows-x64.zip
+            dist/SHA256SUMS.txt

@@ -36,12 +36,15 @@ async def test_transient_session_info_preserves_last_valid_session(db):
         assert state["track_name"] == info["track_name"] and state["track_length_m"] == 5771
         assert state["session_laps"] == 10
     await deliver({**info, "session_laps": 12})
-    assert state["session_id"] == session_id and state["session_laps"] == 12
+    assert state["session_id"] == session_id and state["session_laps"] == 12  # runtime is current at once
+    await deliver({**scoring, "session_time": 102})  # persisted only once scoring has resolved the session
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM sessions") == 1
         row = await conn.fetchrow("SELECT * FROM sessions WHERE id=$1", session_id)
         assert row["track_name"] == info["track_name"] and row["track_length_m"] == 5771
-        assert row["session_laps"] == 12 and row["status"] == "live"
+        # Limits are never taken from a SessionInfo that a single scoring frame merely follows (#20).
+        assert row["session_laps"] is None and row["status"] == "live"
+        assert state["session_laps"] == 12  # runtime shows the latest SessionInfo
         assert await conn.fetchval("SELECT fuel_l FROM strategy_samples LIMIT 1") == 42
 
 
@@ -153,7 +156,8 @@ async def test_lap_snapshot_idempotence_damage_and_no_live_regression(db):
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM laps") == 1
         row = await conn.fetchrow("SELECT * FROM laps")
-        assert row["id"].version == 7 and row["tyre_remaining_fl"] == 1
+        # One wheel, no observed lap crossing: sensor values stay unknown, never a placeholder (#59).
+        assert row["id"].version == 7 and row["tyre_remaining_fl"] is None
         assert json.loads(row["damage"])["dent_severity"] == [1, 0]
         assert await conn.fetchval("SELECT position FROM session_participants WHERE local_vehicle_id=7") == 1
 

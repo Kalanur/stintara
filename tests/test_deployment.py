@@ -84,8 +84,16 @@ def test_workflow_yaml_and_publish_contract():
                     "python -m pytest -q", "node --test tests/ui.test.cjs"):
         assert command in runs
     assert any("docker compose config --quiet" in command for command in runs)
+    browser = workflow["jobs"]["engineer-browser"]
+    assert browser["runs-on"] == "ubuntu-24.04"
+    browser_steps = browser["steps"]
+    assert any("playwright@1.65.0" in step.get("run", "") for step in browser_steps)
+    assert any("node tools/engineer_demo.cjs --viewports" in step.get("run", "") for step in browser_steps)
+    assert any("node tools/driver_live_demo.cjs --viewports" in step.get("run", "") for step in browser_steps)
+    artifacts = [step for step in browser_steps if step.get("uses", "").startswith("actions/upload-artifact")]
+    assert len(artifacts) == 1 and artifacts[0]["if"] == "failure()"
     job = workflow["jobs"]["docker"]
-    assert job["needs"] == "test"
+    assert job["needs"] == ["test", "engineer-browser"]
     assert job["permissions"]["packages"] == "write"
     steps = job["steps"]
     build = next(step for step in steps if step.get("uses", "").startswith("docker/build-push-action"))

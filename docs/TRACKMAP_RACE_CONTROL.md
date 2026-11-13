@@ -1,0 +1,266 @@
+# Track Map and Race Control (Engineer, experimental)
+
+Read-only live view in the Engineer Dashboard: learned track outline, current vehicle positions and a small
+race-control state. LMU Pitwall remains the local data source; the domain code is simulator-neutral and
+LMU-specific interpretation lives in `agent/pitwall.py`.
+
+## Transport (additive, `stintara-agent-v1`)
+
+- `ScoringUpdate` vehicles may carry `lap_dist`, `pos_x`, `pos_y`, `pos_z` (finite numbers or null).
+  Older agents omit them; the server then shows no vehicles and keeps the track in the learning state.
+- New message type `race_control` (adapter output of `VehicleStatusUpdate`):
+  `phase` (`pre_session|formation|green|full_course_yellow|session_stopped|session_over|unknown`),
+  `sector_flags` (3 × `clear|local_yellow|unknown`, index 0 = S1), `safety_car_active` (bool or null),
+  `player_sector` (1–3 or null) and `diagnostics` (raw provider values, never shown as state).
+- Deploy the server before the rebuilt agent: an older server rejects the unknown message type.
+
+## API
+
+`GET /api/sessions/{id}/live` gains a `track_map` object (no new polling loop; only the closed geometry is persisted, see
+"Persistent geometry"):
+`geometry` (`state`, `complete`, `closed`, `progress`, `points`, `point_sectors`, `sector_boundaries_m`, `sector_markers`),
+`vehicles` (position, pit flag, participant id), `vehicles_age_s`/`vehicles_fresh` (5 s) and `race_control`
+(with `age_s`/`fresh`, 5 s). Vehicles and race control are held in bounded runtime memory per agent and are never
+written to PostgreSQL. `geometry.source` is `learned` or `stored`; `static_only: true` marks a session without a fresh
+observation whose payload contains the persisted geometry only (no vehicles, no race control). A live `track_map`
+additionally carries `vehicles_seq`, `server_epoch` and `vehicle_refresh_ms` (see "Vehicles-only refresh").
+
+## Vehicles-only refresh (#55)
+
+`GET /api/sessions/{id}/vehicles` returns only the moving layer: `session_id`, `live`, `seq`, `server_epoch`, `vehicles`
+(same objects as `track_map.vehicles`: `participant_id`, `x`, `z`, `in_pits`, `position`, `name`), `vehicles_age_s`
+(3 decimals) and `vehicles_fresh` (5 s). The browser polls it every `track_map.vehicle_refresh_ms` (250 ms, clamped to
+100–2000 ms client-side) next to the unchanged 500 ms `/live` poll. Design rules:
+
+- **No PostgreSQL per poll.** The endpoint reads the same in-memory runtime state as `track_map`. `participant_id` comes from
+  a per-agent identity cache (`participant_index`: local vehicle id → participant id and stored display name) that is filled
+  from the `RETURNING` clause of the existing participant upsert, i.e. at the existing persistence cadence and with no extra
+  query. The cache is tagged with its session id, dropped on a session switch and ignored for any other session. A vehicle
+  without a cached participant keeps `participant_id: null`; nothing is matched by display name.
+- **Same exposure as `/live`.** The repository has no viewer authentication; the endpoint is exactly as public as the
+  `track_map` already served by `/live` and adds no new data. No agent, WebSocket or database protocol changed.
+- **Session scope.** Only a fresh (< 15 s) runtime observation of exactly the requested session answers with positions
+  (newest observation wins, as in `/live`). Historical, unknown or idle sessions answer `{"live": false, "vehicles": []}`
+  (HTTP 200, so the endpoint is no existence oracle); stored tracks never get positions.
+- **Ordering.** Every scoring frame receives a process-wide `scoring_seq`; `server_epoch` changes on every server start. The
+  page replaces held positions only with a newer `seq` of the same epoch (or any sample of a new epoch, or a changed freshness
+  of the same sample). The full `/live` payload carries the same pair, so a slow `/live` response can never overwrite newer
+  vehicles, and late answers of a stopped run, of another session or with `live: false` are dropped.
+- **Degradation.** One request in flight, 1.5 s time-out, exponential back-off (cadence × 2ⁿ, capped at 2 s), positions are
+  marked stale after 5 s without any valid answer (browser clock only), the loop stops while the tab is hidden and resumes
+  on `visibilitychange`, and it only runs for a live session whose `track_map` advertises `vehicle_refresh_ms`. An older
+  server (no advertisement) keeps the previous behaviour.
+- **Vehicle layer only.** The SVG is built from two parts, geometry and `<g id="trk-vehicles">`. A vehicles response
+  replaces only that group; the dashboard is not rebuilt. If the view box would change (vehicles outside the learned
+  bounds, learning geometry) only the map area is replaced; a freshness change renders the page once to update badges.
+- Not changed: geometry persistence, Race Control semantics, P labels and sector ticks (they are drawn by the same code in the
+  vehicle layer), Strategy and Driver Live. No interpolation, no WebSocket, no schema change.
+
+## Geometry learning rules (`server/app/trackmap.py`)
+
+The outline is learned from the player vehicle only. A running attempt starts at the start/finish line and is
+**discarded** on: pit context or unknown pit state, non-finite/missing position or lap distance, lap distance
+outside the small tolerance around the line, backwards lap-distance steps, steps over 120 m (unobserved
+track), position steps inconsistent with the travelled distance (teleports), too many points, session type
+change or session clock rewind. Points are spaced at least `max(8 m, length/500)`, at most 700 points.
+
+A lap wrap is necessary but **not sufficient**: the outline is closed only if the last stored point lies shortly
+before the lap end, the restart point shortly after the line, all point gaps are ≤ 60 m and the chord between the
+last and first point is consistent with the small arc between them. Otherwise nothing is connected; the panel
+shows `LEARNING TRACK` and the next clean lap is used. A partial outline never carries a closing edge.
+
+A learned outline is kept per (provider, track name, rounded length) in a bounded in-memory hot cache, so it
+survives Practice → Qualifying → Race and simulator reconnects. It is never reused for another track.
+
+## Persistent geometry (V0.2, `server/app/track_repo.py`)
+
+PostgreSQL table `track_geometries` is the durable source; `TrackStore` stays the hot cache and is filled lazily when a
+known track is attached (no global preload).
+
+- **Identity:** `UNIQUE(provider, track_name, track_length_key)` where the key is the rounded track length, i.e. exactly
+  the in-memory key. Names are never matched fuzzily; a missing or non-finite length means no persistence and no reuse.
+- **Stored:** raw simulator `(x, z)` points, matching lap distances, `length_m`, observed sector observations and derived
+  boundaries, `schema_version` (currently `1`), `learned_at`, `updated_at`. Never rotated, never vehicle positions,
+  never race-control history.
+- **When:** only after the learner accepted a closed, plausible lap. Incomplete or rejected attempts (pit, backwards,
+  lap-distance reset, gap, teleport, incomplete arc) are never written.
+- **Concurrency:** `INSERT .. ON CONFLICT DO NOTHING`; the first closed lap is canonical and a losing writer adopts the
+  stored geometry. Persistence inside a process is serialised by a lock. Sector data may be refreshed afterwards
+  (`UPDATE` of the sector columns only).
+- **Loading is fail-closed:** the row is re-validated with the learner's rules (finite values, equal counts, point count,
+  length plausibility and agreement with the key, strictly increasing distances, gap/teleport/closure checks, known
+  schema version). A rejected row is ignored and the track is learned again; a corrupt row of the current schema version
+  is replaced by the next closed lap, a row of an unknown (newer) schema version is left untouched. Corrupt sector data
+  drops only the sector layer.
+- **Resolution:** accepted geometry is quantised to the persisted 0.1 m resolution *before* it is judged; a point whose
+  rounded distance reaches the track length or does not advance is dropped, and `save_geometry` re-validates the record
+  with `validate_record` so nothing is written that a reload would reject.
+- **Database errors** never break ingest: the geometry stays in memory and persistence is retried after 30 s. A row of
+  another schema version (or a model that fails its own validation) is a stable `persist_blocked` state: no further
+  database work per message, live geometry keeps working, the row is never overwritten. A concurrent change is only a
+  short backoff (5 s), not a block. The block lasts until the model leaves the in-memory store (restart).
+- **Historical sessions:** without a fresh observation the session payload is `static_only` with the geometry read from
+  PostgreSQL and validated; a complete geometry that only exists in the hot cache (unsaved or blocked) is never shown as
+  stored.
+  The UI shows `STORED TRACK` and `POSITIONS UNAVAILABLE`; it never shows vehicles, flags or a race-control state.
+  An unknown track stays unknown.
+
+Sector boundaries are medians of observed forward transitions S1→S2 and S2→S3 of the learning vehicle. At least two
+agreeing observations and a majority of consistent ones are required; otherwise the sector layer is unknown and
+nothing is invented. S3→S1 is the start/finish line and is not used.
+
+## Race-control mapping and evidence
+
+Verified in two private championship captures (no raw data in this repository):
+
+| Provider value | Meaning used | Evidence |
+| --- | --- | --- |
+| sector flag `11` | clear | dominant state in all sessions |
+| sector flag `1` | local yellow | short, per-sector phases during the green phase; stationary cars were located in the flagged sector |
+| sector flag `2`, `3` | **unknown** (never yellow) | occurred only when the session was over |
+| `sector_flags[i]` | sector `i+1` | stationary cars under a flag were in sector 1/3 for index 0/2 (100 %) and sector 2 for index 1 (78 %) |
+| `player_sector` 1, 2, 0 | S1, S2, S3 | transitions 1→2→0→1 at stable lap distances over 45 laps |
+| game phase 0, 3, 5, 8 | pre-session, formation, green, session over | observed |
+| game phase 6, 7 | full course yellow, session stopped | **documented provider enum only, never observed** |
+| `yellow_flag_state`, `player_under_yellow` | not used | constant while sector flags changed |
+
+Unknown values degrade to `unknown`, are shown only as a muted "flag unrecognized" hint and are kept in
+`diagnostics`. A stale race-control feed (>5 s) is shown as stale, never as GREEN. No stopped-car or incident
+classification is made.
+
+`geometry.sector_markers` (Track Map V2) is `null` unless the closed geometry has two observed sector boundaries
+(`sector_boundaries_m`, the same agreeing-observation rule as before). Each marker is
+`{boundary: 1|2, point: [x, z], direction: [dx, dz]}` in raw simulator coordinates: the point on the learned centerline at
+that lap distance and the unit direction of the centerline segment there. A boundary that cannot be placed on the sampled
+arc yields no markers at all; nothing is guessed from fractions of the track length. The markers are derived, not persisted.
+
+## UI
+
+**Track Map V2 additions.** The focus vehicle gets a `P<position>` label and keeps its ring; the direct opponents are the
+adjacent provider positions with a unique match, exactly the Head-to-Head rule (`uniquePositionNeighbor`), never spatial
+proximity, so lapped cars, duplicate or unknown positions cannot select the wrong car. They get a dimmer blue ring and a
+`P<position>` label; all other vehicles stay unlabelled dots. Identity is `participant_id` only (an unresolved vehicle is
+never labelled). Labels are placed greedily (focus first, then ahead, then behind) at the position that collides with the
+fewest labels and vehicle dots, with a leader line to their dot; a rival without a free spot is dropped, the focus is always
+drawn. Labels appear only while vehicle positions are fresh. Text size is derived from the measured map area (about 12 px);
+the page re-renders once when that area changes (window resize, layout settling). Two short ticks across the centerline mark
+the observed sector boundaries (`sector_markers`), projected with the same AUTO/ORIGINAL transformation as the outline;
+without valid markers nothing is drawn. Class-based opponents are deliberately not part of this (Multiclass, issue #53).
+
+SVG without external libraries, fitted with preserved aspect ratio. World plane (x, z); elevation is ignored.
+Focus vehicle in cyan, pit vehicles hollow and dimmed, stale positions hollow gray with `POSITIONS STALE`.
+Local-yellow sectors are highlighted on the outline; without a known sector layer the yellow sector is reported by
+badge and a note only. A complete centerline can be shown `Orientation: AUTO` (default) or `ORIGINAL`, chosen per track
+name in `localStorage` (`stintara:trackmap:orientation:v1`; no server preference). AUTO is presentation only: it takes the
+principal axis of the centerline points (centroid and covariance, eigenvector angle `½·atan2(2·sxy, sxx−syy)` in the screen
+plane `(x, −z)`) and applies one proper rotation (no mirroring) to centerline, sector overlays, vehicles, focus and pit
+markers. Fewer than 8 valid points, no spread, a near-isotropic shape (minor/major standard deviation ≥ 0.9), a rotation
+below 0.5° or a partial/open geometry fall back to ORIGINAL. The remaining 180° ambiguity is not resolved. On desktop the Focus panel moved above the Full Field as a slim strip so the map can use
+the freed height; the stacked fallback is unchanged.
+
+`node tools/engineer_demo.cjs --viewports --browser msedge` (Track Map V2 additionally: two sector ticks within 4 px of the centerline,
+focus label `P3`, no label overlapping a label or a vehicle dot, labels at least 9 px high, no labels on a stored track) measures the real browser viewports recorded on 2026-11-07,
+1920×911 (1080p display, compact desktop path) and 2560×1271 (1440p display, normal desktop path), plus the stress
+sizes 1920×900, 1920×800 and 2560×1300, for a horizontal, a vertically encoded and a stored-only scenario (no document
+scrolling, no overlapping panels, Head-to-Head/Weather not clipped, PIT settings visible, AUTO orientation, ORIGINAL
+toggle and its persistence). It needs Playwright and Edge/Chrome locally and is not part of CI;
+`tests/ui.test.cjs` only proves which CSS layout path a viewport takes.
+
+`node tools/engineer_demo.cjs --screenshot --track-scenarios --browser msedge` renders synthetic Green, Local Yellow,
+Learning and FCY/SC scenarios at 1920×1080, 1920×900, 1920×800 and 2560×1300 into the ignored `build/` folder.
+
+## Latency probe
+
+`node tools/trackmap_latency.cjs --base http://127.0.0.1:8099 --session <id> --seconds 40` drives a headless Chrome against a
+local server that is replaying the synthetic `latency-probe` scenario (`python -m tools.replay.scenarios latency-probe
+--output data/captures/raw/latency-probe.jsonl`, compile with `tools.replay.compile`, replay with `tools.replay.stintara_replay
+--speed 1`). It records, per session poll, the request time, the server-reported `vehicles_age_s`, and the first document-wide
+DOM mutation and `requestAnimationFrame` after the response. These last two measurements are **proxies**, not an exact
+Track Map DOM update or screen-paint timestamp: other dashboard updates can trigger the observer, and
+`requestAnimationFrame` runs before painting. Only differences from the same clock are used; `vehicles_age_s` is a
+server-side duration and is never subtracted from a browser timestamp. It measures time since the server last received
+the position, **not** Agent/Pitwall capture-to-server transfer time or browser network propagation time. The latter is
+included in the browser's request duration but cannot be fully attributed from these samples. A remote run remains
+useful for approximate age, polling and frame-timing trends, not strict end-to-end latency. The scoring cadence itself
+is not measurable from a 2 Hz poll; the nominal 0.2 s throttle comes from the agent/compiler.
+
+First local measurement (2026-11-09, Chrome 1920×911, one machine, synthetic 14 Hz source, 4.7 Hz forwarded): server age of
+the newest position at each poll mean 117 ms, max 220 ms; poll interval mean 554 ms (500 ms timer plus
+the fetch and the sequential fuel request); fetch 10 ms median (p95 38 ms). The document-wide DOM mutation proxy was
+6 ms median and the next-animation-frame proxy 11 ms median after the response (p95 17 ms). Combining server age and
+these proxies yields an **estimated**, not directly observed, display age of about 130 ms mean and 233 ms maximum at the
+frame callback. With each poll result held for about 0.55 s, a simple model estimates an age at an arbitrary viewing
+instant of about 0.4 s on average and up to about 0.8 s, **excluding unmeasured upstream transport and paint timing**.
+Interpretation: browser polling is likely a major source of visible stepwise motion in this synthetic local test; the
+data does not yet establish true end-to-end or remote latency. Interpolating between 5 Hz samples would not solve the
+slow browser refresh by itself. A separate, faster vehicles-only refresh (or push) is the next experiment; re-measure
+with map-specific instrumentation before claiming a quantified improvement. No interpolation was implemented.
+
+### Map-specific probe and before/after measurement (#55)
+
+The probe now also reads the *drawn* positions: a `MutationObserver` compares the first dots of `.map-area` after every
+mutation and counts only real position changes (other dashboard updates are ignored), plus the next animation frame.
+`map.age_at_random_instant_ms` is sampled every 5 ms over the run: for a viewer looking at the map at instant τ the displayed
+data is the newest painted step before τ; its age is the server-reported `vehicles_age_s` (a duration) plus the browser time
+elapsed since that response arrived (same-clock difference). Options: `--warmup <s>` (excluded), `--viewport WxH`,
+`--latency <ms>` (DevTools network emulation, not a real network) and `--legacy`, which hides `vehicle_refresh_ms` from the page
+so the *same* server and session are measured with the old full-`/live`-only behaviour (before) and with the vehicles
+refresh (after). `python -m tools.replay.scenarios latency-probe-40` produces the 40-vehicle field.
+`node tools/trackmap_load.cjs --viewers N --endpoint vehicles|live` is the multi-viewer load generator.
+
+Method: Chrome 156 headless, one Windows machine (browser, server, PostgreSQL 17 container and replay on the same host,
+loopback), the synthetic 40-vehicle scenario (14 Hz source, about 4.7 Hz forwarded by the 0.2 s agent throttle), 30 s window after a
+6 s warm-up, runs of both modes interleaved. Median across runs of the per-run values (p95 and max are per run first).
+
+| 1920×911, 5 pairs | before (`/live` only) | after (+ vehicles 250 ms) |
+| --- | --- | --- |
+| drawn position updates per second | 1.8 | 3.7 |
+| interval between drawn steps p50 / p95 | 555 / 595 ms | 250 / 500 ms |
+| age at the paint p50 / p95 | 192 / 307 ms | 118 / 232 ms |
+| **age at a random viewing instant p50 / p95** | **476 / 772 ms** | **259 / 472 ms** |
+| age at a random instant, worst run max | 908 ms | 1003 ms (source jitter, below) |
+| fetch time p50 / p95 (the polled endpoint) | 9.2 / 29 ms (`/live`) | 3.5 / 8.8 ms (`/vehicles`) |
+| payload, 40 vehicles | 39.9 KB `/live` | 5.4 KB `/vehicles` |
+
+Other conditions (2 pairs each): 2560×1271: age at a random instant p50/p95 484/781 ms before, 248/421 ms after; drawn updates
+1.5 → 3.8 per second. With 40 ms added request latency: 507/829 ms before, 264/446 ms after (step interval 654 → 250 ms).
+The 2560×1271 "before" series contains one run with a source stall of 2.3 s, so its p95 is not repeatable.
+
+Server load (20 s windows, 40 vehicles, replay ingest running; PostgreSQL transactions from `pg_stat_database`, server CPU from
+the server process): ingest alone 90 transactions and 0.34 s CPU.
+
+| polled endpoint | req/s | response p50 / p95 | DB transactions | server CPU |
+| --- | --- | --- | --- | --- |
+| `/vehicles` × 1 @250 ms | 3.9 | 3.5 / 7 ms | 88 | 0.72 s |
+| `/vehicles` × 10 | 39 | 4.8 / 15.8 ms | 97 | 1.92 s |
+| `/vehicles` × 25 | 97.6 | 15.8 / 47.3 ms | 86 | 4.25 s |
+| `/vehicles` × 50 | 194.9 | 35.4 / 101 ms | 82 | 6.70 s |
+| `/live` × 10 @500 ms (today) | 19.8 | 9.7 / 37.5 ms | 1226 | 2.22 s |
+| `/live` × 25 @500 ms (today) | 49.1 | 17.8 / 42.7 ms | 2986 | 3.80 s |
+| `/live` × 10 @250 ms (the naive alternative) | 38.5 | 23.5 / 70.2 ms | 2452 | 3.25 s |
+
+`/vehicles` adds no PostgreSQL transactions at any viewer count (82–97 against a baseline of 90, i.e. noise), costs about
+1.6–2 ms of server CPU per request here, and a `/live` request costs about three transactions. Polling `/live` four times a
+second instead would have multiplied the database load by about 4×.
+
+Limitations of these numbers: synthetic data and a single local machine, no run on the operator network; the latency emulation adds a fixed
+delay only (no jitter, loss or bandwidth limit); the server age is a server-side duration, so Agent/Pitwall capture-to-server
+transfer, the display compositor and the monitor are not included and `requestAnimationFrame` remains a proxy for paint; the
+replay source itself stalled in some runs (server age spikes up to 8 s in an earlier, discarded series of three pairs, and still
+0.75–0.85 s in three of the five reported "after" runs), which affects both modes but can inflate a single run's maximum; the
+forwarded source rate (about 4.7 Hz) is the floor, and drawn updates stay slightly below it because two frames can fall into one
+250 ms poll; the absolute CPU numbers belong to this machine and say nothing about Unraid. In a real-browser check (CDP, same
+session) neither viewport scrolled, 40 vehicles plus the focus/rival rings were drawn and one vehicle-layer update took
+0.4–0.5 ms for 40 cars. The Playwright viewport check (`tools/engineer_demo.cjs --viewports`) could not be run because
+Playwright is not installed here.
+
+## Known limitations
+
+- Screen orientation (north-up, y = −z) is an assumption; a mirrored map is possible and unverified.
+- Full course yellow and session stopped are mapped from the documented enum only (never observed).
+- Local yellow does not say whether a car is stopped. Not in scope.
+- A stored geometry is canonical: a wrong but plausible lap that was stored first is not replaced automatically (there is
+  no editor or invalidation tool yet; delete the row to relearn).
+- At 1920×911 the Strategy panel scrolls internally by about 46 px with the PIT settings kept sticky and visible.
+- Per-track orientation lives in the browser only.
+- Not yet verified in a live LMU session.

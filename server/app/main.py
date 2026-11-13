@@ -15,19 +15,42 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ValidationError
 
+from . import history, session_meta, track_repo
 from .build import APP_VERSION, build_info, inject_build_label
+from .chain import CHAIN_COLUMNS, CHAIN_JOINS, pop_chain
 from .domain import sample_due
+from .driver_live import focus_block
 from .fuel import fuel_report
+from .lap_sensors import (
+    accepted_sensors,
+    checkpoint_compatible,
+    completion_updates,
+    observe_crossing,
+    owns_sensor_fields,
+)
 from .lifecycle import end_observation, expire_observations, resolve_session
-from .lmu_resources import lmu_resources, pit_settings
+from .lmu_resources import energy_diagnostics, lmu_resources, pit_settings
 from .migrations import migrate_sample_ids
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
-from .resource_strategy import finish_projection, plan_resources
+from .resource_strategy import finish_projection, fraction, plan_resources
 from .secrets import read_secret
-from .timing import newest_scoring, project_timing, session_timing
+from .timing import field_status, newest_scoring, newest_state, project_timing, session_timing
+from .trackmap import (
+    TrackModel,
+    TrackStore,
+    attach_track,
+    feed_race_control,
+    feed_scoring,
+    next_sample_seq,
+    static_track_map_payload,
+    track_key,
+    track_map_payload,
+    vehicles_payload,
+)
 from .uuid7 import uuid7
 from .weather import normalize_weather
 
@@ -40,6 +63,7 @@ POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 SCHEMA_FILE = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
 
+ENERGY_CHECKPOINT_MAX_AGE_SECONDS = 5
 SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_SECONDS", "120"))
 if SESSION_TIMEOUT_SECONDS < 15:
     raise ValueError("SESSION_TIMEOUT_SECONDS must be at least 15")
@@ -88,6 +112,70 @@ pool: asyncpg.Pool | None = None
 
 # Per-agent runtime state. PostgreSQL remains the source of persisted history.
 runtime: dict[str, dict[str, Any]] = {}
+track_store = TrackStore()  # hot cache of learned geometry; PostgreSQL (track_geometries) is the durable source
+track_lock = asyncio.Lock()  # serialises persistence of shared track models within this process
+TRACK_STORE_RETRY_SECONDS = 30.0
+TRACK_STORE_CONFLICT_RETRY_SECONDS = 5.0
+
+
+async def sync_track_store(state):
+    """Lazily load a known track from PostgreSQL and persist a closed one. Never raises into message handling."""
+    model, key = state.get("track_model"), state.get("track_key")
+    if pool is None or model is None or key is None or model.persist_blocked:
+        return
+    sector_stale = (model.complete and model.stored and model.sector_boundaries() is not None
+                    and model.sector_snapshot() != model.stored_sectors)
+    if model.store_checked and not (model.complete and not model.stored) and not sector_stale:
+        return
+    now = time.monotonic()
+    if now < model.store_retry_at:
+        return
+    async with track_lock:
+        try:
+            async with pool.acquire() as conn:
+                if not model.store_checked:
+                    record = await track_repo.load_geometry(conn, key)
+                    if record is not None and not model.complete:
+                        model.adopt(record)
+                    model.store_checked = True
+                if model.complete and not model.stored:
+                    outcome, canonical = await track_repo.save_geometry(conn, key, model)
+                    if outcome in (track_repo.SAVED, track_repo.EXISTING):
+                        if canonical["points"] != model.points:   # another writer's lap is canonical
+                            model.adopt(canonical)
+                        model.stored, model.stored_sectors = True, model.sector_snapshot()
+                    elif outcome == track_repo.INCOMPATIBLE:
+                        model.persist_blocked = "schema"        # stable: never overwritten, never retried per message
+                    elif outcome == track_repo.INVALID:
+                        model.persist_blocked = "invalid"
+                    else:                                       # concurrent change: a later attempt may succeed
+                        model.store_retry_at = now + TRACK_STORE_CONFLICT_RETRY_SECONDS
+                elif (model.complete and model.sector_boundaries() is not None
+                      and model.sector_snapshot() != model.stored_sectors):
+                    if await track_repo.save_sectors(conn, key, model):
+                        model.stored_sectors = model.sector_snapshot()
+                    else:                                       # row gone or of another schema: no per-message retries
+                        model.store_retry_at = now + TRACK_STORE_RETRY_SECONDS
+        except Exception as exc:
+            model.store_retry_at = now + TRACK_STORE_RETRY_SECONDS
+            logger.warning(json.dumps({"event": "track_geometry_sync_failed", "error_class": type(exc).__name__}))
+
+
+async def stored_track_model(conn, provider, name, length):
+    """Static geometry for a session without live runtime state. Read-only; unknown stays unknown.
+
+    Only what PostgreSQL holds and validates counts: a complete geometry that merely exists in the hot cache (not
+    saved, or blocked by an incompatible schema) is never presented as a stored track.
+    """
+    key = track_key(provider, name, length)
+    if key is None:
+        return None
+    record = await track_repo.load_geometry(conn, key)
+    if record is None:
+        return None
+    model = TrackModel(record["length_m"])
+    model.adopt(record)
+    return model
 
 
 def token_hash(token: str) -> str:
@@ -197,6 +285,11 @@ async def frontpage() -> HTMLResponse:
     return HTMLResponse(inject_build_label((STATIC_DIR / "index.html").read_text(encoding="utf-8")))
 
 
+@app.get("/history", response_class=HTMLResponse)
+async def history_page() -> HTMLResponse:
+    return HTMLResponse(inject_build_label((STATIC_DIR / "history.html").read_text(encoding="utf-8")))
+
+
 @app.get("/drivers/{slug}/live", response_class=HTMLResponse)
 async def driver_live_page(slug: str) -> HTMLResponse:
     html = (STATIC_DIR / "live.html").read_text(encoding="utf-8")
@@ -269,10 +362,59 @@ async def api_live_sessions() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+@app.get("/api/sessions/history")
+async def api_sessions_history(
+        session_type: str | None = Query(None, min_length=1, max_length=128),
+        provider: str | None = Query(None, min_length=1, max_length=64),
+        track: str | None = Query(None, min_length=1, max_length=256),
+        status: str | None = Query(None, pattern="^(live|complete)$"),
+        limit: int = Query(history.HISTORY_DEFAULT_LIMIT, ge=1, le=history.HISTORY_MAX_LIMIT),
+        cursor: str | None = Query(None, min_length=1, max_length=512)) -> dict[str, Any]:
+    assert pool
+    if cursor is not None:
+        try:
+            history.decode_cursor(cursor)
+        except ValueError:
+            raise HTTPException(422, "invalid cursor") from None
+    async with pool.acquire() as conn:
+        return await history.query_sessions(conn, session_type=session_type, provider=provider,
+                                            track=track, status=status, limit=limit, cursor=cursor)
+
+
+@app.get("/api/sessions/history/filters")
+async def api_sessions_history_filters() -> dict[str, list[str]]:
+    assert pool
+    async with pool.acquire() as conn:
+        return await history.filter_options(conn)
+
+
+@app.get("/api/sessions/recent-results")
+async def api_recent_results() -> dict[str, Any]:
+    assert pool
+    async with pool.acquire() as conn:
+        return await history.query_sessions(conn, limit=history.RECENT_RESULTS_LIMIT, recent=True)
+
+
+def stored_field_status(row):
+    """Tyre/damage as of the latest persisted completed-lap checkpoint."""
+    def decoded(value):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return None
+        return value
+    damage, wheels = decoded(row.pop("lap_damage", None)), decoded(row.pop("tyre_snapshot", None))
+    dents = damage.get("dent_severity") if isinstance(damage, dict) else None
+    return field_status(row.pop("compound_front", None), wheels if isinstance(wheels, list) else None, dents)
+
+
 def spectator_participants(rows, session_id, live, states, now, session_type=None):
     """Overlay one newest fresh observation; never combine different sessions by names."""
     participants = [dict(row) for row in rows]
-    scoring = newest_scoring(session_id, live, states, now)
+    state = newest_state(session_id, live, states, now)
+    scoring = state.get("scoring", {})
+    snapshots = state.get("snapshots", {}) if now - state.get("snapshots_at", -1e9) < 30 else {}
     vehicles = {v["id"]: v for v in scoring.get("vehicles", [])}
     for p in participants:
         vehicle = vehicles.get(p["local_vehicle_id"])
@@ -285,6 +427,14 @@ def spectator_participants(rows, session_id, live, states, now, session_type=Non
             # Retain the recorded participant, but never mix old gaps into this observation.
             p["gap_to_leader"] = p["laps_behind_leader"] = None
         p.update(vehicle_identity(p))
+        status = stored_field_status(p)
+        snap = snapshots.get(p["local_vehicle_id"])
+        if snap and snap.get("has_telemetry"):
+            # Fresher than the lap checkpoint; same fields, same semantics.
+            status = field_status(snap.get("tire_compound_front_name"),
+                                  snap.get("wheels"),
+                                  (snap.get("damage") or {}).get("dent_severity"))
+        p.update(status)
     project_timing(participants, session_type)
     return sorted(participants, key=lambda p: (p["position"] is None,
                                               p["position"] or 0, str(p["id"])))
@@ -296,8 +446,9 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     async with pool.acquire() as conn:
         session = await conn.fetchrow(f"""SELECT s.id, s.track_name, s.session_type,
             s.simulator_provider, s.started_at, s.last_seen_at, s.status,
-            s.session_laps, s.session_minutes, s.weather, ({SESSION_LIVE_SQL}) AS live
-            FROM sessions s WHERE s.id=$1""", session_id)
+            s.session_laps, s.session_laps_confirmed, s.session_end_et_seconds, s.session_duration_seconds, s.weather, s.track_length_m, ({SESSION_LIVE_SQL}) AS live,
+            {CHAIN_COLUMNS}
+            FROM sessions s {CHAIN_JOINS} WHERE s.id=$1""", session_id)
         if not session:
             raise HTTPException(404, "session not found")
         participants = await conn.fetch("""
@@ -307,10 +458,12 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
                    p.position, p.total_laps, p.last_lap_time, p.best_lap_time, p.in_pits,
                    p.pitstops, p.finish_status, p.has_telemetry, pit.last_pit_lap,
                    p.gap_to_leader, p.laps_behind_leader,
-                   lap.lap_number AS sector_lap_number, lap.sector1, lap.sector2, lap.sector3
+                   lap.lap_number AS sector_lap_number, lap.sector1, lap.sector2, lap.sector3,
+                   lap.compound_front, lap.tyre_snapshot, lap.damage AS lap_damage
             FROM session_participants p LEFT JOIN drivers d ON d.id=p.driver_id
             LEFT JOIN LATERAL (
-                SELECT lap_number,sector1,sector2,sector3 FROM laps
+                SELECT lap_number,sector1,sector2,sector3,compound_front,
+                       tyre_snapshot,damage FROM laps
                 WHERE session_participant_id=p.id AND lap_number > 0
                 ORDER BY lap_number DESC LIMIT 1
             ) lap ON true
@@ -324,15 +477,43 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
             ) pit ON true
             WHERE p.session_id=$1
         """, session_id)
-    data = dict(session)
+    data = pop_chain(dict(session))
     data["weather"] = normalize_weather(data.get("weather"), data.get("simulator_provider"))
     live = data.pop("live")
+    track_length = data.pop("track_length_m", None)
     now = time.monotonic()
     states = list(runtime.values())
+    projected = spectator_participants(participants, session_id, live, states, now, data.get("session_type"))
+    state = newest_state(session_id, live, states, now)
+    if state:
+        track_map = track_map_payload(state, projected, now)
+    else:
+        # No fresh observation: only the static, persisted geometry can be shown; never positions or flags.
+        async with pool.acquire() as conn:
+            stored = await stored_track_model(conn, data.get("simulator_provider"), data.get("track_name"), track_length)
+        track_map = static_track_map_payload(stored)
     return {"session": data, "live": live,
             "timing": session_timing(data, newest_scoring(session_id, live, states, now)),
-            "participants": spectator_participants(participants, session_id, live, states, now,
-                                                    data.get("session_type"))}
+            "participants": projected,
+            # Dynamic state is read-only runtime state of the newest fresh observation and never persisted.
+            "track_map": track_map}
+
+
+@app.get("/api/sessions/{session_id}/vehicles")
+async def api_session_vehicles(session_id: UUID) -> JSONResponse:
+    """Lightweight runtime-only vehicle positions for the Track Map. Never touches PostgreSQL.
+
+    Reads the same in-memory state as `track_map` of the full /live payload, so it exposes nothing new; it is as
+    public as /live. Only a fresh runtime observation of exactly this session answers with vehicles. A session
+    without one (historical, unknown id, no agent) is reported `live: false` and carries no positions.
+    """
+    now = time.monotonic()
+    state = newest_state(session_id, True, list(runtime.values()), now)
+    index = state.get("participant_index") if state else None
+    by_local = index["by_local"] if index and index["session_id"] == session_id else {}
+    body = ({"session_id": session_id, "live": True, **vehicles_payload(state, by_local, now)} if state
+            else {"session_id": session_id, "live": False, "vehicles": []})
+    return JSONResponse(jsonable_encoder(body), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/sessions/{session_id}/participants/{participant_id}/fuel")
@@ -361,12 +542,12 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
     # The GET is entirely read-only, including local Engineer overrides.
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         context = await conn.fetchrow(f"""SELECT p.total_laps,p.finish_status,p.local_vehicle_id,
-            s.session_type,s.session_laps,s.session_minutes,s.simulator_provider,({SESSION_LIVE_SQL}) AS live
+            s.session_type,s.session_laps,s.session_laps_confirmed,s.session_end_et_seconds,s.session_duration_seconds,s.simulator_provider,({SESSION_LIVE_SQL}) AS live
             FROM sessions s JOIN session_participants p ON p.session_id=s.id
             WHERE s.id=$1 AND p.id=$2""", session_id, participant_id)
         if not context:
             raise HTTPException(404, "session participant not found")
-        laps = await conn.fetch("""SELECT lap_number,lap_time,fuel_remaining_l,pitstops,in_pits
+        laps = await conn.fetch("""SELECT lap_number,lap_time,fuel_remaining_l,pitstops,in_pits,energy_remaining_fraction
             FROM laps WHERE session_participant_id=$1 ORDER BY lap_number""", participant_id)
         row = await conn.fetchrow("""SELECT * FROM strategy_samples WHERE session_participant_id=$1
             ORDER BY recorded_at DESC,id DESC LIMIT 1""", participant_id)
@@ -382,15 +563,30 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
     pace_times = [r["lap_time"] for r in laps if r["in_pits"] is not True]
     finish = finish_projection(completed, timing, pace_times, context["session_type"] == "Race")
     provider = context["simulator_provider"]
-    resources, known = lmu_resources(fuel, sample) if provider == "lmu" else ([], False)
+    resources, known = lmu_resources(fuel, sample, laps) if provider == "lmu" else ([], False)
     manual = planned_stop_lap if type(planned_stop_lap) is int else None
     result = plan_resources(resources, completed, finish, manual_stop=manual,
                             active=context["live"] and vehicle is not None and context["session_type"] == "Race"
                             and context["finish_status"] == 0, capability_known=known)
     result.update(session_id=session_id, participant_id=participant_id, simulator_provider=provider,
                   provider_pit_settings=pit_settings(result) if provider == "lmu" else None,
-                  diagnostics={"fuel": fuel, "energy_history_samples": len(sample.get("energy_history") or [])})
+                  diagnostics={"fuel": fuel, "energy_history_samples": len(sample.get("energy_history") or []),
+                               "energy": energy_diagnostics(laps, sample)})
     return result
+
+
+OWN_LAP_HISTORY_SQL = """
+    SELECT lap.lap_number, lap.lap_time, lap.sector1, lap.sector2, lap.sector3, pit.last_pit_lap
+    FROM (SELECT 1) one
+    LEFT JOIN LATERAL (SELECT lap_number,lap_time,sector1,sector2,sector3 FROM laps
+        WHERE session_participant_id=$1 AND lap_number > 0 ORDER BY lap_number DESC LIMIT 1) lap ON true
+    LEFT JOIN LATERAL (
+        SELECT max(lap_number) AS last_pit_lap FROM (
+            SELECT lap_number,pitstops,
+                   max(pitstops) OVER (ORDER BY lap_number ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_max
+            FROM laps WHERE session_participant_id=$1 AND lap_number > 0 AND pitstops >= 0
+        ) history WHERE pitstops > previous_max
+    ) pit ON true"""
 
 
 @app.get("/api/drivers/{slug}/live")
@@ -433,6 +629,13 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
             """, session["id"], driver["id"]
         )
     participants = [dict(p) for p in participants]
+    own = [p for p in participants if p["is_stintara_driver"]]
+    history = None
+    if len(own) == 1:
+        # One extra indexed read of the own participant only (unique (participant, lap_number) index); the session
+        # endpoint's all-field laterals are deliberately not reused here (500 ms polling).
+        async with pool.acquire() as conn:
+            history = await conn.fetchrow(OWN_LAP_HISTORY_SQL, own[0]["participant_id"])
     for state in runtime.values():
         if state.get("session_id") == session["id"] and time.monotonic() - state.get("last_scoring_at", 0) < 15:
             by_vehicle = {v["id"]: v for v in state.get("scoring", {}).get("vehicles", [])}
@@ -445,9 +648,11 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
     participants.sort(key=lambda p: p["position"] if p["position"] is not None else 9999)
     for participant in participants:
         participant.update(vehicle_identity(participant))
+    now = time.monotonic()
     return {
         "driver": dict(driver),
         "live": True,
+        "focus": focus_block(driver["slug"], dict(session), participants, history, list(runtime.values()), now),
         "session": {**dict(session), "weather": normalize_weather(session["weather"], session["simulator_provider"])},
         "participants": participants,
         "strategy": dict(strategy) if strategy else None,
@@ -466,38 +671,87 @@ async def authenticate_agent(token: str) -> asyncpg.Record | None:
         )
 
 
-async def current_or_create_session(agent, payload):
+async def current_or_create_session(agent, payload, *, changed=False, source_epoch=None):
     state = runtime.setdefault(str(agent["id"]), {})
+    # Taken out of the runtime state first: whatever happens during resolution, the evidence is used at most once.
+    candidate = state.pop("meta_candidate", None)
     resolution_state = state.copy()
+    known = {}
     async with pool.acquire() as conn, conn.transaction():
         session_id = await resolve_session(conn, agent, resolution_state, payload, SESSION_TIMEOUT_SECONDS)
         if session_id:
-            await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
-    for key in ("pending_convergence", "convergence_invalidated"):
+            known = await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
+            if state.get("session_meta_pending"):
+                # SessionInfo carries no session identity, so a scoring frame resolving to A does not prove the
+                # preceding SessionInfo describes A. Session limits (end clock, duration, laps) are therefore never
+                # taken from here: session_meta commits them only after the bracketing check below. Weather is
+                # mutable; track length is only filled in while unknown.
+                await conn.execute("""UPDATE sessions SET
+                    track_length_m=CASE WHEN track_length_m IS NULL OR track_length_m<=0 THEN $2 ELSE track_length_m END,
+                    weather=$3::jsonb WHERE id=$1 AND status='live'""",
+                    session_id, state.get("track_length_m"), state.get("weather_json", "{}"))
+    if session_id:
+        state.pop("session_meta_pending", None)
+        await bind_session_meta(state, candidate, session_id, payload, changed, source_epoch)
+    for key in ("pending_convergence", "convergence_invalidated", "post_finish_idle"):
         state.pop(key, None)
         if key in resolution_state:
             state[key] = resolution_state[key]
     if session_id != state.get("session_id"):
-        for key in ("last_sample_at", "last_persisted_scoring", "scoring"):
+        for key in ("last_sample_at", "last_persisted_scoring", "scoring", "snapshots", "snapshots_at",
+                    "participant_index", "lap_crossings"):
             state.pop(key, None)
     state["session_id"] = session_id
+    if session_id:
+        remember_participants(state, session_id, known)
     state["session_type"] = payload["session_type"]
     return session_id
 
 
+async def bind_session_meta(state, candidate, session_id, payload, changed, source_epoch):
+    """Commit SessionInfo limits only when the candidate is bracketed by frames of this very session (#20)."""
+    accepted = session_meta.confirm(
+        state, candidate, provider=state["provider"], resolved_session_id=session_id, scoring=payload, changed=changed,
+        source_epoch=source_epoch, now=time.monotonic())
+    if not accepted:
+        return
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow("""SELECT session_end_et_seconds,session_duration_seconds,session_laps,
+            session_laps_confirmed FROM sessions WHERE id=$1 AND status='live' FOR UPDATE""", session_id)
+        if not row:
+            return
+        end, duration, laps, confirmed = session_meta.merge(row, accepted)
+        if (end, duration, laps, confirmed) != (row["session_end_et_seconds"], row["session_duration_seconds"],
+                                                row["session_laps"], row["session_laps_confirmed"]):
+            await conn.execute("""UPDATE sessions SET session_end_et_seconds=$2,session_duration_seconds=$3,
+                session_laps=$4,session_laps_confirmed=$5 WHERE id=$1""", session_id, end, duration, laps, confirmed)
+
+
+def remember_participants(state, session_id, known):
+    """Runtime identity cache for the vehicles endpoint; tagged with its session so it can never leak across."""
+    index = state.get("participant_index")
+    if not index or index["session_id"] != session_id:
+        index = state["participant_index"] = {"session_id": session_id, "by_local": {}}
+    index["by_local"].update(known or {})
+
+
 async def upsert_participants(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any]) -> None:
     assert pool
+    state = runtime[str(agent["id"])]
     async with pool.acquire() as conn, conn.transaction():
-        await upsert_participants_on_connection(conn, agent, session_id, payload, runtime[str(agent["id"])]["provider"])
+        known = await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
+    remember_participants(state, session_id, known)
 
 
 async def upsert_participants_on_connection(conn, agent, session_id, payload, provider):
+    """Upsert the field; returns {local_vehicle_id: {"id", "display_name"}} as stored (no extra query)."""
     player_vehicle_id = payload.get("player_vehicle_id")
     vehicles = payload.get("vehicles") or []
+    known = {}
     for v in vehicles:
         local_id = int(v.get("id", -1))
         driver_id = agent["driver_id"] if local_id == player_vehicle_id else None
-        await conn.execute(
+        row = await conn.fetchrow(
             """
             INSERT INTO session_participants(
                 id,session_id,driver_id,provider,local_vehicle_id,display_name,team_name,car_name,car_class,car_number,
@@ -510,58 +764,132 @@ async def upsert_participants_on_connection(conn, agent, session_id, payload, pr
                 total_laps=EXCLUDED.total_laps,last_lap_time=EXCLUDED.last_lap_time,best_lap_time=EXCLUDED.best_lap_time,
                 gap_to_leader=EXCLUDED.gap_to_leader,laps_behind_leader=EXCLUDED.laps_behind_leader,
                 in_pits=EXCLUDED.in_pits,last_seen_at=now()
+            RETURNING id,display_name
             """,
             uuid7(), session_id, driver_id, local_id, v.get("driver_name") or f"Vehicle {local_id}",
             v.get("team_name"), v.get("car_name"), v.get("vehicle_class"), v.get("car_number"),
             v.get("position"), v.get("total_laps", 0), v.get("last_lap_time"), v.get("best_lap_time"),
             v.get("time_behind_leader"), v.get("laps_behind_leader"), bool(v.get("in_pits", False)), provider,
         )
+        known[local_id] = {"id": row["id"], "display_name": row["display_name"]}
     await conn.execute("UPDATE sessions SET last_seen_at=now() WHERE id=$1", session_id)
+    return known
 
 
-async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any]) -> None:
+def checkpoint_energy(state: dict[str, Any], local_id: int) -> float | None:
+    """Scoring VE of one vehicle at a lap checkpoint; unknown unless scoring is fresh and valid."""
+    if time.monotonic() - state.get("last_scoring_at", 0) > ENERGY_CHECKPOINT_MAX_AGE_SECONDS:
+        return None
+    vehicle = next((v for v in state.get("scoring", {}).get("vehicles", []) if v.get("id") == local_id), None)
+    return fraction(vehicle.get("energy_current_fraction")) if vehicle else None
+
+
+INSERT_LAP_SQL = """
+    INSERT INTO laps(
+        id,session_participant_id,lap_number,position,lap_time,sector1,sector2,sector3,
+        gap_to_leader,gap_ahead,fuel_remaining_l,fuel_capacity_l,compound_front,compound_rear,
+        tyre_remaining_fl,tyre_remaining_fr,tyre_remaining_rl,tyre_remaining_rr,in_pits,pitstops,finish_status,has_telemetry,tyre_snapshot,damage,
+        energy_remaining_fraction)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,$24::jsonb,$25)
+    ON CONFLICT(session_participant_id,lap_number) DO NOTHING
+"""
+
+
+async def complete_lap_sensors(conn, participant_id, lap_no, snapshot, accepted):
+    """Owner checkpoint for a lap another observer already stored: fill only what is missing or unusable.
+
+    The row is locked, so concurrent writers serialise; the decision is made on the locked values. Only a
+    checkpoint describing the same lap record (time, sectors, stop counter) may complete it; nothing but the
+    player-only columns is touched, a valid stored value is never replaced and nothing is set to NULL.
+    Repeating the same checkpoint changes nothing.
+    """
+    select = """SELECT lap_time,sector1,sector2,sector3,pitstops,tyre_snapshot,
+        fuel_remaining_l,fuel_capacity_l FROM laps WHERE session_participant_id=$1 AND lap_number=$2"""
+    # Steady state (the owner repeats a frozen snapshot every second): a complete row never changes again, because
+    # valid values are never replaced, so an unlocked read may conclude "nothing to do" without a transaction.
+    row = await conn.fetchrow(select, participant_id, lap_no)
+    if row is None or not checkpoint_compatible(row, snapshot):
+        return False
+    if not completion_updates(row, accepted):
+        return True      # compatible and already holding valid values for everything accepted
+    async with conn.transaction():
+        row = await conn.fetchrow(select + " FOR UPDATE", participant_id, lap_no)
+        if row is None or not checkpoint_compatible(row, snapshot):
+            return False
+        updates = completion_updates(row, accepted)
+        if not updates:
+            return True
+        # Column names come from the fixed set in completion_updates; values are bound parameters.
+        sets = ",".join(f"{name}=${i}" + ("::jsonb" if name == "tyre_snapshot" else "")
+                        for i, name in enumerate(updates, 3))
+        await conn.execute(f"UPDATE laps SET {sets},has_telemetry=true WHERE session_participant_id=$1 AND lap_number=$2",
+                           participant_id, lap_no, *updates.values())
+        await conn.execute("UPDATE session_participants SET has_telemetry=true WHERE id=$1", participant_id)
+        return True
+
+
+async def store_lap_snapshots(agent: asyncpg.Record, session_id: Any, payload: dict[str, Any],
+                               source_epoch: str | None = None) -> None:
     assert pool
     drivers = payload.get("drivers") or []
+    state = runtime.get(str(agent["id"]), {})
+    # Lap-start evidence only counts when scoring and this snapshot come from the same Pitwall connection (#59).
+    same_source = source_epoch is not None and source_epoch == state.get("scoring_epoch")
+    player_slot = state.get("scoring", {}).get("player_vehicle_id")
     async with pool.acquire() as conn:
+        # An agent's driver must map to exactly one participant of the session; a duplicate (stale player_vehicle_id)
+        # makes every own-car claim ambiguous, so sensor values stay unknown (fail closed, nothing is re-assigned).
+        mapped = await conn.fetchval("SELECT count(*) FROM session_participants WHERE session_id=$1 AND driver_id=$2",
+                                     session_id, agent["driver_id"]) if agent["driver_id"] is not None else 0
         for d in drivers:
             local_id = int(d.get("id", -1))
             p = await conn.fetchrow(
-                "SELECT id,driver_id FROM session_participants WHERE session_id=$1 AND local_vehicle_id=$2",
+                "SELECT id,driver_id,has_telemetry FROM session_participants WHERE session_id=$1 AND local_vehicle_id=$2",
                 session_id, local_id,
             )
             if not p:
                 continue
+            # Tyre and fuel sensor values are real only for the car this agent drives (#59): accepted exclusively
+            # from the owning agent, for a lap whose start it observed, and only complete real data (lap_sensors).
+            owner = (owns_sensor_fields(agent["driver_id"], p["driver_id"]) and mapped == 1
+                     and player_slot == local_id)
+            crossing = same_source and int(d.get("total_laps") or 0) in state.get("lap_crossings", {}).get(local_id, ())
+            accepted = accepted_sensors(d, owner, crossing)
+            telemetry = accepted["wheels"] is not None or accepted["fuel"] is not None
             # Accepted snapshot state is independent of completed-lap insertability.
             # Keep scoring positions/pit occupancy and checkpoint freshness untouched.
-            await conn.execute("""UPDATE session_participants SET
-                pitstops=GREATEST(pitstops,$2),finish_status=$3,has_telemetry=$4
-                WHERE id=$1""", p["id"], d.get("num_pitstops", 0),
-                d.get("finish_status", 0), bool(d.get("has_telemetry", False)))
-            wheels = d.get("wheels") or [{}, {}, {}, {}]
-            while len(wheels) < 4:
-                wheels.append({})
-            has_tel = bool(d.get("has_telemetry", False))
+            await conn.execute("""UPDATE session_participants SET pitstops=GREATEST(pitstops,$2),finish_status=$3
+                WHERE id=$1""", p["id"], d.get("num_pitstops", 0), d.get("finish_status", 0))
             lap_no = int(d.get("total_laps") or 0)
             if lap_no <= 0 or not d.get("last_lap_time") or d["last_lap_time"] <= 0:
                 continue
+            wheels = accepted["wheels"] or [{}, {}, {}, {}]
+            fuel = accepted["fuel"] or (None, None)
+            raw_telemetry = bool(d.get("has_telemetry", False))   # damage keeps its experimental, unchanged handling
             # LMU mWear is tread remaining: 1.0=new, 0.0=destroyed. Preserve that explicit meaning.
-            await conn.execute(
-                """
-                INSERT INTO laps(
-                    id,session_participant_id,lap_number,position,lap_time,sector1,sector2,sector3,
-                    gap_to_leader,gap_ahead,fuel_remaining_l,fuel_capacity_l,compound_front,compound_rear,
-                    tyre_remaining_fl,tyre_remaining_fr,tyre_remaining_rl,tyre_remaining_rr,in_pits,pitstops,finish_status,has_telemetry,tyre_snapshot,damage)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,$24::jsonb)
-                ON CONFLICT(session_participant_id,lap_number) DO NOTHING
-                """,
-                uuid7(), p["id"], lap_no, d.get("position"), d.get("last_lap_time"),
-                d.get("last_sector1"), d.get("last_sector2"), d.get("last_sector3"), d.get("gap_to_leader"),
-                d.get("gap_ahead"), d.get("fuel_remaining"), d.get("fuel_capacity"),
-                d.get("tire_compound_front_name"), d.get("tire_compound_rear_name"),
-                wheels[0].get("remaining"), wheels[1].get("remaining"), wheels[2].get("remaining"), wheels[3].get("remaining"),
-                bool(d.get("in_pits", False)), d.get("num_pitstops", 0), d.get("finish_status", 0), has_tel,
-                json.dumps(wheels) if has_tel else None, json.dumps(d.get("damage")) if has_tel else None,
-            )
+            # Participant has_telemetry: trusted own-agent sensor values were persisted (never reset, not a freshness
+            # flag). It is set only after a checkpoint was actually stored or completed, in the same transaction.
+            persisted = False
+            async with conn.transaction():
+                status = await conn.execute(
+                    INSERT_LAP_SQL,
+                    uuid7(), p["id"], lap_no, d.get("position"), d.get("last_lap_time"),
+                    d.get("last_sector1"), d.get("last_sector2"), d.get("last_sector3"), d.get("gap_to_leader"),
+                    d.get("gap_ahead"), fuel[0], fuel[1],
+                    d.get("tire_compound_front_name"), d.get("tire_compound_rear_name"),
+                    wheels[0].get("remaining"), wheels[1].get("remaining"), wheels[2].get("remaining"), wheels[3].get("remaining"),
+                    bool(d.get("in_pits", False)), d.get("num_pitstops", 0), d.get("finish_status", 0), telemetry,
+                    json.dumps(wheels) if accepted["wheels"] else None,
+                    json.dumps(d.get("damage")) if raw_telemetry else None,
+                    checkpoint_energy(state, local_id),
+                )
+                if status.endswith(" 1") and telemetry:
+                    await conn.execute("UPDATE session_participants SET has_telemetry=true WHERE id=$1", p["id"])
+                    persisted = True
+            if status.endswith(" 0") and telemetry:
+                persisted = await complete_lap_sensors(conn, p["id"], lap_no, d, accepted)
+                if persisted and not p["has_telemetry"]:
+                    await conn.execute("UPDATE session_participants SET has_telemetry=true WHERE id=$1", p["id"])
 
 
 async def store_strategy_sample(agent, session_id, payload):
@@ -621,8 +949,13 @@ async def finalize_agent_session(agent):
     runtime.pop(str(agent["id"]), None)
 
 
-async def handle_message(agent, provider, kind, payload):
+async def handle_message(agent, provider, kind, payload, source_epoch=None):
     state = runtime.setdefault(str(agent["id"]), {})
+    # Pitwall connection generation (additive agent field). A new generation invalidates every observed lap
+    # crossing; a message without one (older agent) never counts as verified sensor provenance (#59).
+    if source_epoch != state.get("source_epoch"):
+        state["source_epoch"] = source_epoch
+        state.pop("lap_crossings", None)
     if state.get("pending_convergence") and (
         state.get("provider") != provider
         or (kind == "session_info" and state.get("track_name") != payload["track_name"])
@@ -642,12 +975,13 @@ async def handle_message(agent, provider, kind, payload):
         state.update(track_name=payload["track_name"], track_length_m=payload.get("track_length"),
                      session_laps=payload.get("session_laps"), session_minutes=payload.get("session_minutes"),
                      weather_json=json.dumps(payload.get("weather", {})))
-        if state.get("session_id") and state.get("persisted_track") == payload["track_name"]:
-            async with pool.acquire() as conn:
-                await conn.execute("""UPDATE sessions SET track_length_m=$2,session_laps=$3,
-                    session_minutes=$4,weather=$5::jsonb WHERE id=$1 AND status='live'""",
-                    state["session_id"], state.get("track_length_m"), state.get("session_laps"),
-                    state.get("session_minutes"), state["weather_json"])
+        attach_track(state, track_store, provider, payload["track_name"], payload.get("track_length"))
+        await sync_track_store(state)
+        # Runtime context is current immediately. The persisted session row is only touched after scoring has
+        # resolved the target session (current_or_create_session): a SessionInfo may already describe the next,
+        # still unconfirmed session while the live row belongs to the previous one (#46).
+        state["session_meta_pending"] = True
+        session_meta.observe(state, provider, payload, source_epoch, time.monotonic())
         return
     if state.get("game_connected") is False:
         return
@@ -655,28 +989,46 @@ async def handle_message(agent, provider, kind, payload):
         # Receive at 2-5 Hz; only persist current scoring at 1 Hz (no scoring history).
         now = time.monotonic()
         previous = state.get("scoring", {})
+        previous_at = state.get("last_scoring_at")
+        # Lap-crossing evidence needs a continuous frame sequence of one Pitwall connection and one session.
+        crossing_previous, crossing_previous_at = previous, previous_at
+        if source_epoch is None or state.get("scoring_epoch") != source_epoch:
+            crossing_previous, crossing_previous_at = {}, None
+        session_before = state.get("session_id")
         changed = (previous.get("session_type") != payload["session_type"]
                    or state.get("persisted_track") != state.get("track_name")
                    or (previous.get("session_time") is not None and payload.get("session_time") is not None
                        and payload["session_time"] < previous["session_time"] - 2))
-        if state.get("pending_convergence") or changed or sample_due(state.get("last_persisted_scoring"), now):
-            session_id = await current_or_create_session(agent, payload)
+        if state.get("pending_convergence") or state.get("session_meta_pending") or changed or sample_due(state.get("last_persisted_scoring"), now):
+            session_id = await current_or_create_session(agent, payload, changed=changed, source_epoch=source_epoch)
             if not session_id:
                 return
+            if session_id != session_before:
+                crossing_previous, crossing_previous_at = {}, None   # a frame of the former session never confirms one
             state["last_persisted_scoring"] = now
             state["persisted_track"] = state.get("track_name")
             async with pool.acquire() as conn:
                 await conn.execute("UPDATE agents SET last_seen_at=now() WHERE id=$1", agent["id"])
         state["scoring"] = payload
+        state["scoring_epoch"] = source_epoch
         state["last_scoring_at"] = now
+        observe_crossing(state.setdefault("lap_crossings", {}), crossing_previous, crossing_previous_at, payload, now)
+        state["scoring_seq"] = next_sample_seq()
+        feed_scoring(state, payload, reset=changed)
+        await sync_track_store(state)
         pending = state.pop("pending_laps", None)
         if pending:
-            await handle_message(agent, provider, "lap_snapshots", pending)
+            await handle_message(agent, provider, "lap_snapshots", pending, state.pop("pending_laps_epoch", None))
+        return
+    if kind == "race_control":
+        # Live-only state; valid before any session row exists and never persisted.
+        feed_race_control(state, payload, time.monotonic())
+        await sync_track_store(state)
         return
     session_id = state.get("session_id")
     if not session_id:
         if kind == "lap_snapshots":
-            state["pending_laps"] = payload
+            state["pending_laps"], state["pending_laps_epoch"] = payload, source_epoch
         return
     if kind == "lap_snapshots":
         scoring = state.get("scoring", {})
@@ -685,7 +1037,10 @@ async def handle_message(agent, provider, kind, payload):
             return
         if elapsed is not None and lap_elapsed is not None and abs(elapsed - lap_elapsed) > 5:
             return  # cached snapshot from another session/reconnect
-        await store_lap_snapshots(agent, session_id, payload)
+        # Live-only overlay for the field view (tyre/damage); never persisted beyond lap checkpoints.
+        state["snapshots"] = {int(d["id"]): d for d in payload.get("drivers") or [] if d.get("id") is not None}
+        state["snapshots_at"] = time.monotonic()
+        await store_lap_snapshots(agent, session_id, payload, source_epoch)
     elif kind == "telemetry" and time.monotonic() - state.get("last_scoring_at", 0) < 15:
         if state.get("track_name") != state.get("persisted_track"):
             return
@@ -737,7 +1092,7 @@ async def ingest(ws: WebSocket):
             except ValidationError as exc:
                 # Only authenticated, recognized provider data can be dropped.
                 # A rolling budget cannot be reset by interleaving good messages.
-                if kind not in ("scoring", "telemetry", "lap_snapshots"):
+                if kind not in ("scoring", "telemetry", "lap_snapshots", "race_control"):
                     raise
                 now = time.monotonic()
                 while invalid_payloads and now - invalid_payloads[0] >= INVALID_PAYLOAD_WINDOW_SECONDS:
@@ -751,7 +1106,10 @@ async def ingest(ws: WebSocket):
                     return
                 continue
             async with ingest_lock:
-                await handle_message(agent, hello.simulator, kind, payload)
+                epoch = message.get("source_epoch")
+                if not (isinstance(epoch, str) and re.fullmatch(r"[A-Za-z0-9_-]{8,64}", epoch)):
+                    epoch = None
+                await handle_message(agent, hello.simulator, kind, payload, epoch)
     except WebSocketDisconnect:
         pass
     except (asyncio.TimeoutError, json.JSONDecodeError, ValidationError, ValueError, TypeError, KeyError) as exc:

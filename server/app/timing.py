@@ -2,6 +2,8 @@
 import math
 from collections import Counter
 
+from . import session_meta
+
 
 def nonnegative(value):
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -16,10 +18,14 @@ def position(value):
     return type(value) is int and value > 0
 
 
-def newest_scoring(session_id, live, states, now):
+def newest_state(session_id, live, states, now):
     candidates = [s for s in states if live and s.get("session_id") == session_id
                   and 0 <= now - s.get("last_scoring_at", 0) < 15 and s.get("scoring")]
-    return max(candidates, key=lambda s: s["last_scoring_at"], default={}).get("scoring", {})
+    return max(candidates, key=lambda s: s["last_scoring_at"], default={})
+
+
+def newest_scoring(session_id, live, states, now):
+    return newest_state(session_id, live, states, now).get("scoring", {})
 
 
 def race_gap(participant, race):
@@ -48,6 +54,33 @@ def preceding_interval(previous, current):
     return current["gap_to_leader"] - previous["gap_to_leader"]
 
 
+def lap_ms(value):
+    """Lap time as integer milliseconds for comparison; provider floats are single precision."""
+    return round(value * 1000) if nonnegative(value) and value > 0 else None
+
+
+def classify_lap_times(participants):
+    """Live-timing colour semantics for one session's participants, from provider times only.
+
+    best_lap_class: "overall" only for the single fastest Best of the session (all classes together);
+    every other Best, including ordinary personal bests, stays None (neutral). A tie for the fastest at
+    millisecond precision is attributed to nobody. last_lap_class: "overall" when Last is that unique
+    session best, "personal" when Last equals the driver's own Best (not the session best), "slower" when
+    Last is slower than Best, None when either is unknown or Last is faster than Best (inconsistent mix).
+    The provider reports no lap validity, so there is no invalid class; sectors are never classified.
+    """
+    bests = {id(p): lap_ms(p.get("best_lap_time")) for p in participants}
+    known = [v for v in bests.values() if v is not None]
+    fastest = min(known, default=None)
+    unique = fastest is not None and known.count(fastest) == 1
+    for p in participants:
+        best, last = bests[id(p)], lap_ms(p.get("last_lap_time"))
+        overall = unique and best == fastest
+        p["best_lap_class"] = "overall" if overall else None
+        p["last_lap_class"] = (None if best is None or last is None or last < best
+                               else "slower" if last > best else "overall" if overall else "personal")
+
+
 def project_timing(participants, session_type):
     counts = Counter(p.get("position") for p in participants if position(p.get("position")))
     unique = {p["position"]: p for p in participants if position(p.get("position")) and counts[p["position"]] == 1}
@@ -64,13 +97,68 @@ def project_timing(participants, session_type):
             interval = preceding_interval(previous, p)
             if interval is not None:
                 p.update(interval=interval, interval_preceding_id=previous["id"])
+    classify_lap_times(participants)
 
 
 def session_timing(session, scoring):
+    """Elapsed clock, remaining time and the configured limits of a session.
+
+    ``end_et_seconds`` is the end of the session on the provider's session clock (not a duration);
+    ``remaining_seconds`` follows from it. ``configured_duration_seconds`` is only known when it was derived
+    reliably. Unknown stays None; nothing here guesses a limit.
+    """
     elapsed = scoring.get("session_time")
-    minutes, laps = session.get("session_minutes"), session.get("session_laps")
-    duration = minutes if nonnegative(minutes) and minutes > 0 else None
-    # Positive duration takes precedence; a simultaneous lap value may be a projection/sentinel.
-    distance = laps if session.get("session_type") == "Race" and not duration and lap_count(laps) and laps > 0 else None
-    return dict(elapsed_seconds=elapsed if nonnegative(elapsed) else None,
-                configured_laps=distance, configured_minutes=duration)
+    elapsed = elapsed if nonnegative(elapsed) else None
+    end, laps = session.get("session_end_et_seconds"), session_meta.trusted_laps(session)
+    end = end if nonnegative(end) and end > 0 else None
+    duration = session.get("session_duration_seconds")
+    duration = duration if nonnegative(duration) and duration > 0 else None
+    # A known end takes precedence; a simultaneous lap value may be a projection/sentinel.
+    distance = laps if session.get("session_type") == "Race" and not end and lap_count(laps) and laps > 0 else None
+    return dict(elapsed_seconds=elapsed, configured_laps=distance, end_et_seconds=end,
+                remaining_seconds=max(0, end - elapsed) if end is not None and elapsed is not None else None,
+                configured_duration_seconds=duration)
+
+
+SENSOR_KEYS = ("temp_inner", "temp_mid", "temp_outer", "carcass_temp", "brake_temp", "pressure")
+
+
+def finite_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def tyre_sensors_present(wheels):
+    """True when at least one wheel carries a real sensor value (the only evidence of real tyre telemetry)."""
+    # A pressure of exactly 0 is also what Pitwall leaves for a flat/detached marker on any car: not evidence.
+    return any(finite_number(w.get(k)) and (k != "pressure" or w[k] > 0)
+               for w in wheels or [] if isinstance(w, dict) for k in SENSOR_KEYS)
+
+
+def wheels_trusted(wheels):
+    """Four corners, each `remaining` a finite value in [0, 1], and at least one real sensor value.
+
+    The single criterion for usable tyre data, shared by the display (`field_status`) and lap persistence.
+    """
+    wheels = [w for w in wheels or [] if isinstance(w, dict)]
+    return (len(wheels) == 4 and tyre_sensors_present(wheels)
+            and all(finite_number(w.get("remaining")) and 0 <= w["remaining"] <= 1 for w in wheels))
+
+
+def field_status(compound, wheels, dents):
+    """Compact tyre/damage view of one checkpoint or snapshot; unknown stays None, nothing is guessed.
+
+    LMU mWear is tyre remaining (1.0 new .. 0.0 destroyed), so the field value is the worst corner.
+    Pitwall only has real tyre telemetry for the player's car: for every other car mWear is a constant 1.0
+    next to sentinel (-273.15) temperatures. Remaining tyre is therefore trusted only when at least one
+    wheel carries a real sensor value; otherwise it is unknown, never "new".
+    dent_severity is one provider integer per body region (0 = undamaged; 0/1 observed in captures).
+    """
+    wheels = [w for w in wheels or [] if isinstance(w, dict)]
+    corners = [w.get("remaining") for w in wheels]
+    trusted = wheels_trusted(wheels)
+    regions = [v for v in dents if type(v) is int and v >= 0] if isinstance(dents, list) else []
+    known_dents = bool(regions) and len(regions) == len(dents)
+    return {"tyre_compound": compound if isinstance(compound, str) and compound.strip() else None,
+            "tyre_remaining_min": min(corners) if trusted else None,
+            "damage_regions": sum(1 for v in regions if v > 0) if known_dents else None,
+            "damage_max": max(regions) if known_dents else None}

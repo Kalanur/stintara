@@ -1,0 +1,51 @@
+name: Release Windows agent
+
+# Runs only for an explicit component tag such as agent-v0.2.0. Never on branch pushes.
+# The release is created as a DRAFT pre-release; publishing it is a manual step.
+on:
+  push:
+    tags: ['agent-v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Tag must match the agent version
+        shell: pwsh
+        run: |
+          python tools/agent_release.py check-tag $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) { throw 'Tag does not match agent/version.py' }
+      - run: python -m pip install -r agent/requirements-build.txt
+      - name: Build onefile agent (release channel)
+        shell: pwsh
+        run: |
+          $rev = (git rev-parse HEAD).Trim()
+          ./agent/build-windows.ps1 -Channel release -Revision $rev
+          "REVISION=$rev" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Package and verify
+        shell: pwsh
+        run: |
+          python tools/agent_release.py package --dist dist
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
+          python tools/agent_release.py verify --dist dist --channel release --revision $env:REVISION
+          if ($LASTEXITCODE -ne 0) { throw 'Verification failed' }
+          python tools/agent_release.py notes --out dist/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'Changelog section missing' }
+      - name: Create draft pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^agent-v', ''
+          gh release create $env:GITHUB_REF_NAME `
+            "dist/StintaraAgent-$version-windows-x64.zip" dist/SHA256SUMS.txt `
+            --draft --prerelease --verify-tag --title "Stintara Agent $version" `
+            --notes-file dist/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }

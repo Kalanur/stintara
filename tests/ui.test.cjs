@@ -12,17 +12,20 @@ async function render(file, data, ok=true, status=200) {
   const html = readFileSync(path.join(__dirname, '../server/static', file), 'utf8');
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1].replace('__WEATHER_UI__', weatherScript()).replace('__DRIVER_SLUG__', '"driver"').replace('__SESSION_ID__', '"session"');
   const root = {innerHTML: '', textContent: ''};
+  const recent = {innerHTML: '', textContent: ''};
   const selector = {innerHTML:'', value:'', addEventListener() {}};
   const fuel = {innerHTML:'',textContent:''};
   let finish;
   const done = new Promise(resolve => { finish = resolve; });
   vm.runInNewContext(script, {
-    document: {querySelector: value => value === '#focus' ? selector : value === '#fuel' ? fuel : root},
+    document: {querySelector: value => value === '#focus' ? selector : value === '#fuel' ? fuel : value === '#recent' ? recent : root},
     URL, location:{href:'http://localhost/sessions/session/live'}, history:{replaceState() {}},
-    fetch: async () => ({ok, status, json: async () => data}),
+    fetch: async url => ({ok, status, json: async () => typeof data === 'function' ? data(url) : data}),
     setTimeout: finish,
   });
   await done;
+  await new Promise(resolve => setImmediate(resolve));
+  root.recent = recent;
   return root;
 }
 
@@ -123,7 +126,7 @@ function helpers() {
   return context;
 }
 async function sessionHarness(data, query='', fuelReply=null) {
-  const root = {innerHTML:'',textContent:''};
+  const root = {innerHTML:'',textContent:'',addEventListener(name, listener) { this[name] = listener; }};
   const selector = {innerHTML:'',value:'',addEventListener(name, listener) { this[name] = listener; }};
   const scrolls = {'#full-scroll':{scrollLeft:31,scrollTop:400,focus() {this.focused=true;}},
     '#relative-scroll':{scrollLeft:17,scrollTop:20},'#comparison-panel':{scrollTop:12},'#weather-panel':{scrollTop:5},
@@ -138,9 +141,9 @@ async function sessionHarness(data, query='', fuelReply=null) {
   const planInput={value:''},planFeedback={textContent:''};
   const planForm={addEventListener(name,listener){this[name]=listener;}};
   const planAuto={addEventListener(name,listener){this[name]=listener;}};
-  const relativeDetails = {open:false};
+  const relativeDetails = {open:false}, helpDetails = {open:false};
   const controls={'#planned-stop':planInput,'#plan-feedback':planFeedback,'#plan-form':planForm,'#plan-auto':planAuto};
-  const document = {activeElement:null,querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : name==='#relative-details' ? relativeDetails : controls[name]||scrolls[name]};
+  const document = {activeElement:null,querySelector: name => name==='#root' ? root : name==='#focus' ? selector : name==='#fuel' ? fuel : name==='#fuel-diagnostics' ? details : name==='#relative-details' ? relativeDetails : name==='#full-help-details' ? helpDetails : controls[name]||scrolls[name]};
   let queued, finish, currentData=data;
   let done = new Promise(resolve => { finish=resolve; });
   const context = vm.createContext({URL,location,localStorage,
@@ -161,7 +164,7 @@ async function sessionHarness(data, query='', fuelReply=null) {
   });
   vm.runInContext(spectatorScript(), context);
   await done;
-  return {root,selector,location,replacements,scrolls,fuel,fuelRequests,details,relativeDetails,document,
+  return {root,selector,location,replacements,scrolls,fuel,fuelRequests,details,relativeDetails,helpDetails,document,
     planInput,planFeedback,planForm,planAuto,storage,
     change(id) { selector.value=id; selector.change(); },
     async poll(data) {
@@ -289,6 +292,72 @@ test('driver spectator link uses only the unique own participant ID', async () =
 });
 
 
+const focusFixture = (focus, me={}) => ({live:true, driver:{display_name:'Synthetic Driver'},
+  session:{id:syntheticId(99),track_name:'Synthetic Track',session_type:'Race'},
+  participants:[{participant_id:syntheticId(1),display_name:'Rival',position:1,total_laps:5},
+    {participant_id:syntheticId(2),is_stintara_driver:true,display_name:'Synthetic Driver',position:2,total_laps:5,
+     last_lap_time:90.123,best_lap_time:89.5,in_pits:false,finish_status:0,...me}],
+  focus});
+const baseFocus = {participant_id:syntheticId(2),status:'TRACK',position:2,gap_to_leader:8.25,gap_laps:null,interval:8.25,
+  completed_laps:5,current_lap:6,last_lap_number:5,last_lap_time:90.123,last_lap:{lap_number:5,lap_time:90.123,sector1:30.111,sector2:31.222,sector3:28.79},
+  best_lap_time:89.5,pitstops:1,last_pit_lap:3,player_sector:2,live_age_s:0.3};
+
+test('driver focus shows status, position, gaps, laps, last lap, sectors, best, stops and the current sector', async () => {
+  const html = (await render('live.html', focusFixture(baseFocus))).innerHTML;
+  for (const expected of ['badge track">TRACK', 'P2', '+8.250 s', 'to car ahead', '>6<', '5 completed',
+    '1:30.123', '1:29.500', '30.111', '31.222', '28.790', 'Last timed lap sectors · lap 5', '1 stop · last stop L3',
+    'class="sector now"><div class="label">S2 · now']) assert.ok(html.includes(expected), expected);
+  assert.equal((html.match(/sector now/g) || []).length, 1);
+  assert.doesNotMatch(html, /stale or unavailable|undefined|NaN|null/);
+});
+
+test('driver focus never invents values: unknowns stay a dash and no sector is highlighted', async () => {
+  const unknown = {participant_id:syntheticId(2),status:null,position:null,gap_to_leader:null,gap_laps:null,interval:null,
+    completed_laps:null,current_lap:null,last_lap_number:null,last_lap_time:null,last_lap:null,best_lap_time:null,pitstops:null,last_pit_lap:null,
+    player_sector:null,live_age_s:0.2};
+  const html = (await render('live.html', focusFixture(unknown, {last_lap_time:null,best_lap_time:null}))).innerHTML;
+  assert.doesNotMatch(html, /sector now|badge|P\d|NaN|undefined|null|0:00/);
+  assert.match(html, /Stops —/);
+  assert.equal((html.match(/<div class="big">—<\/div>/g) || []).length >= 8, true);
+  // Lapped: laps replace the time gap, and a stop count of zero reports no last stop.
+  const lapped = (await render('live.html', focusFixture({...baseFocus,gap_laps:2,gap_to_leader:null,interval:null,pitstops:0,last_pit_lap:3}))).innerHTML;
+  assert.match(lapped, /Gap 2 L/);
+  assert.match(lapped, /0 stops(?! ·)/);
+});
+
+test('driver focus: FIN, DNF, DSQ and PIT badges, no current sector outside live scoring', async () => {
+  for (const [status, cls] of [['FIN','finished'],['DNF','retired'],['DSQ','disqualified'],['PIT','pit']]) {
+    const html = (await render('live.html', focusFixture({...baseFocus,status,current_lap:null,player_sector:null}))).innerHTML;
+    assert.ok(html.includes(`badge ${cls}">${status}`), status);
+  }
+  // Stale or missing scoring age: banner, and a (server-supplied) sector is not shown as "now".
+  for (const age of [null, 5.01, 60]) {
+    const html = (await render('live.html', focusFixture({...baseFocus,live_age_s:age}))).innerHTML;
+    assert.match(html, /stale or unavailable/);
+    assert.doesNotMatch(html, /sector now/);
+  }
+  // A server without the focus block still renders the page from the plain participant fields.
+  const legacy = (await render('live.html', focusFixture(undefined))).innerHTML;
+  assert.match(legacy, /Driver focus/);
+  assert.match(legacy, /badge track">TRACK/);
+  assert.doesNotMatch(legacy, /sector now|stale or unavailable/);
+});
+
+test('last lap time never borrows sectors of another lap', async () => {
+  // Server found no stored lap matching the scoring's last lap: time and number stay, sectors are unknown.
+  const html = (await render('live.html', focusFixture({...baseFocus,last_lap:null,last_lap_number:6,last_lap_time:91.5},
+    {last_lap_time:91.5}))).innerHTML;
+  assert.match(html, /1:31\.500/);
+  assert.match(html, />L6</);
+  assert.doesNotMatch(html, /30\.111|31\.222|28\.790|Last timed lap sectors · lap/);
+  assert.equal((html.match(/class="big">—<\/div><\/div>/g) || []).length, 3, 'three empty sectors');
+});
+
+test('driver focus escapes provider text', async () => {
+  const html = (await render('live.html', focusFixture(baseFocus, {display_name:'<img src=x>',car_name:'<b>car</b>'}))).innerHTML;
+  assert.doesNotMatch(html, /<img|<b>car/);
+});
+
 function fuelData(id, count=3) {
   return {session_id:syntheticId(99),participant_id:id,
     estimate:{status:count<3 ? 'collecting' : 'ready',sample_count:count<3 ? 0 : count,available_sample_count:count,minimum_samples:3,window_size:5,
@@ -385,7 +454,7 @@ test('race full-field gaps, lap deficits and signed H2H use validated adjacency'
     gap_laps:null,laps_behind_leader:0,interval:i ? [null,.5,1.3][i] : null,
     interval_preceding_id:i ? syntheticId(i) : null}));
   const data={...sessionData(field),session:{session_type:'Race',track_name:'Synthetic Circuit'},
-    timing:{configured_laps:20,configured_minutes:null,elapsed_seconds:3661.9}};
+    timing:{configured_laps:20,configured_duration_seconds:null,end_et_seconds:null,remaining_seconds:null,elapsed_seconds:3661.9}};
   const page=await sessionHarness(data,`?focus=${field[1].id}`);
   for (const value of ['14.8 s','0.5 s','Interval to focus</dt><dd>-0.5 s',
     'Interval to focus</dt><dd>+1.3 s','20 laps','1:01:01','Completed laps']) assert.ok(page.root.innerHTML.includes(value),value);
@@ -404,11 +473,13 @@ test('session clock and focused persisted sectors label completed laps without p
   const field=syntheticField(1);
   Object.assign(field[0],{total_laps:0,sector_lap_number:2,sector1:30.5,sector2:31.25,sector3:null});
   const data={...sessionData(field),session:{session_type:'Race'},
-    timing:{configured_minutes:30,configured_laps:null,elapsed_seconds:0}};
+    timing:{configured_duration_seconds:1800,end_et_seconds:1934,remaining_seconds:1934,configured_laps:null,elapsed_seconds:0}};
   const page=await sessionHarness(data,`?focus=${field[0].id}`);
-  for (const value of ['30 min','0:00:00','0 completed laps','checkpoint lap 2','0:30.500','0:31.250'])
+  for (const value of ['30:00','0:00:00','Time remaining: 0:32:14','0 completed laps','checkpoint lap 2','0:30.500','0:31.250'])
     assert.ok(page.root.innerHTML.includes(value),value);
-  assert.doesNotMatch(page.root.innerHTML,/remaining laps|Current lap|Remaining time|official remaining/i);
+  assert.match(page.root.innerHTML,/Last timed lap sectors/);
+  assert.doesNotMatch(page.root.innerHTML,/Last completed lap sectors/);
+  assert.doesNotMatch(page.root.innerHTML,/remaining laps|Current lap|official remaining/i);
   await page.poll({...data,live:false,timing:{...data.timing,elapsed_seconds:123}});
   assert.match(page.root.innerHTML,/Elapsed session time: —/);
   const h=helpers();
@@ -432,17 +503,17 @@ test('single class appears once; full field, relative and H2H keep class for mix
   assert.equal((h.root.innerHTML.match(/GT3/g)||[]).length,1);
   assert.doesNotMatch(h.root.innerHTML,/<th[^>]*>Class<\/th>|<dt>Class<\/dt>/);
   const full=h.root.innerHTML.split('<h2>Full field</h2>')[1];
-  assert.equal((full.match(/<th scope=/g)||[]).length,9);
+  assert.equal((full.match(/<th scope=/g)||[]).length,14);
   for (const value of ['Hypercar', null, '', '  ']) {
     const mixed=field.map(p => ({...p})); mixed[2].vehicle_class=value;
     await h.poll(sessionData(mixed));
     assert.match(h.root.innerHTML,/<th scope="col">Class<\/th>/);
     assert.match(h.root.innerHTML,/<th>Class<\/th>/);
     assert.match(h.root.innerHTML,/<dt>Class<\/dt>/);
-    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,10);
+    assert.equal((h.root.innerHTML.split('<h2>Full field</h2>')[1].match(/<th scope=/g)||[]).length,15);
   }
   await h.poll(sessionData([]));
-  assert.match(h.root.innerHTML,/colspan="10"/);
+  assert.match(h.root.innerHTML,/colspan="15"/);
   const escaped=await render('session.html',sessionData([{vehicle_class:'<GT3>',display_name:'<Driver>'}]));
   assert.match(escaped.innerHTML,/&lt;GT3&gt;/);
   assert.doesNotMatch(escaped.innerHTML,/<GT3>|<Driver>/);
@@ -565,7 +636,7 @@ test('compact focus status reuses timing rules, escapes names and distinguishes 
 });
 
 test('focus summary follows UUID selection and precedes larger sections without removing context', async () => {
-  const field=syntheticField(2), data={...sessionData(field),timing:{configured_minutes:80,elapsed_seconds:120}};
+  const field=syntheticField(2), data={...sessionData(field),timing:{configured_duration_seconds:4800,end_et_seconds:4956,remaining_seconds:4836,elapsed_seconds:120}};
   data.session.session_type='Race';
   const page=await sessionHarness(data);
   assert.doesNotMatch(page.root.innerHTML,/aria-label="Focus status"/);
@@ -573,7 +644,7 @@ test('focus summary follows UUID selection and precedes larger sections without 
   let html=page.root.innerHTML;
   assert.ok(html.indexOf('class="status"') < html.indexOf('aria-label="Focus status"'));
   assert.ok(html.indexOf('aria-label="Focus status"') < html.indexOf('aria-label="Weather"'));
-  for (const value of ['80 min','0:02:00','Focused timing','Relative','Head-to-Head','Full field']) assert.ok(html.includes(value),value);
+  for (const value of ['80:00','0:02:00','Focused timing','Relative','Head-to-Head','Full field']) assert.ok(html.includes(value),value);
   await page.poll({...data,participants:[field[1]]});
   assert.doesNotMatch(page.root.innerHTML,/aria-label="Focus status"/);
 });
@@ -611,7 +682,7 @@ test('engineer dashboard keeps live and stored cues explicit alongside existing 
   assert.match(html,/class="live-dot" aria-hidden="true"/);
   assert.match(html,/>LIVE<\/span>/);
   for(const text of ['50 participants','Full field','Focus status','Head-to-Head','Relative standings',
-    'Current conditions','Track geometry not available yet','Flags / Race Control / Car Status · not available yet']) assert.ok(html.includes(text),text);
+    'Current conditions','Track Map','TRACK UNKNOWN','RACE CONTROL · NO DATA','Waiting for position data']) assert.ok(html.includes(text),text);
   assert.match(page.fuel.innerHTML,/Current fuel: <strong>42.00 L/);
   await page.poll({...data,live:false});
   assert.match(page.root.innerHTML,/class="feed feed-stale"/);
@@ -687,7 +758,7 @@ test('desktop height modes use CSS viewport bounds without shrinking primary tex
   assert.ok(css.includes('@media(min-width:1200px) and (min-height:951px),(min-width:1800px) and (min-height:800px)'));
   const compact=css.split('/* Compact desktop')[1].split('@media(max-width:1199px)')[0];
   assert.match(compact,/max-height:950px/);
-  assert.match(compact,/max-height:clamp\(180px,calc\(100dvh - 580px\),350px\)/);
+  assert.match(compact,/max-height:clamp\(180px,calc\(100dvh - 540px\),400px\)/);
   assert.doesNotMatch(compact,/font-size|display:none/);
   assert.ok(css.includes('@media(max-width:1199px),(max-height:799px),(max-width:1799px) and (max-height:950px)'));
 });
@@ -769,6 +840,94 @@ test('unknown capability and unavailable values render safely without provider s
   assert.doesNotMatch(html,/<img|NaN|Infinity|undefined|SET VE/);
 });
 
+test('VE states distinguish unknown, stale, collecting and ready without a fuel-only fallback', () => {
+  const render=(state,patch)=>{
+    const d=strategyDemo();d.status='collecting_or_stale';d.provider_pit_settings=null;d.at_pit=[];
+    Object.assign(d.resources[1],{state,...patch});
+    return helpers().strategyWidget(d);
+  };
+  const collecting=render('collecting',{consumption_per_lap:null,range_laps:null,available:false,sample_count:2});
+  assert.match(collecting,/63\.0%/);assert.match(collecting,/consumption unknown/);assert.match(collecting,/Collecting laps · 2\/3 valid/);
+  const unknown=render('no_current_value',{current:null,consumption_per_lap:null,range_laps:null,available:false});
+  assert.match(unknown,/UNKNOWN/);assert.match(unknown,/No valid current value/);
+  const stale=render('stale',{fresh:false,range_laps:null,available:false});
+  assert.match(stale,/Stale · not live/);
+  for(const html of [collecting,unknown,stale]) assert.doesNotMatch(html,/SET (VE|FUEL) TO|NaN|undefined|Infinity/);
+  assert.match(render('ready',{}),/5 samples/);
+});
+
+function trackFixture(over = {}) {
+  const ring = Array.from({length: 40}, (_, i) => [Math.round(500 * Math.cos(i / 40 * 2 * Math.PI)), Math.round(300 * Math.sin(i / 40 * 2 * Math.PI))]);
+  return {geometry: {state: 'complete', complete: true, closed: true, progress: null, points: ring,
+      point_sectors: ring.map((_, i) => i < 13 ? 1 : i < 27 ? 2 : 3), sector_boundaries_m: [1000, 2000], length_m: 3000},
+    vehicles: [{participant_id: 'focus', x: 500, z: 0, in_pits: false, position: 1, name: 'Synthetic A'},
+      {participant_id: 'other', x: -500, z: 0, in_pits: false, position: 2, name: 'Synthetic B'},
+      {participant_id: 'pitter', x: 0, z: 300, in_pits: true, position: 3, name: 'Synthetic C'}],
+    vehicles_age_s: .2, vehicles_fresh: true,
+    race_control: {phase: 'green', sector_flags: ['clear', 'clear', 'clear'], safety_car_active: false, fresh: true, age_s: .2, ...over.race_control},
+    ...over.track};
+}
+
+test('track map highlights focus, marks yellow sector and shows no alarm in the green state', () => {
+  const h = helpers();
+  const green = h.trackMapPanel({track_map: trackFixture()}, 'focus');
+  assert.equal((green.match(/class="trk-focus"/g) || []).length, 1);
+  assert.match(green, />GREEN</);
+  assert.doesNotMatch(green, /YELLOW|SAFETY|STOPPED|trk-yellow|FLAG UNRECOGNIZED|LEARNING/);
+  assert.doesNotMatch(green, /NaN|Infinity|undefined/);
+  const yellow = h.trackMapPanel({track_map: trackFixture({race_control: {sector_flags: ['clear', 'local_yellow', 'clear']}})}, 'focus');
+  assert.match(yellow, /S2 LOCAL YELLOW/);
+  assert.match(yellow, /class="trk-yellow"/);
+  assert.doesNotMatch(yellow, /S1 LOCAL|S3 LOCAL/);
+});
+
+test('pit vehicles are dimmed and never rendered as incidents', () => {
+  const html = helpers().trackMapPanel({track_map: trackFixture()}, 'focus');
+  assert.match(html, /trk-car pit/);
+  assert.doesNotMatch(html, /STOPPED|INCIDENT|CAR STOPPED/);
+  assert.match(html, /3 · Synthetic C · pit/);
+});
+
+test('track learning, flag-only yellow and race control without geometry stay readable', () => {
+  const h = helpers();
+  const learning = trackFixture({track: {geometry: {state: 'learning', complete: false, closed: false, progress: .63,
+    points: [[0, 0], [100, 20], [200, 30]], point_sectors: null, sector_boundaries_m: null}},
+    race_control: {sector_flags: ['clear', 'local_yellow', 'clear']}});
+  const html = h.trackMapPanel({track_map: learning}, 'focus');
+  assert.match(html, /LEARNING TRACK · 63%/);
+  assert.match(html, /S2 LOCAL YELLOW/);
+  assert.match(html, /flag only/);
+  assert.doesNotMatch(html, /trk-yellow/);
+  const unknownProgress = h.trackMapPanel({track_map: trackFixture({track: {geometry: {state: 'learning', complete: false,
+    progress: null, points: [], point_sectors: null}}})}, 'focus');
+  assert.match(unknownProgress, /LEARNING TRACK</);
+  assert.doesNotMatch(unknownProgress, /LEARNING TRACK · /);
+  const open = h.trackMapPanel({track_map: learning}, 'focus');
+  assert.equal(((open.match(/class="trk-base" d="([^"]+)"/) || [])[1].match(/M/g) || []).length, 1);
+});
+
+test('stale, missing and malformed track data degrade without false warnings or NaN', () => {
+  const h = helpers();
+  const stale = h.trackMapPanel({track_map: trackFixture({track: {vehicles_fresh: false, vehicles_age_s: 30},
+    race_control: {fresh: false}})}, 'focus');
+  assert.match(stale, /POSITIONS STALE/);
+  assert.match(stale, /RACE CONTROL · STALE/);
+  assert.doesNotMatch(stale, />GREEN</);
+  assert.doesNotMatch(stale, /class="trk-focus"/);
+  for (const bad of [undefined, {}, {geometry: {points: [[NaN, 1], ['x', 2], null]}, vehicles: [{x: NaN, z: 1}, {x: Infinity, z: 0}]}]) {
+    const html = h.trackMapPanel({track_map: bad}, 'focus');
+    assert.doesNotMatch(html, /NaN|Infinity|undefined|>GREEN</);
+    assert.match(html, /RACE CONTROL · NO DATA/);
+  }
+  const fcy = h.trackMapPanel({track_map: trackFixture({race_control: {phase: 'full_course_yellow', safety_car_active: true}})}, 'focus');
+  assert.match(fcy, /FULL COURSE YELLOW/);
+  assert.match(fcy, /SAFETY CAR ACTIVE/);
+  const unknown = h.trackMapPanel({track_map: trackFixture({race_control: {phase: 'unknown', sector_flags: ['unknown', 'clear', 'clear']}})}, 'focus');
+  assert.match(unknown, /STATE UNKNOWN/);
+  assert.match(unknown, /S1 FLAG UNRECOGNIZED/);
+  assert.doesNotMatch(unknown, /LOCAL YELLOW|trk-yellow/);
+});
+
 test('versioned local plans isolate session and participant and reject malformed storage', () => {
   const h=helpers(),map=new Map(),storage={getItem:k=>map.get(k),setItem:(k,v)=>map.set(k,v),removeItem:k=>map.delete(k)};
   const sid=syntheticId(99),a=syntheticId(1),b=syntheticId(2);
@@ -815,4 +974,834 @@ test('TARGET_LEVEL distinguishes setting target, retained excess fuel and expect
     assert.match(infeasible,/Projected fuel out ≈ —/);
     assert.doesNotMatch(infeasible,/Projected fuel out ≈ (43.0|51.6)/);
   }
+});
+
+
+// --- Track Map V0.2: orientation (presentation only), stored track and real viewport paths ---------------------
+
+function helpersWith(extra = {}) {
+  const context = vm.createContext({URL, ...extra});
+  vm.runInContext(spectatorScript().split('const sessionId =')[0], context);
+  return context;
+}
+const memoryStorage = () => { const map = new Map(); return {map, getItem: k => map.has(k) ? map.get(k) : null, setItem: (k, v) => map.set(k, String(v))}; };
+const ellipse = (rx, rz, tilt = 0, count = 60) => Array.from({length: count}, (_, i) => {
+  const a = i / count * 2 * Math.PI, x = rx * Math.cos(a), z = rz * Math.sin(a);
+  return [Math.round((x * Math.cos(tilt) - z * Math.sin(tilt)) * 10) / 10, Math.round((x * Math.sin(tilt) + z * Math.cos(tilt)) * 10) / 10];
+});
+const closedGeometry = points => ({state: 'complete', complete: true, closed: true, progress: null, points, point_sectors: null,
+  sector_boundaries_m: null, length_m: 3000, source: 'learned'});
+function projectedSpread(h, geometry, mode = 'auto') {
+  const {project} = h.trackProjection(geometry, mode), pts = geometry.points.map(project);
+  const n = pts.length, cx = pts.reduce((a, p) => a + p[0], 0) / n, cy = pts.reduce((a, p) => a + p[1], 0) / n;
+  let xx = 0, yy = 0, xy = 0;
+  for (const p of pts) { xx += (p[0] - cx) ** 2; yy += (p[1] - cy) ** 2; xy += (p[0] - cx) * (p[1] - cy); }
+  return {xx: xx / n, yy: yy / n, xy: xy / n, width: Math.max(...pts.map(p => p[0])) - Math.min(...pts.map(p => p[0])),
+    height: Math.max(...pts.map(p => p[1])) - Math.min(...pts.map(p => p[1]))};
+}
+
+test('AUTO leaves a horizontal track alone and lays vertical and diagonal tracks horizontally', () => {
+  const h = helpersWith();
+  const horizontal = closedGeometry(ellipse(600, 250));
+  assert.equal(h.principalRotation(horizontal.points), null);
+  assert.equal(h.trackProjection(horizontal, 'auto').angle, 0);
+  const vertical = closedGeometry(ellipse(250, 600));
+  const v = projectedSpread(h, vertical);
+  assert.ok(v.width > v.height * 2, `vertical track made horizontal ${JSON.stringify(v)}`);
+  assert.ok(Math.abs(v.xy) < 1e-6 * v.xx);
+  for (const degrees of [20, 35, 45, 60, 100, 135, -30, -75]) {
+    const diagonal = closedGeometry(ellipse(600, 250, degrees * Math.PI / 180));
+    const spread = projectedSpread(h, diagonal);
+    assert.ok(spread.xx > spread.yy * 4 && Math.abs(spread.xy) < 0.01 * spread.xx, `${degrees} deg ${JSON.stringify(spread)}`);
+    assert.ok(spread.width > spread.height * 2);
+  }
+});
+
+test('AUTO falls back to the original orientation for degenerate or ambiguous data', () => {
+  const h = helpersWith();
+  const isOriginal = geometry => {
+    const t = h.trackProjection(geometry, 'auto');
+    return t.angle === 0 && t.project([3, 4]).join() === '3,-4';
+  };
+  assert.equal(h.principalRotation([]), null);
+  assert.equal(h.principalRotation(undefined), null);
+  assert.equal(h.principalRotation(Array.from({length: 20}, () => [5, 5])), null);          // no spread
+  assert.equal(h.principalRotation(ellipse(500, 500)), null);                               // circle: no dominant axis
+  assert.equal(h.principalRotation(ellipse(600, 250).slice(0, 5)), null);                    // too few points
+  assert.equal(h.principalRotation(Array.from({length: 20}, (_, i) => [i % 4 ? NaN : i, i])), null);
+  assert.ok(isOriginal(closedGeometry(ellipse(500, 500))));
+  assert.ok(isOriginal({...closedGeometry(ellipse(250, 600)), complete: false}));            // partial learning never rotates
+  assert.ok(isOriginal({...closedGeometry(ellipse(250, 600)), closed: false}));
+  assert.ok(isOriginal(undefined));
+  assert.equal(isOriginal(closedGeometry(ellipse(250, 600))), false);
+  const original = h.trackProjection(closedGeometry(ellipse(250, 600)), 'original');
+  assert.equal(original.angle, 0);
+  assert.deepEqual(Array.from(original.project([3, 4])), [3, -4]);
+});
+
+test('AUTO rotation never mirrors and preserves every distance', () => {
+  const h = helpersWith();
+  // Asymmetric outline: a mirrored result would flip the sign of the signed area.
+  const shape = [[0, 0], [400, 0], [400, 150], [250, 150], [250, 500], [0, 500], [0, 420], [-100, 250], [0, 120], [40, 60]];
+  const area = pts => pts.reduce((a, p, i) => a + (p[0] * pts[(i + 1) % pts.length][1] - pts[(i + 1) % pts.length][0] * p[1]), 0) / 2;
+  const geometry = closedGeometry(shape.concat(shape.map(p => [p[0] + 1, p[1] + 1])));
+  const screen = geometry.points.map(p => [p[0], -p[1]]);
+  const {project, angle} = h.trackProjection(geometry, 'auto');
+  assert.notEqual(angle, 0);
+  const out = geometry.points.map(project);
+  assert.equal(Math.sign(area(out)), Math.sign(area(screen)));
+  assert.ok(Math.abs(Math.abs(area(out)) - Math.abs(area(screen))) < 1e-6 * Math.abs(area(screen)));
+  for (let i = 0; i < screen.length; i++) for (let j = i + 1; j < screen.length; j++) {
+    const before = Math.hypot(screen[i][0] - screen[j][0], screen[i][1] - screen[j][1]);
+    assert.ok(Math.abs(before - Math.hypot(out[i][0] - out[j][0], out[i][1] - out[j][1])) < 1e-6);
+  }
+});
+
+const circlesOf = html => [...html.matchAll(/<circle class="(trk-[a-z ]+?)" cx="(-?[\d.]+)" cy="(-?[\d.]+)"/g)].map(m => [m[1], +m[2], +m[3]]);
+const vertices = d => [...d.matchAll(/[ML](-?[\d.]+) (-?[\d.]+)/g)].map(m => [+m[1], +m[2]]);
+const baseVertices = html => vertices(html.match(/class="trk-base" d="([^"]+)"/)[1]);
+
+test('centerline, sectors, vehicles, focus and pit markers share one transformation; ORIGINAL changes nothing', () => {
+  const h = helpersWith();
+  const points = ellipse(250, 600, 0.4, 40);
+  const geometry = {...closedGeometry(points), point_sectors: points.map((_, i) => i < 13 ? 1 : i < 27 ? 2 : 3)};
+  const vehicles = [{participant_id: 'focus', x: points[5][0], z: points[5][1], in_pits: false, position: 1, name: 'A'},
+    {participant_id: 'pit', x: points[20][0], z: points[20][1], in_pits: true, position: 2, name: 'B'}];
+  const track = {geometry, vehicles, vehicles_fresh: true, vehicles_age_s: .1,
+    race_control: {phase: 'green', sector_flags: ['clear', 'local_yellow', 'clear'], fresh: true, age_s: .1}};
+  const snapshot = JSON.stringify(track);
+  const auto = h.trackMapPanel({track_map: track, session: {track_name: 'T'}}, 'focus', 'auto');
+  const original = h.trackMapPanel({track_map: track, session: {track_name: 'T'}}, 'focus', 'original');
+  assert.equal(JSON.stringify(track), snapshot, 'raw geometry is never modified');
+  const base = baseVertices(auto), cars = circlesOf(auto);
+  const focus = cars.find(c => c[0] === 'trk-focus'), pit = cars.find(c => c[0].startsWith('trk-car'));
+  assert.deepEqual(focus.slice(1), base[5]);
+  assert.deepEqual(pit.slice(1), base[20]);
+  const yellow = vertices(auto.match(/class="trk-yellow" d="([^"]+)"/)[1]);
+  assert.ok(yellow.length > 2 && yellow.every(p => base.some(b => b[0] === p[0] && b[1] === p[1])));
+  const raw = baseVertices(original);
+  assert.deepEqual(raw.slice(0, 40), points.map(p => [+p[0].toFixed(1), +(-p[1]).toFixed(1)]));
+  assert.deepEqual(circlesOf(original).find(c => c[0] === 'trk-focus').slice(1), raw[5]);
+  assert.notDeepEqual(base[0], raw[0]);
+  const extent = (pts, i) => Math.max(...pts.map(p => p[i])) - Math.min(...pts.map(p => p[i]));
+  assert.ok(extent(base, 0) > extent(base, 1) * 2 && extent(raw, 1) > extent(raw, 0));
+  assert.match(auto, /Orientation: AUTO/);
+  assert.match(original, /Orientation: ORIGINAL/);
+});
+
+test('orientation choice is stored per track, defaults to AUTO and survives blocked or corrupt storage', () => {
+  const storage = memoryStorage(), h = helpersWith({localStorage: storage});
+  assert.equal(h.trackOrientation('Synthetic A'), 'auto');
+  assert.ok(h.saveTrackOrientation('Synthetic A', 'original'));
+  assert.equal(h.trackOrientation('Synthetic A'), 'original');
+  assert.equal(h.trackOrientation('Synthetic B'), 'auto');
+  assert.deepEqual(JSON.parse(storage.map.get('stintara:trackmap:orientation:v1')), {'Synthetic A': 'original'});
+  assert.equal(h.saveTrackOrientation('Synthetic A', 'rotated'), false);
+  assert.equal(h.saveTrackOrientation('', 'auto'), false);
+  for (const bad of ['{', '[]', '"x"', '{"Synthetic C":"north-up"}']) {
+    const broken = memoryStorage(); broken.map.set('stintara:trackmap:orientation:v1', bad);
+    assert.equal(helpersWith({localStorage: broken}).trackOrientation('Synthetic C'), 'auto');
+  }
+  const blocked = helpersWith({localStorage: {getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); }}});
+  assert.equal(blocked.trackOrientation('Synthetic A'), 'auto');
+  assert.equal(blocked.saveTrackOrientation('Synthetic A', 'original'), false);
+  assert.equal(blocked.trackOrientation('Synthetic A'), 'original');   // still honoured for this page
+  assert.equal(helpersWith().trackOrientation('Synthetic A'), 'auto');  // no storage object at all
+});
+
+test('toggle button switches orientation, persists per track and survives polling', async () => {
+  const field = syntheticField(2);
+  const track = trackFixture({track: {geometry: closedGeometry(ellipse(250, 600, 0.3, 40))}});
+  const page = await sessionHarness({...sessionData(field), track_map: track});
+  assert.match(page.root.innerHTML, /Orientation: AUTO/);
+  const press = () => page.root.click({target: {closest: selector => selector === '#orientation-toggle' ? {} : null}});
+  press();
+  assert.match(page.root.innerHTML, /Orientation: ORIGINAL/);
+  assert.equal(JSON.parse(page.storage.get('stintara:trackmap:orientation:v1'))['Synthetic Track'], 'original');
+  await page.poll({...sessionData(field), track_map: track});
+  assert.match(page.root.innerHTML, /Orientation: ORIGINAL/, 'choice survives polling');
+  page.root.click({target: {closest: () => null}});                       // unrelated clicks do nothing
+  assert.match(page.root.innerHTML, /Orientation: ORIGINAL/);
+  press();
+  assert.match(page.root.innerHTML, /Orientation: AUTO/);
+});
+
+test('orientation control appears only for a complete centerline', () => {
+  const h = helpersWith();
+  const learning = trackFixture({track: {geometry: {state: 'learning', complete: false, closed: false, progress: .3, points: ellipse(250, 600, 0, 20), point_sectors: null}}});
+  assert.doesNotMatch(h.trackMapPanel({track_map: learning}, 'focus'), /orientation-toggle/);
+  assert.doesNotMatch(h.trackMapPanel({track_map: undefined}, 'focus'), /orientation-toggle/);
+  assert.match(h.trackMapPanel({track_map: trackFixture()}, 'focus'), /orientation-toggle/);
+});
+
+test('a stored track without live state shows only geometry, never vehicles, flags or a fake green state', () => {
+  const h = helpersWith();
+  const stored = {geometry: {...closedGeometry(ellipse(500, 300, 0, 40)), source: 'stored'}, vehicles: [], vehicles_age_s: null,
+    vehicles_fresh: false, race_control: null, static_only: true};
+  const html = h.trackMapPanel({track_map: stored, session: {track_name: 'T'}}, 'focus');
+  assert.match(html, /STORED TRACK/);
+  assert.match(html, /POSITIONS UNAVAILABLE/);
+  assert.match(html, /class="trk-base"/);
+  assert.doesNotMatch(html, /trk-car|trk-focus|GREEN|YELLOW|SAFETY|RACE CONTROL|POSITIONS STALE|Waiting for position data|LEARNING|NaN|undefined/);
+  const unknown = h.trackMapPanel({track_map: {geometry: {state: 'unknown', complete: false, points: []}, vehicles: [], race_control: null, static_only: false}}, 'focus');
+  assert.doesNotMatch(unknown, /STORED TRACK|trk-base|orientation-toggle/);
+  assert.match(unknown, /Waiting for position data/);
+  assert.match(unknown, /TRACK UNKNOWN/);
+  assert.doesNotMatch(h.trackMapPanel({track_map: {...stored, static_only: false}}, 'focus'), /STORED TRACK/);
+});
+
+// A tiny media-query evaluator proves which layout path each real browser viewport takes. It does not prove pixels;
+// the measured browser run (tools/engineer_demo.cjs --screenshot --viewports) does.
+function layoutPaths(width, height) {
+  const css = readFileSync(path.join(__dirname, '../server/static/session.html'), 'utf8').match(/<style>([\s\S]*?)<\/style>/)[1];
+  const queries = [...css.matchAll(/@media([^{]+)\{/g)].map(m => m[1].trim());
+  const matches = query => query.split(',').some(group => group.split(/\s+and\s+/).every(feature => {
+    const m = feature.trim().match(/^\((min|max)-(width|height):(\d+)px\)$/);
+    if (!m) return false;
+    const value = m[2] === 'width' ? width : height;
+    return m[1] === 'min' ? value >= +m[3] : value <= +m[3];
+  }));
+  const find = prefix => { const q = queries.find(query => query.startsWith(prefix)); assert.ok(q, prefix); return q; };
+  return {grid: matches(find('(min-width:1200px) and (min-height:951px)')),
+    compact: matches(find('(min-width:1800px) and (min-height:800px) and (max-height:950px)')),
+    stacked: matches(find('(max-width:1199px)'))};
+}
+
+test('real browser viewports take the intended layout paths', () => {
+  assert.deepEqual(layoutPaths(1920, 911), {grid: true, compact: true, stacked: false});     // 1080p display, measured 2026-11-07
+  assert.deepEqual(layoutPaths(2560, 1271), {grid: true, compact: false, stacked: false});   // 1440p display, measured 2026-11-07
+  for (const [w, h] of [[1920, 800], [1920, 900], [1800, 800]]) assert.deepEqual(layoutPaths(w, h), {grid: true, compact: true, stacked: false}, `${w}x${h}`);
+  for (const [w, h] of [[2560, 1300], [1920, 1080]]) assert.deepEqual(layoutPaths(w, h), {grid: true, compact: false, stacked: false}, `${w}x${h}`);
+  for (const [w, h] of [[1920, 799], [1200, 760], [900, 900]]) assert.equal(layoutPaths(w, h).stacked, true, `${w}x${h}`);
+});
+
+test('desktop layouts reserve room for Head-to-Head, Weather and Strategy without shrinking text', () => {
+  const css = readFileSync(path.join(__dirname, '../server/static/session.html'), 'utf8').match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.match(css, /grid-template-rows:auto auto minmax\(100px,1fr\) auto 180px/);
+  assert.match(css, /\.dashboard\{gap:8px;grid-template-rows:auto auto minmax\(100px,1fr\) auto 172px\}/);
+  assert.match(css, /\.fuel-panel\{max-height:clamp\(390px,calc\(100dvh - 760px\),470px\)\}/);
+  assert.match(css, /\.h2h dl\{grid-template-columns:max-content minmax\(0,1fr\) max-content auto/);
+  assert.equal((css.match(/body\{[^}]*font:14px/g) || []).length, 1);                 // base font size unchanged
+  for (const block of css.split('@media').slice(1)) assert.doesNotMatch(block.split('\n}\n')[0], /body\{[^}]*font(-size)?:/);
+});
+
+const recentItem = (over={}) => ({id:'sess-1', simulator_provider:'lmu', session_type:'Race', track_name:'Synthetic Ring',
+  status:'complete', started_at:'2026-11-07T10:00:00Z', ended_at:'2026-11-07T11:00:00Z', participant_count:38,
+  winner:null, stintara_driver:null, ...over});
+const homeData = items => url => url.includes('recent-results') ? {items} : [];
+
+test('frontpage shows recent results, history link and keeps live sessions', async () => {
+  const html = readFileSync(path.join(__dirname, '../server/static/index.html'), 'utf8');
+  assert.match(html, /RECENT RESULTS/);
+  assert.match(html, /href="\/history"/);
+  const root = await render('index.html', homeData([recentItem({
+    track_name:'<img onerror=alert(1)>',
+    winner:{participant_id:'w', display_name:'<b>Winner</b>', position:1, finish_status:1},
+    stintara_driver:{participant_id:'k 1', display_name:'Synthetic', position:7, finish_status:1}})]));
+  assert.match(root.innerHTML, /No live sessions/);
+  const r = root.recent.innerHTML;
+  assert.match(r, /38 participants/);
+  assert.match(r, /Winner: &lt;b&gt;Winner/);
+  assert.match(r, /Stintara Driver: Synthetic · P7 · FIN/);
+  assert.match(r, /\/sessions\/sess-1\/live\?focus=k%201/);
+  assert.match(r, /Finished /);
+  assert.doesNotMatch(r, /<img|<b>/);
+});
+
+test('recent results: empty state, unknown winner is not invented, error is contained', async () => {
+  assert.match((await render('index.html', homeData([]))).recent.innerHTML, /No completed races/);
+  const r = (await render('index.html', homeData([recentItem({ended_at:null})]))).recent.innerHTML;
+  assert.doesNotMatch(r, /Winner|Stintara Driver/);
+  assert.match(r, /Finish time unknown/);
+  const root = await render('index.html', url => { if (url.includes('recent')) throw new Error('x'); return []; });
+  assert.match(root.innerHTML, /No live sessions/);
+});
+
+async function renderHistory(handler) {
+  const html = readFileSync(path.join(__dirname, '../server/static/history.html'), 'utf8');
+  assert.match(html, /SESSION HISTORY/);
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const els = {};
+  const listeners = {};
+  const el = id => els[id] ??= {innerHTML:'', textContent:'', value:'', disabled:false,
+    addEventListener(type, fn) { listeners[id + ':' + type] = fn; }};
+  const urls = [];
+  const ctx = {document:{querySelector: el}, URLSearchParams, setTimeout, fetch: async url => {
+    urls.push(url); return {ok:true, json: async () => handler(url)}; }};
+  vm.runInNewContext(script, ctx);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  await settle();
+  return {el, urls, settle, fire: async id => { listeners[id](); await settle(); }};
+}
+
+test('history page lists sessions with filters, escaping and pagination links', async () => {
+  const handler = url => url.includes('/filters') ? {providers:['lmu','<x>'], tracks:['Synthetic Ring'], session_types:['Race']}
+    : {items:[recentItem({track_name:'<script>x</script>'}), recentItem({id:'live-1', status:'live', ended_at:null})],
+       limit:20, has_more:true, next_cursor:'c2'};
+  const h = await renderHistory(handler);
+  const list = h.el('#list').innerHTML;
+  assert.match(list, /COMPLETE/); assert.match(list, /LIVE/);
+  assert.match(list, /&lt;script&gt;/); assert.doesNotMatch(list, /<script>/);
+  assert.match(list, /\/sessions\/live-1\/live/);
+  assert.doesNotMatch(list, /Winner/);
+  assert.match(h.el('#provider').innerHTML, /&lt;x&gt;/);
+  assert.equal(h.el('#prev').disabled, true);
+  assert.equal(h.el('#next').disabled, false);
+  h.el('#type').value = 'Race'; h.el('#track').value = 'Synthetic Ring';
+  await h.fire('#type:change');
+  const last = h.urls.at(-1);
+  assert.match(last, /session_type=Race/); assert.match(last, /track=Synthetic\+Ring/); assert.doesNotMatch(last, /cursor=|offset=/);
+  await h.fire('#next:click');
+  assert.match(h.urls.at(-1), /cursor=c2/); assert.match(h.urls.at(-1), /session_type=Race/);
+  assert.equal(h.el('#prev').disabled, false);
+  assert.match(h.el('#page').textContent, /Page 2/);
+  await h.fire('#prev:click');
+  assert.doesNotMatch(h.urls.at(-1), /cursor=/);
+  assert.equal(h.el('#prev').disabled, true);
+});
+
+test('history page empty state', async () => {
+  const h = await renderHistory(url => url.includes('/filters') ? {providers:[], tracks:[], session_types:[]}
+    : {items:[], limit:20, has_more:false, next_cursor:null});
+  assert.match(h.el('#list').innerHTML, /No stored sessions/);
+  assert.equal(h.el('#next').disabled, true);
+});
+
+test('history: a stale slower response never overwrites the newest request or pager', async () => {
+  const pending = [];
+  const handler = url => {
+    if (url.includes('/filters')) return {providers:[], tracks:[], session_types:[]};
+    const page = item => ({items:[item], limit:20, has_more:!url.includes('cursor') && !url.includes('session_type'), next_cursor:'c2'});
+    if (url.includes('cursor=c2')) return new Promise(resolve => pending.push(() => resolve(page(recentItem({id:'stale-page-2'})))));
+    if (url.includes('session_type=Race')) return page(recentItem({id:'fresh-filtered'}));
+    return page(recentItem({id:'page-1'}));
+  };
+  const h = await renderHistory(handler);
+  await h.fire('#next:click');                 // page 2 request stays pending
+  assert.match(h.el('#list').innerHTML, /page-1/);
+  h.el('#type').value = 'Race';
+  await h.fire('#type:change');                // newer filtered request resolves first
+  assert.match(h.el('#list').innerHTML, /fresh-filtered/);
+  pending.forEach(release => release());       // stale page-2 answer arrives afterwards
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.match(h.el('#list').innerHTML, /fresh-filtered/);
+  assert.doesNotMatch(h.el('#list').innerHTML, /stale-page-2/);
+  assert.equal(h.el('#prev').disabled, true);  // filter change reset pagination
+  assert.equal(h.el('#next').disabled, true);
+  assert.match(h.el('#page').textContent, /Page 1/);
+});
+
+test('history: a stale failing request cannot replace the current list with an error', async () => {
+  let fail;
+  const handler = url => {
+    if (url.includes('/filters')) return {providers:[], tracks:[], session_types:[]};
+    if (url.includes('cursor=c2')) return new Promise((_, reject) => { fail = reject; });
+    return {items:[recentItem({id: url.includes('session_type') ? 'filtered' : 'page-1'})], limit:20,
+            has_more:!url.includes('session_type'), next_cursor:'c2'};
+  };
+  const h = await renderHistory(handler);
+  await h.fire('#next:click');
+  h.el('#type').value = 'Race';
+  await h.fire('#type:change');
+  fail(new Error('late boom'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.match(h.el('#list').innerHTML, /filtered/);
+  assert.notEqual(h.el('#list').textContent, 'late boom');
+});
+
+test('session page shows chain navigation only from persisted neighbours (#43)', async () => {
+  const base = {live:false, participants:[],
+    session:{id:'q', track_name:'Synthetic', session_type:'Qualifying', status:'complete'}};
+  const none = (await render('session.html', base)).innerHTML;
+  assert.doesNotMatch(none, /Previous:|Go to|Waiting for next|coming soon/);
+  const both = (await render('session.html', {...base, session:{...base.session,
+    previous_session:{id:'p 1', session_type:'Practice'}, next_session:{id:'r', session_type:'Race'}}})).innerHTML;
+  assert.match(both, /href="\/sessions\/p%201\/live">← Previous: Practice/);
+  assert.match(both, /Qualifying over · <a href="\/sessions\/r\/live">Go to Race →/);
+  const escaped = (await render('session.html', {...base, session:{...base.session,
+    previous_session:{id:'p', session_type:'<b>x</b>'}}})).innerHTML;
+  assert.doesNotMatch(escaped, /<b>x<\/b>/);
+});
+
+test('history and home link only an existing previous session (#43)', async () => {
+  const withPrev = recentItem({previous_session:{id:'q-1', session_type:'Qualifying'}});
+  const home = (await render('index.html', homeData([withPrev]))).recent.innerHTML;
+  assert.match(home, /href="\/sessions\/q-1\/live">← Previous: Qualifying/);
+  assert.doesNotMatch((await render('index.html', homeData([recentItem({previous_session:null})]))).recent.innerHTML, /Previous:/);
+  const h = await renderHistory(url => url.includes('/filters') ? {providers:[], tracks:[], session_types:[]}
+    : {items:[withPrev, recentItem({id:'solo'})], limit:20, has_more:false, next_cursor:null});
+  const list = h.el('#list').innerHTML;
+  assert.equal((list.match(/Previous:/g) || []).length, 1);
+});
+
+
+test('full field V2: Laps, S1-S3 from last timed lap, tyre and damage; unknown stays dash', async () => {
+  const known = {sector1:36.931, sector2:50.6, sector3:35.432, last_lap_time:122.963, best_lap_time:121,
+    tyre_compound:'Medium', tyre_remaining_min:0.874, damage_regions:0, damage_max:0};
+  const damaged = {...known, damage_regions:3, damage_max:1, tyre_compound:'<b>Wet</b>'};
+  const unknown = {sector1:null, sector2:null, sector3:null, tyre_compound:null, tyre_remaining_min:null,
+    damage_regions:null, damage_max:null};
+  const field = [known, damaged, unknown, {}].map((extra, i) => ({id:syntheticId(i+1), display_name:'Driver', position:i+1,
+    vehicle_class:'GT3', total_laps:4, finish_status:0, pitstops:0, ...extra}));
+  const html = (await sessionHarness(sessionData(field))).root.innerHTML;
+  const table = html.slice(html.indexOf('aria-label="Full field standings"'));
+  assert.match(table, /<th[^>]*>Laps<\/th>/);
+  assert.doesNotMatch(table, /<th[^>]*>Completed laps<\/th>/);
+  for (const label of ['S1', 'S2', 'S3', 'Tyre', 'Dmg']) assert.match(table, new RegExp(`<th[^>]*>${label}</th>`));
+  const rows = table.split('<tr').slice(2);
+  assert.equal(rows.length, 4);
+  for (const value of ['36.931', '50.600', '35.432', '>M 87%<', '>0<']) assert.ok(rows[0].includes(value), value);
+  assert.doesNotMatch(rows[0], />OK</);
+  assert.match(rows[1], /class="dmg"[^>]*>3</);
+  assert.doesNotMatch(table, /<b>Wet/);
+  for (const row of rows.slice(2)) {
+    const cells = row.split('<td').slice(1).map(c => c.replace(/<[^>]*>/g, '').replace(/^[^>]*>/, ''));
+    assert.equal(row.includes('36.931'), false);
+    assert.ok(row.match(/class="num sector">—</g).length === 3);
+  }
+  const h = {sectorFmt: null};
+  const context = vm.createContext({URL});
+  vm.runInContext(spectatorScript().split('const sessionId =')[0] + ';this.api={sectorFmt,tyreText,damageText}', context);
+  Object.assign(h, context.api);
+  assert.equal(h.sectorFmt(36.9314), '36.931');
+  assert.equal(h.sectorFmt(61.5), '1:01.500');
+  for (const bad of [null, undefined, -1, 0, NaN, '36.9']) assert.equal(h.sectorFmt(bad), '—');
+  assert.equal(context.api.tyreText({}), '—');
+  for (const bad of [-1, null, undefined, NaN, 1.5, '2']) assert.equal(context.api.damageText({damage_regions:bad}), '—', String(bad));
+  assert.equal(context.api.damageText({}), '—');
+  assert.match(context.api.damageText({damage_regions:0, damage_max:0}), /^<span title="[^"]*not validated in-game[^"]*">0<\/span>$/);
+  assert.match(context.api.damageText({damage_regions:2, damage_max:1}), /class="dmg"[^>]*>2</);
+  assert.match(table, /<th[^>]*title="[^"]*last timed lap/);
+  assert.match(table, /Experimental: number of body regions the provider reports as damaged/);
+  assert.doesNotMatch(table, /last completed lap/);
+});
+
+test('lap time colours follow the server classes; unknown and foreign values stay uncoloured', async () => {
+  const lap = (i, best, last, bc, lc) => ({id:syntheticId(i), display_name:`Driver ${i}`, position:i, vehicle_class:'GT3',
+    total_laps:4, finish_status:0, pitstops:0, best_lap_time:best, last_lap_time:last, best_lap_class:bc, last_lap_class:lc});
+  const field = [lap(1, 100, 100, 'overall', 'overall'), lap(2, 101, 102, null, 'slower'),
+    lap(3, 102, 102, null, 'personal'), lap(4, null, 99, null, null), lap(5, 103, 104, 'bogus', '<b>x</b>'),
+    lap(6, 104, 104, 'personal', 'personal')];
+  const page = await sessionHarness(sessionData(field), `?focus=${field[1].id}`);
+  const html = page.root.innerHTML, table = html.slice(html.indexOf('aria-label="Full field standings"'));
+  const rows = table.split('<tr').slice(2);
+  const spans = row => [...row.matchAll(/<span class="(lap-\w+)"[^>]*>([\d:.]+)<\/span>/g)].map(m => m.slice(1, 3).join(' '));
+  assert.deepEqual(spans(rows[0]), ['lap-overall 1:40.000', 'lap-overall 1:40.000']);
+  assert.deepEqual(spans(rows[1]), ['lap-slower 1:42.000']);
+  assert.deepEqual(spans(rows[2]), ['lap-personal 1:42.000']);
+  assert.deepEqual(spans(rows[3]), []);   // missing Best and an incomparable Last stay neutral
+  assert.deepEqual(spans(rows[5]), ['lap-personal 1:44.000']);   // Last only: a stray personal Best class is never rendered
+  assert.deepEqual(spans(rows[4]), []);   // unknown class values are never rendered as colour
+  assert.equal((rows.join('').match(/class="lap-overall"/g) || []).length, 2);   // only one record holder
+  assert.doesNotMatch(html, /best-time/);
+  // Compact one-line legend above the table; the long explanation lives in a collapsible help.
+  const legend = html.match(/<span class="lap-legend"[^>]*>(.*?neutral)<\/span>/s)[1];
+  assert.match(legend, /Fastest Lap.*Personal Best \(Last\).*Slower Lap.*Best otherwise neutral/s);
+  assert.ok(html.indexOf('lap-legend') < html.indexOf('aria-label="Full field standings"'));
+  assert.doesNotMatch(table, /Race Gap is leader-relative/);
+  assert.match(html, /<details class="table-help" id="full-help-details"><summary id="full-help-toggle"[^>]*>Info<\/summary><div class="help-body" id="full-help">[\s\S]*sectors of the last timed lap[\s\S]*Gap<\/strong> is leader-relative[\s\S]*Feed freshness does not establish race completion/);
+  // Focus line and head-to-head show the same classes as the table for the same time.
+  assert.match(html, /<span>Best 1:41\.000<\/span>/);
+  assert.match(html, /<span>Last <span class="lap-slower"[^>]*>1:42\.000<\/span>/);
+  assert.match(html, /<dt>Best<\/dt><dd>1:41\.000<\/dd>/);
+  // Session switch / payload without classes: no colour is carried over.
+  const bare = field.map(({best_lap_class, last_lap_class, ...p}) => p);
+  await page.poll(sessionData(bare));
+  assert.doesNotMatch(page.root.innerHTML.replace(/<span class="lap-legend".*?neutral<\/span>/s, ''), /class="lap-(overall|personal|slower)"/);
+});
+
+test('full field help stays open across polls and the legend is one compact line', async () => {
+  const field = syntheticField(3);
+  const page = await sessionHarness(sessionData(field));
+  assert.equal((page.root.innerHTML.match(/class="lap-legend"/g) || []).length, 1);
+  assert.equal(page.helpDetails.open, false);
+  page.helpDetails.open = true;
+  await page.poll(sessionData(field));
+  assert.equal(page.helpDetails.open, true);
+});
+
+// --- Trackmap V2: P labels, rivals from Head-to-Head semantics, sector ticks (synthetic ids and names only) ---
+const labelsOf = html => [...html.matchAll(/<text class="trk-label (\w+)"[^>]*>([^<]*)</g)].map(m => `${m[1]}:${m[2]}`);
+const ticksOf = html => [...html.matchAll(/<line class="trk-sector" x1="(-?[\d.]+)" y1="(-?[\d.]+)" x2="(-?[\d.]+)" y2="(-?[\d.]+)"/g)]
+  .map(m => [(+m[1] + +m[3]) / 2, (+m[2] + +m[4]) / 2]);
+function v2Field(positions, extra = {}) {
+  return positions.map((position, i) => ({id: syntheticId(i + 1), display_name: 'Same Name', position, vehicle_class: 'GT3',
+    total_laps: 10, ...(extra[i] || {})}));
+}
+function v2Track(field, over = {}) {
+  const ring = ellipse(250, 600, 0, 40);
+  const markers = [{boundary: 1, point: ring[10], direction: [0, 1]}, {boundary: 2, point: ring[28], direction: [1, 0]}];
+  return {geometry: {...closedGeometry(ring), sector_boundaries_m: [1000, 2000], sector_markers: markers}, vehicles_fresh: true, vehicles_age_s: .2,
+    vehicles: field.map((p, i) => ({participant_id: p.id, x: ring[i * 3 % 40][0], z: ring[i * 3 % 40][1], in_pits: false,
+      position: p.position, name: p.display_name})), race_control: null, ...over};
+}
+function v2Panel(field, focusIndex, trackOver = {}, mode = 'original') {
+  return helpersWith().trackMapPanel({track_map: v2Track(field, trackOver), participants: field, session: {track_name: 'T'}},
+    focusIndex === null ? null : field[focusIndex].id, mode);
+}
+
+test('trackmap V2: focus and both direct rivals get P labels from adjacent provider positions only', () => {
+  const field = v2Field([1, 2, 3, 4, 5, 6]);
+  const html = v2Panel(field, 2);
+  assert.deepEqual(labelsOf(html).sort(), ['ahead:P2', 'behind:P4', 'focus:P3']);
+  assert.equal((html.match(/class="trk-focus"/g) || []).length, 1);
+  assert.equal((html.match(/class="trk-rival-ring/g) || []).length, 2);
+  assert.match(html, /· ahead of focus/); assert.match(html, /· behind focus/);
+  // Identity is participant_id: identical display names never change who is labelled.
+  assert.equal(new Set(field.map(p => p.display_name)).size, 1);
+});
+
+test('trackmap V2: P1 and the last driver have only one rival, unknown focus position is not guessed', () => {
+  const field = v2Field([1, 2, 3]);
+  assert.deepEqual(labelsOf(v2Panel(field, 0)).sort(), ['behind:P2', 'focus:P1']);
+  assert.deepEqual(labelsOf(v2Panel(field, 2)).sort(), ['ahead:P2', 'focus:P3']);
+  const unknown = v2Field([1, null, 3]);
+  assert.deepEqual(labelsOf(v2Panel(unknown, 1)), ['focus:P—']);
+  assert.deepEqual(labelsOf(v2Panel(field, null)), []);   // no focus: plain dots only
+});
+
+test('trackmap V2: duplicate or contradictory positions never produce a rival; lapped cars follow provider positions', () => {
+  const duplicate = v2Field([1, 2, 2, 3, 4]);   // two cars claim P2
+  assert.deepEqual(labelsOf(v2Panel(duplicate, 3)).sort(), ['behind:P4', 'focus:P3']);   // ambiguous P2 is not chosen
+  const nonsense = v2Field([1, 0, -4, 1.5, '2']);
+  assert.deepEqual(labelsOf(v2Panel(nonsense, 0)), ['focus:P1']);
+  // Adjacent provider position wins even when the neighbour is laps down; no distance or lap logic is applied.
+  const lapped = v2Field([1, 2, 3], {1: {total_laps: 8}, 2: {total_laps: 7}});
+  assert.deepEqual(labelsOf(v2Panel(lapped, 1)).sort(), ['ahead:P1', 'behind:P3', 'focus:P2']);
+});
+
+test('trackmap V2: stale vehicle positions and stored-only sessions carry no labels or rival styling', () => {
+  const field = v2Field([1, 2, 3]);
+  const stale = v2Panel(field, 1, {vehicles_fresh: false});
+  assert.deepEqual(labelsOf(stale), []);
+  assert.doesNotMatch(stale, /trk-rival|class="trk-focus"|class="trk-leader/);
+  const stored = v2Panel(field, 1, {vehicles: [], vehicles_fresh: false, static_only: true, vehicles_age_s: null});
+  assert.deepEqual(labelsOf(stored), []);
+  assert.equal(ticksOf(stored).length, 2);   // the stored geometry still shows its learned sector boundaries
+  assert.match(stored, /STORED TRACK/);
+});
+
+test('trackmap V2: labels never overlap each other or other vehicles; the focus has priority when space is short', () => {
+  const h = helpersWith();
+  const dots = [{key: 0, at: [100, 100], r: 6}, {key: 1, at: [112, 100], r: 6}, {key: 2, at: [88, 100], r: 6}, {key: 3, at: [100, 112], r: 6}];
+  const items = [{key: 0, role: 'focus', at: [100, 100], r: 8, text: 'P12'}, {key: 1, role: 'ahead', at: [112, 100], r: 7, text: 'P11'},
+    {key: 2, role: 'behind', at: [88, 100], r: 7, text: 'P13'}];
+  const placed = h.layoutTrackLabels(items, 14, dots);
+  assert.equal(placed[0].role, 'focus');
+  assert.ok(placed.length >= 1 && placed.length <= 3);
+  for (let i = 0; i < placed.length; i++) {
+    for (let j = i + 1; j < placed.length; j++) {
+      const a = placed[i], b = placed[j];
+      assert.ok(!(a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1), `${a.text} overlaps ${b.text}`);
+    }
+  }
+  // A rival with no free spot is dropped, never stacked on the focus label.
+  const walled = [{key: 0, at: [0, 0], r: 6}, ...Array.from({length: 24}, (_, i) => ({key: i + 1, at: [Math.cos(i / 24 * 6.283) * 14, Math.sin(i / 24 * 6.283) * 14], r: 6}))];
+  const crowded = h.layoutTrackLabels([{key: 0, role: 'focus', at: [0, 0], r: 8, text: 'P5'}, {key: 1, role: 'ahead', at: [14, 0], r: 7, text: 'P4'}], 14, walled);
+  assert.equal(crowded[0].role, 'focus');
+  assert.ok(crowded.length <= 2);
+});
+
+test('trackmap V2: sector ticks sit on the centerline at the observed boundaries and follow AUTO/ORIGINAL', () => {
+  const field = v2Field([1, 2, 3]);
+  const ring = ellipse(250, 600, 0, 40);
+  const original = ticksOf(v2Panel(field, 1, {}, 'original'));
+  assert.equal(original.length, 2);
+  // ORIGINAL: identity projection (x, -z), so each tick centre is the projected marker point itself.
+  assert.deepEqual(original.map(t => t.map(v => +v.toFixed(1))), [10, 28].map(i => [+ring[i][0].toFixed(1), +(-ring[i][1]).toFixed(1)]));
+  const autoHtml = v2Panel(field, 1, {}, 'auto');
+  const auto = ticksOf(autoHtml);
+  assert.equal(auto.length, 2);
+  const autoBase = baseVertices(autoHtml);
+  for (const t of auto) assert.ok(autoBase.some(b => Math.hypot(b[0] - t[0], b[1] - t[1]) < 60), 'AUTO tick stays on the rotated centerline');
+});
+
+test('trackmap V2: missing, invalid or learning-state sector markers draw nothing; a new session starts clean', () => {
+  const field = v2Field([1, 2, 3]);
+  const geometry = v2Track(field).geometry;
+  const draw = markers => ticksOf(v2Panel(field, 1, {geometry: {...geometry, sector_markers: markers}})).length;
+  assert.equal(draw(null), 0);
+  assert.equal(draw([]), 0);
+  assert.equal(draw([geometry.sector_markers[0]]), 0);                                       // one boundary only
+  assert.equal(draw([geometry.sector_markers[1], geometry.sector_markers[0]]), 0);           // wrong order
+  assert.equal(draw([{...geometry.sector_markers[0], point: [NaN, 0]}, geometry.sector_markers[1]]), 0);
+  assert.equal(draw([{...geometry.sector_markers[0], direction: [0, 0]}, geometry.sector_markers[1]]), 0);
+  assert.equal(draw('1000,2000'), 0);
+  assert.equal(ticksOf(v2Panel(field, 1, {geometry: {...geometry, complete: false, closed: false, state: 'learning'}})).length, 0);
+  // Session switch: a payload without markers or fresh vehicles leaves nothing of the previous session behind.
+  const next = helpersWith().trackMapPanel({track_map: {geometry: {state: 'unknown', complete: false, closed: false, points: []}, vehicles: [], vehicles_fresh: false},
+    participants: v2Field([1, 2]), session: {track_name: 'Other'}}, syntheticId(1), 'auto');
+  assert.deepEqual(labelsOf(next), []);
+  assert.equal(ticksOf(next).length, 0);
+});
+
+test('trackmap V2: a larger synthetic race keeps exactly one focus and at most two rival labels', () => {
+  const field = v2Field(Array.from({length: 40}, (_, i) => i + 1));
+  const html = v2Panel(field, 19);
+  const labels = labelsOf(html);
+  assert.equal(labels.filter(l => l.startsWith('focus:')).length, 1);
+  assert.ok(labels.filter(l => !l.startsWith('focus:')).length <= 2);
+  assert.ok(labels.includes('focus:P20'));
+  assert.equal((html.match(/class="trk-car/g) || []).length + (html.match(/class="trk-focus"/g) || []).length, 40);
+});
+
+test('latency probe analysis separates cadence, server age, polling and render time (synthetic samples)', () => {
+  const { analyse } = require('../tools/trackmap_latency.cjs');
+  // Scoring messages arrive every 200 ms (x = 1, 2, ...); the page polls every 500 ms, fetch takes 10 ms, DOM +4 ms, paint +9 ms.
+  const resp = [], dom = [], paint = [];
+  for (let k = 0; k < 10; k++) {
+    const t0 = 1000 + k * 500, t1 = t0 + 10, latest = Math.floor((t1 - 100) / 200);   // message n arrives at 100 + 200 n
+    resp.push({ t0, t1, age: (t1 - (100 + 200 * latest)) / 1000, x: latest });
+    dom.push(t1 + 4); paint.push(t1 + 9);
+  }
+  const report = analyse(resp, dom, paint);
+  assert.ok(report.polls_with_new_position >= 8, 'every poll saw a newer position');
+  assert.equal(report.poll_interval_ms.mean, 500);
+  assert.equal(report.fetch_ms.mean, 10);
+  assert.equal(report.dom_after_response_ms.mean, 4);
+  assert.equal(report.paint_after_response_ms.mean, 9);
+  assert.ok(report.server_age_ms.max < 200 && report.server_age_ms.mean > 0);
+  assert.ok(report.worst_case_age_ms <= 200 + 9 + 500 + 1, 'worst case = age + paint + one poll interval');
+  assert.equal(analyse([], [], []).server_age_ms, null);   // no samples: nothing invented
+});
+
+test('latency probe map analysis: drawn steps, age at the paint and at arbitrary instants (synthetic samples)', () => {
+  const { analyseMap } = require('../tools/trackmap_latency.cjs');
+  // A response every 250 ms carrying a 100 ms old position; the map is drawn 5 ms after each response, painted 10 ms after.
+  const resp = [], steps = [];
+  for (let k = 0; k < 20; k++) { const t1 = 1000 + k * 250; resp.push({ t0: t1 - 3, t1, age: 0.1, kind: 'vehicles' }); steps.push({ t: t1 + 5, p: t1 + 10 }); }
+  const map = analyseMap(resp, steps, 5000);
+  assert.equal(map.visible_updates, 20);
+  assert.equal(map.visible_updates_per_s, 4);
+  assert.equal(map.step_interval_ms.median, 250);
+  assert.equal(map.age_at_paint_ms.median, 110);                       // 100 server + 10 browser
+  assert.ok(map.age_at_random_instant_ms.max <= 110 + 250 && map.age_at_random_instant_ms.median > 110);
+  assert.equal(analyseMap([], [], 1000).step_interval_ms, null);        // nothing recorded: nothing invented
+});
+
+// --- Vehicles-only refresh (#55) -----------------------------------------------------------------------------------
+
+test('vehicle refresh rules: cadence is clamped and only advertised for live, non-stored maps', () => {
+  const h = helpers();
+  assert.equal(h.vehicleRefreshMs({vehicle_refresh_ms: 250}), 250);
+  assert.equal(h.vehicleRefreshMs({vehicle_refresh_ms: 5}), 100);
+  assert.equal(h.vehicleRefreshMs({vehicle_refresh_ms: 60000}), 2000);
+  for (const bad of [undefined, null, {}, {vehicle_refresh_ms: 0}, {vehicle_refresh_ms: 'x'}, {vehicle_refresh_ms: 250, static_only: true}]) {
+    assert.equal(h.vehicleRefreshMs(bad), null);
+  }
+  assert.equal(h.vehicleBackoff(250, 0), 250);
+  assert.equal(h.vehicleBackoff(250, 2), 1000);
+  assert.equal(h.vehicleBackoff(250, 30), 2000);
+});
+
+test('vehicle samples: only newer data of the same server run replaces held data', () => {
+  const h = helpers();
+  const sample = (seq, over = {}) => h.vehicleSample({seq, server_epoch: 'e1', vehicles: [], vehicles_age_s: 0.1, vehicles_fresh: true, ...over});
+  const held = sample(10);
+  assert.equal(h.acceptVehicles(null, sample(1)), true);
+  assert.equal(h.acceptVehicles(held, sample(11)), true);
+  assert.equal(h.acceptVehicles(held, sample(10)), false);                         // repeated sample
+  assert.equal(h.acceptVehicles(held, sample(9)), false);                          // out of order
+  assert.equal(h.acceptVehicles(held, sample(10, {vehicles_fresh: false})), true); // same sample, now stale
+  assert.equal(h.acceptVehicles(held, sample(1, {server_epoch: 'e2'})), true);     // server restarted: counter restarts
+  assert.equal(h.acceptVehicles(held, null), false);
+  // the full /live payload uses vehicles_seq; malformed samples are rejected
+  assert.equal(h.vehicleSample({vehicles_seq: 3, server_epoch: 'e1', vehicles: []}).seq, 3);
+  for (const bad of [null, {}, {seq: '3', server_epoch: 'e1', vehicles: []}, {seq: 3, vehicles: []}, {seq: 3, server_epoch: 'e1'}]) {
+    assert.equal(h.vehicleSample(bad), null);
+  }
+  assert.equal(h.vehiclesGoneStale({fresh: true, heardAt: 0}, 5001), true);
+  assert.equal(h.vehiclesGoneStale({fresh: true, heardAt: 0}, 4999), false);
+  assert.equal(h.vehiclesGoneStale({fresh: false, heardAt: 0}, 60000), false);
+  assert.equal(h.vehiclesGoneStale(null, 60000), false);
+});
+
+test('vehicle layer is a separate group; geometry and vehicles never mix', () => {
+  const h = helpers();
+  const field = Array.from({length: 40}, (_, i) => ({id: `p${i}`, position: i + 1, display_name: `Driver ${i}`}));
+  const track = v2Track(field);
+  const size = {width: 1000, height: 500};
+  const svg = h.trackMapSvg(track, 'p3', 'original', h.trackRoles(field, 'p3'), size);
+  const parts = h.trackMapParts(track, 'p3', 'original', h.trackRoles(field, 'p3'), size);
+  assert.equal(svg, h.trackMapSvgOf(parts));
+  assert.match(svg, /<g id="trk-vehicles">/);
+  assert.equal((parts.vehicles.match(/<circle class="trk-(car|focus)"/g) || []).length, 40);
+  assert.doesNotMatch(parts.vehicles, /trk-base|trk-sector|trk-yellow/);
+  assert.doesNotMatch(parts.geometry, /trk-car|trk-focus|trk-label/);
+  assert.equal(h.trackMapParts({geometry: {points: []}, vehicles: []}, null, 'auto', null), null);
+  assert.match(h.trackMapSvg({geometry: {points: []}, vehicles: []}, null), /Waiting for position data/);
+  // moving one car changes the layer only; geometry and view box stay byte-identical
+  const moved = v2Track(field); moved.vehicles[4] = {...moved.vehicles[4], x: moved.vehicles[4].x + 1};
+  const next = h.trackMapParts(moved, 'p3', 'original', h.trackRoles(field, 'p3'), size);
+  assert.equal(next.geometry, parts.geometry); assert.equal(next.viewBox, parts.viewBox); assert.notEqual(next.vehicles, parts.vehicles);
+});
+
+async function vehicleHarness({track, vehicles = () => ({ok: false, status: 503, json: async () => ({})}), hidden = false, live = true} = {}) {
+  const field = Array.from({length: 40}, (_, i) => ({id: `p${i}`, position: i + 1, display_name: `Driver ${i}`}));
+  const timers = []; let timerId = 0, clock = 1000;
+  const counters = {rootRenders: 0, layerWrites: 0, areaWrites: 0, liveRequests: 0, vehicleRequests: [], listeners: {}};
+  let root = '', layerHtml = null, areaHtml = null;
+  const mapOf = html => html.match(/<div class="map-area">([\s\S]*?)<\/div><\/section>/)?.[1] ?? '';
+  const layer = {get innerHTML() { return layerHtml ?? (mapOf(root).match(/<g id="trk-vehicles">([\s\S]*?)<\/g><\/svg>/)?.[1] ?? ''); },
+    set innerHTML(value) { layerHtml = value; counters.layerWrites++; }};
+  const area = {get innerHTML() { return areaHtml ?? mapOf(root); }, set innerHTML(value) { areaHtml = value; counters.areaWrites++; },
+    querySelector: name => name === 'svg' && mapOf(root).startsWith('<svg') && areaHtml === null ? {
+      getAttribute: attr => attr === 'viewBox' ? mapOf(root).match(/viewBox="([^"]*)"/)?.[1] : null,
+      querySelector: id => id === '#trk-vehicles' ? layer : null} : null};
+  const rootEl = {get innerHTML() { return root; }, set innerHTML(value) { root = value; layerHtml = areaHtml = null; counters.rootRenders++; },
+    textContent: '', addEventListener() {}};
+  const selector = {innerHTML: '', value: '', addEventListener() {}};
+  const doc = {hidden, activeElement: null,
+    addEventListener: (name, fn) => { counters.listeners[name] = fn; },
+    querySelector: name => name === '#root' ? rootEl : name === '#focus' ? selector : name === '.map-area' ? area : name === '#fuel' ? {textContent: '', innerHTML: ''} : null};
+  const state = {current: {live, session: {id: syntheticId(99), track_name: 'T', session_type: 'Race'}, participants: field,
+    track_map: track ?? {...v2Track(field), server_epoch: 'e1', vehicles_seq: 10, vehicle_refresh_ms: 250}}};
+  const context = vm.createContext({URL, location: {href: 'http://localhost/sessions/x/live'}, history: {replaceState() {}}, document: doc,
+    performance: {now: () => clock}, AbortController,
+    setTimeout: (fn, ms) => { const id = ++timerId; timers.push({id, fn, ms}); return id; },
+    clearTimeout: id => { const i = timers.findIndex(t => t.id === id); if (i >= 0) timers.splice(i, 1); },
+    fetch: async (url, options) => {
+      if (url.includes('/vehicles')) { counters.vehicleRequests.push({url, options}); return vehicles(url, counters); }
+      if (url.includes('/live')) { counters.liveRequests++; return {ok: true, json: async () => JSON.parse(JSON.stringify(state.current))}; }
+      return {ok: false, status: 503, json: async () => ({})};
+    }});
+  vm.runInContext(spectatorScript(), context);
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const fire = async predicate => { const i = timers.findIndex(predicate); assert.ok(i >= 0, 'expected timer'); const [t] = timers.splice(i, 1); t.fn(); await settle(); await settle(); };
+  await settle(); await settle();
+  const isRefresh = t => t.fn.name === 'refresh', isPoll = t => !isRefresh(t) && t.ms !== 1500;   // 1500 ms: request time-out
+  return {counters, timers, state, doc, settle, fire, root: () => root, layer, advance: ms => { clock += ms; },
+    poll: () => fire(isRefresh),                                 // the unchanged full /live refresh
+    vehicleTimer: () => timers.find(isPoll),
+    tick: () => fire(isPoll)};                                   // the next vehicles poll
+}
+const vehicleBody = (seq, over = {}) => ({session_id: syntheticId(99), live: true, seq, server_epoch: 'e1', vehicles_age_s: 0.1, vehicles_fresh: true,
+  vehicles: Array.from({length: 40}, (_, i) => ({participant_id: `p${i}`, x: 100 + i + seq, z: 50, in_pits: false, position: i + 1, name: `Driver ${i}`})), ...over});
+const reply = body => ({ok: true, json: async () => body});
+const dots = html => (html.match(/<circle class="trk-(car|focus)/g) || []).length;
+
+test('vehicles refresh starts only when the server advertises it and polls the lightweight endpoint', async () => {
+  const none = await vehicleHarness({track: {...v2Track([{id: 'p0', position: 1, display_name: 'A'}]), vehicles_seq: 1, server_epoch: 'e1'}});
+  assert.equal(none.counters.vehicleRequests.length, 0);          // older server: behaviour unchanged
+  const stored = await vehicleHarness({track: {geometry: {state: 'complete', complete: true, closed: true, points: ellipse(250, 600, 0, 40)},
+    vehicles: [], static_only: true, vehicle_refresh_ms: 250}});
+  assert.equal(stored.counters.vehicleRequests.length, 0);        // stored track of a historical session: no positions
+  const offline = await vehicleHarness({live: false});
+  assert.equal(offline.counters.vehicleRequests.length, 0);
+  const h = await vehicleHarness({vehicles: () => reply(vehicleBody(11))});
+  assert.equal(h.counters.vehicleRequests.length, 1);
+  assert.match(h.counters.vehicleRequests[0].url, new RegExp(`/api/sessions/${syntheticId(99)}/vehicles$`));
+  assert.equal(h.counters.vehicleRequests[0].options.cache, 'no-store');
+  assert.ok(h.counters.vehicleRequests[0].options.signal, 'every request can time out');
+});
+
+test('a newer vehicles response redraws only the vehicle layer, 40 dots, without rebuilding the dashboard', async () => {
+  const h = await vehicleHarness({vehicles: () => reply(vehicleBody(11))});
+  assert.equal(h.counters.rootRenders, 1);
+  assert.ok(h.counters.layerWrites >= 1);
+  assert.equal(h.counters.areaWrites, 0);
+  assert.equal(dots(h.layer.innerHTML), 40);
+  const writes = h.counters.layerWrites;
+  await h.tick();                                                  // the same sample again
+  assert.equal(h.counters.layerWrites, writes);                    // is not redrawn
+  assert.equal(h.counters.rootRenders, 1);
+});
+
+test('the next vehicles poll is scheduled at the advertised cadence, never overlapping the previous request', async () => {
+  let release, calls = 0;
+  const h = await vehicleHarness({vehicles: () => { calls++; return new Promise(resolve => { release = () => resolve(reply(vehicleBody(10 + calls))); }); }});
+  assert.equal(calls, 1);
+  await h.poll(); await h.poll();                                   // full refreshes while the request is in flight
+  assert.equal(calls, 1, 'a running request is never doubled by the full refresh');
+  h.advance(40); release(); await h.settle(); await h.settle();
+  const next = h.vehicleTimer();
+  assert.ok(next && next.ms <= 250 && next.ms >= 200, 'next poll scheduled at the cadence minus the request time');
+});
+
+test('older, repeated or foreign responses never overwrite newer positions', async () => {
+  const bodies = [vehicleBody(20), vehicleBody(15), vehicleBody(20), vehicleBody(30, {session_id: syntheticId(7)}), vehicleBody(31, {live: false}),
+    vehicleBody(21, {vehicles: []}), vehicleBody(25)];
+  const h = await vehicleHarness({vehicles: () => reply(bodies.shift())});
+  const first = h.layer.innerHTML;                                  // seq 20 drawn
+  assert.equal(dots(first), 40);
+  for (let i = 0; i < 4; i++) { await h.tick(); assert.equal(h.layer.innerHTML, first, `response ${i + 2} must be ignored`); }
+  await h.tick(); assert.equal(h.layer.innerHTML, '');               // a newer sample 21 without vehicles is a real statement
+  await h.tick(); assert.equal(dots(h.layer.innerHTML), 40);         // 25 draws again
+});
+
+test('a slow full /live response older than the held vehicles keeps the newer positions', async () => {
+  const h = await vehicleHarness({vehicles: () => reply(vehicleBody(40))});
+  assert.equal(dots(h.layer.innerHTML), 40);
+  h.state.current.track_map.vehicles_seq = 12;                       // the full payload was sampled before seq 40
+  h.state.current.track_map.vehicles = v2Track(h.state.current.participants).vehicles.map(v => ({...v, x: 9999}));
+  await h.poll();
+  assert.doesNotMatch(h.root(), /cx="9999/);
+  assert.equal(dots(h.root()), 40);
+  h.state.current.track_map.vehicles_seq = 41;                       // and a newer full payload does replace them
+  h.state.current.track_map.vehicles = v2Track(h.state.current.participants).vehicles.map(v => ({...v, x: 0, z: 0}));
+  await h.poll();
+  assert.match(h.root(), /cx="0\.0"/);
+});
+
+test('a restarted server (new epoch, restarted counter) is accepted', async () => {
+  const bodies = [vehicleBody(50), vehicleBody(51), vehicleBody(2, {server_epoch: 'e2'})];
+  const h = await vehicleHarness({vehicles: () => reply(bodies.shift())});
+  await h.tick();
+  const before = h.layer.innerHTML;
+  await h.tick();
+  assert.notEqual(h.layer.innerHTML, before);
+  assert.match(h.layer.innerHTML, /cy="102\.0"/);                    // first car of seq 2 (x = 100 + i + 2; AUTO orientation turns x into cy)
+  assert.doesNotMatch(h.layer.innerHTML, /cy="151\.0"/);
+});
+
+test('failures back off, positions turn stale after silence, and the page recovers', async () => {
+  let mode = 'ok', n = 0;
+  const h = await vehicleHarness({vehicles: () => { n++; if (mode === 'fail') throw new Error('network'); return reply(vehicleBody(60 + n)); }});
+  assert.doesNotMatch(h.root(), /POSITIONS STALE/);
+  mode = 'fail';
+  const delays = [];
+  for (let i = 0; i < 4; i++) { await h.tick(); delays.push(h.vehicleTimer().ms); }
+  assert.deepEqual(delays, [500, 1000, 2000, 2000]);                 // exponential, capped
+  h.advance(6000);
+  await h.tick();                                                    // silence beyond five seconds
+  assert.match(h.root(), /POSITIONS STALE/);
+  assert.match(h.root(), /trk-car stale/);
+  mode = 'ok';
+  await h.tick();
+  assert.doesNotMatch(h.root(), /POSITIONS STALE/);
+  assert.ok(h.vehicleTimer().ms <= 250, 'back to the normal cadence after recovery');
+});
+
+test('a hidden page stops polling and resumes when visible again; late answers of the old run are ignored', async () => {
+  let release, calls = 0;
+  const h = await vehicleHarness({vehicles: () => { calls++; return calls === 1 ? new Promise(resolve => { release = () => resolve(reply(vehicleBody(80))); }) : reply(vehicleBody(81)); }});
+  const before = h.layer.innerHTML;
+  h.doc.hidden = true; h.counters.listeners.visibilitychange();
+  release(); await h.settle(); await h.settle();
+  assert.equal(h.layer.innerHTML, before, 'the answer of a stopped run is dropped');
+  assert.equal(h.vehicleTimer(), undefined, 'no timer while hidden');
+  h.doc.hidden = false; h.counters.listeners.visibilitychange(); await h.settle(); await h.settle();
+  assert.equal(calls, 2);
+  assert.notEqual(h.layer.innerHTML, before);
+});
+
+test('a session that stops being live ends the vehicles refresh', async () => {
+  const h = await vehicleHarness({vehicles: () => reply(vehicleBody(90))});
+  const requests = h.counters.vehicleRequests.length;
+  h.state.current.live = false;
+  await h.poll();
+  assert.equal(h.vehicleTimer(), undefined);
+  await h.settle();
+  assert.equal(h.counters.vehicleRequests.length, requests);
+});
+
+test('load probe summary reports rate, errors and percentiles without inventing values', () => {
+  const { summarise } = require('../tools/trackmap_load.cjs');
+  const report = summarise([5, 1, 3, 2, 4, 100], 2, 2, 3);
+  assert.equal(report.requests, 6);
+  assert.equal(report.requests_per_s, 3);
+  assert.equal(report.errors, 2);
+  assert.equal(report.response_ms.median, 4);               // nearest rank of the sorted samples, as in the other probe
+  assert.equal(report.response_ms.max, 100);
+  assert.deepEqual(summarise([], 4, 2, 1).response_ms, {median: null, p95: null, max: null});
 });

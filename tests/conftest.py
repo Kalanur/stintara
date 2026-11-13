@@ -20,12 +20,14 @@ async def db():
     main.pool = pool
     main.runtime.clear()
     main.active_agents.clear()
+    main.track_store.clear()
     try:
         async with pool.acquire() as conn:
             await conn.execute(main.SCHEMA_FILE.read_text())
         yield pool
     finally:
         main.runtime.clear()
+        main.track_store.clear()
         main.pool = None
         await pool.close()
         await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')

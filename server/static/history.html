@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stintara · Session history</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;background:#111;color:#eee}a{color:#fff}.muted{color:#999}.card{border:1px solid #333;border-radius:14px;padding:18px;margin:14px 0;background:#171717}.live{color:#57d68d;font-weight:700}.complete{color:#9aa7b4;font-weight:700}
+.filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end}.filters label{display:grid;gap:4px;font-size:12px;color:#999}select,button{background:#202020;color:#eee;border:1px solid #444;border-radius:8px;padding:8px 10px;font:inherit}button:disabled{opacity:.4}.pager{display:flex;gap:12px;align-items:center;margin:18px 0}
+</style>
+</head><body>
+<p><a href="/">← Stintara</a></p>
+<h1>SESSION HISTORY</h1><p class="muted">Stored sessions, newest start first. Available without a connected agent.</p>
+<form class="filters" onsubmit="return false">
+  <label>Session type<select id="type"><option value="">All</option><option>Race</option><option>Qualifying</option><option>Practice</option></select></label>
+  <label>Provider<select id="provider"><option value="">All</option></select></label>
+  <label>Track<select id="track"><option value="">All</option></select></label>
+  <label>Status<select id="status"><option value="">All</option><option value="live">Live</option><option value="complete">Complete</option></select></label>
+</form>
+<div id="list">Loading…</div>
+<div class="pager"><button id="prev" type="button">← Previous</button><span id="page" class="muted"></span><button id="next" type="button">Next →</button></div>
+<footer class="muted" style="margin-top:24px;font-size:12px;overflow-wrap:anywhere">__BUILD_LABEL__</footer>
+<script>
+const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const PAGE = 20;
+const FINISH = {1:'FIN', 2:'DNF', 3:'DSQ'};
+const when = value => { const d = value ? new Date(value) : null; return d && !isNaN(d) ? d.toLocaleString() : null; };
+const $ = id => document.querySelector(id);
+let cursors = [null];   // cursors[i] = cursor that loads page i; page 1 has none
+let pageIndex = 0;
+let sequence = 0;       // only the newest request may touch the UI
+let controller = null;
+
+async function getJSON(url, signal) {
+  const response = await fetch(url, {cache:'no-store', signal});
+  if (!response.ok) throw new Error('Session history unavailable.');
+  return response.json();
+}
+
+function card(x) {
+  const w = x.winner, k = x.stintara_driver, started = when(x.started_at), ended = when(x.ended_at);
+  const live = x.status === 'live';
+  const focus = k ? `?focus=${encodeURIComponent(k.participant_id)}` : '';
+  return `<div class="card"><div class="${live ? 'live' : 'complete'}">${live ? 'LIVE' : 'COMPLETE'}</div>
+    <h2>${esc(x.session_type)} · ${esc(x.track_name)}</h2>
+    <div>${esc(x.simulator_provider)} · ${esc(x.participant_count)} participants</div>
+    <p class="muted">Started ${esc(started)}${!live ? `<br>Finished ${esc(ended)}` : ''}
+    ${w ? `<br>Winner: ${esc(w.display_name)}` : ''}
+    ${k ? `<br>Stintara Driver: ${esc(k.display_name)}${k.position != null ? ` · P${esc(k.position)}` : ''}${FINISH[k.finish_status] ? ` · ${FINISH[k.finish_status]}` : ''}` : ''}</p>
+    ${x.previous_session ? `<p class="muted"><a href="/sessions/${esc(encodeURIComponent(x.previous_session.id))}/live">← Previous: ${esc(x.previous_session.session_type)}</a></p>` : ''}
+    <p><a href="/sessions/${esc(encodeURIComponent(x.id))}/live${focus}">View stored session →</a></p></div>`;
+}
+
+function query(cursor) {
+  const params = new URLSearchParams({limit: String(PAGE)});
+  if (cursor) params.set('cursor', cursor);
+  for (const key of ['type', 'provider', 'track', 'status']) {
+    const value = $('#' + key).value;
+    if (value) params.set(key === 'type' ? 'session_type' : key, value);
+  }
+  return params.toString();
+}
+
+async function load() {
+  const mine = ++sequence;
+  if (controller) controller.abort();
+  controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const index = pageIndex;  // snapshot for this request
+  const root = $('#list');
+  try {
+    const data = await getJSON('/api/sessions/history?' + query(cursors[index]), controller && controller.signal);
+    if (mine !== sequence) return;
+    root.innerHTML = data.items.length ? data.items.map(card).join('')
+      : '<div class="card muted">No stored sessions match these filters.</div>';
+    cursors.length = index + 1;
+    if (data.has_more && data.next_cursor) cursors[index + 1] = data.next_cursor;
+    $('#prev').disabled = index === 0;
+    $('#next').disabled = !(data.has_more && data.next_cursor);
+    $('#page').textContent = data.items.length ? `Page ${index + 1}` : '';
+  } catch (error) {
+    if (mine !== sequence) return;
+    root.textContent = error.message;
+  }
+}
+
+function reset() { cursors = [null]; pageIndex = 0; load(); }
+
+async function loadFilters() {
+  try {
+    const options = await getJSON('/api/sessions/history/filters');
+    for (const [id, values] of [['#provider', options.providers], ['#track', options.tracks]]) {
+      const select = $(id);
+      select.innerHTML = '<option value="">All</option>' + values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+    }
+  } catch (error) { /* filters stay at "All"; list still works */ }
+}
+
+for (const id of ['#type', '#provider', '#track', '#status'])
+  $(id).addEventListener('change', reset);
+$('#prev').addEventListener('click', () => { if (pageIndex > 0) { pageIndex--; load(); } });
+$('#next').addEventListener('click', () => { if (cursors[pageIndex + 1]) { pageIndex++; load(); } });
+loadFilters();
+load();
+</script></body></html>

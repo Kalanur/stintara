@@ -45,7 +45,20 @@ td:not(:nth-child(2)){white-space:nowrap}
 caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .driver-cell{min-width:150px;max-width:260px;overflow-wrap:anywhere}
 .entry{display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
-.best-time{color:var(--best)}
+.lap-overall{color:var(--best);font-weight:750}
+.lap-personal{color:var(--ok)}
+.lap-slower{color:var(--attention)}
+.lap-legend{font-size:12px;color:var(--muted)}
+.table-legend{display:flex;align-items:center;gap:12px;padding:0 12px 6px}
+.table-help summary{font-size:12px}
+.table-help .help-body{position:absolute;z-index:5;left:12px;right:12px;margin-top:6px;padding:8px 12px;background:var(--raised);border:1px solid var(--line);border-radius:6px;font-size:12px;color:var(--text);box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.table-help .help-body p{margin:4px 0}
+.standings-panel{position:relative}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.standings-panel th,.standings-panel td{padding-left:6px;padding-right:6px}
+.standings-panel td.sector{color:var(--muted)}
+.dmg{color:var(--attention);font-weight:750}
 .badge{display:inline-block;font-size:12px;font-weight:750;border:1px solid currentColor;padding:1px 5px;border-radius:4px}
 .pit{color:var(--pit)}
 .track{color:var(--ok)}
@@ -54,7 +67,34 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .disqualified{color:var(--best)}
 .focus{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus);transition:background-color .15s,border-color .15s}
 
-.map-panel{grid-column:2;grid-row:2;display:flex;flex-direction:column}
+.map-panel{grid-column:2;grid-row:2;display:flex;flex-direction:column;overflow:hidden}
+.map-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px;min-height:24px}
+.map-head h2{margin:0}
+.rc-badges{display:flex;flex-wrap:wrap;gap:4px 6px;margin-left:auto;justify-content:flex-end}
+.rc-badge{font-size:12px;font-weight:750;letter-spacing:.04em;border:1px solid currentColor;padding:1px 6px;border-radius:4px;white-space:nowrap}
+.rc-ok{color:var(--ok)}.rc-muted{color:var(--muted)}.rc-warn{color:var(--attention)}.rc-danger{color:var(--live)}
+.rc-active{background:rgba(244,206,99,.14);animation:rc-pulse 1.4s ease-in-out infinite}
+@keyframes rc-pulse{50%{opacity:.55}}
+.map-area{flex:1;min-height:0;min-width:0;margin-top:6px;position:relative;display:flex}
+.map-area svg{flex:1;width:100%;height:100%;min-height:0;display:block}
+.orient-toggle{font:inherit;font-size:12px;background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:1px 8px;cursor:pointer}
+.orient-toggle:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.map-note{color:var(--muted);font-size:12px;margin:4px 0 0}
+.trk-base{fill:none;stroke:#52677c;stroke-width:5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.trk-yellow{fill:none;stroke:var(--attention);stroke-width:9;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;opacity:.95}
+.trk-car{fill:#9fb3c8;stroke:#0b1017;stroke-width:1;vector-effect:non-scaling-stroke}
+.trk-car.pit{fill:none;stroke:var(--pit);stroke-width:1.5;opacity:.7}
+.trk-car.stale{fill:none;stroke:var(--muted);opacity:.6}
+.trk-focus{fill:var(--focus);stroke:#fff;stroke-width:2;vector-effect:non-scaling-stroke}
+.trk-sector{stroke:#d7e4f0;stroke-width:2;stroke-linecap:round;vector-effect:non-scaling-stroke;opacity:.85}
+.trk-car.rival{fill:var(--info)}
+.trk-rival-ring{fill:none;stroke:var(--info);stroke-width:1.5;vector-effect:non-scaling-stroke;opacity:.7}
+.trk-label{fill:var(--text);font-weight:700;paint-order:stroke;stroke:var(--bg);stroke-width:3px;stroke-linejoin:round;pointer-events:none}
+.trk-label.focus{fill:var(--focus)}
+.trk-leader{stroke:var(--info);stroke-width:1;vector-effect:non-scaling-stroke;opacity:.8}
+.trk-leader.focus{stroke:var(--focus)}
+.trk-label.ahead,.trk-label.behind{fill:var(--info);font-weight:600}
+.trk-focus-ring{fill:none;stroke:var(--focus);stroke-width:2;vector-effect:non-scaling-stroke;opacity:.7}
 .placeholder{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--muted);border:1px dashed var(--line);border-radius:4px;margin-top:8px;min-height:30px}
 .future-status{color:var(--muted);font-size:12px}
 .focus-panel{grid-column:2;grid-row:3;border-left:3px solid var(--focus)}
@@ -110,24 +150,46 @@ summary{cursor:pointer;color:var(--muted)}
 footer{font-size:11px;color:var(--muted);text-align:right;padding-top:4px;overflow-wrap:anywhere}
 
 @media(min-width:1200px) and (min-height:951px),(min-width:1800px) and (min-height:800px){body{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
-.dashboard{height:100%;overflow:hidden}
+.dashboard{height:100%;overflow:hidden;grid-template-rows:auto auto minmax(100px,1fr) auto 180px}
+/* The map takes the height the former right-column Focus panel used; Focus becomes a slim strip above the field. */
+.focus-panel{grid-column:1;grid-row:2;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);column-gap:18px;align-items:start;padding-top:8px;padding-bottom:8px}
+.focus-panel>h2{grid-column:1/-1;margin:0 0 2px}
+.focus-panel .focus-status{grid-column:1;margin:2px 0}
+.focus-panel>section{grid-column:2;grid-row:2}
+.focus-panel .sector-context{margin:2px 0}
+.standings-panel{grid-row:3/5}
+.map-panel{grid-row:2/4}
+/* Title, provider line and distance share one row; Head-to-Head cards use two label/value pairs per row. */
+.session-header .context{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:18px}
+.session-header .context p{margin:2px 0}
+.comparison-panel h2,.comparison-note{display:inline}
+.comparison-note{margin-left:12px}
+.h2h{margin-top:4px}
+.h2h dl{grid-template-columns:max-content minmax(0,1fr) max-content auto;column-gap:6px}
+.h2h dd{white-space:nowrap}
+.fuel-panel{max-height:clamp(390px,calc(100dvh - 760px),470px)}
 }
 
 /* Compact desktop uses available CSS viewport height, not monitor dimensions. */
 @media(min-width:1800px) and (min-height:800px) and (max-height:950px){
 body{padding-top:8px}
 .toolbar{padding-bottom:6px}
-.dashboard{gap:8px}
+.dashboard{gap:8px;grid-template-rows:auto auto minmax(100px,1fr) auto 172px}
 .panel,.session-header{padding-top:8px;padding-bottom:8px}
 .standings-panel{padding:0}
 .panel-heading{padding:8px 12px}
 .session-header p{margin:3px 0}
 .focus-status{margin:3px 0;gap:4px 12px}
 .sector-context{margin-top:4px}
-.fuel-panel{max-height:clamp(180px,calc(100dvh - 580px),350px)}
+.fuel-panel{max-height:clamp(180px,calc(100dvh - 540px),400px)}
 .fuel-panel .resource-settings{position:sticky;bottom:0;z-index:1;background:var(--raised);box-shadow:0 8px 0 var(--panel)}
 .resource-grid{margin:4px 0;gap:6px}
 .plan-control{margin:4px 0}
+/* Keep the forecast and its disclosure visible in compact desktop, including Linux Chromium fonts. */
+.weather-panel{padding-top:6px;padding-bottom:4px}
+.weather-current{margin:2px 0}
+.forecast-strip{margin:2px 0}
+.forecast-strip li{padding:2px 4px;gap:4px}
 }
 
 @media(max-width:1199px),(max-height:799px),(max-width:1799px) and (max-height:950px){.dashboard{grid-template-columns:minmax(0,1fr);grid-template-rows:none}
@@ -248,11 +310,26 @@ function clockText(value) {
   const whole = Math.floor(value);
   return `${Math.floor(whole/3600)}:${String(Math.floor(whole/60)%60).padStart(2,'0')}:${String(whole%60).padStart(2,'0')}`;
 }
+function chainNav(d) {
+  // Labels come only from persisted neighbours; a missing successor is never guessed.
+  const s = d.session || {}, link = x => `/sessions/${encodeURIComponent(x.id)}/live`;
+  const parts = [];
+  if (s.previous_session) parts.push(`<a href="${esc(link(s.previous_session))}">← Previous: ${esc(s.previous_session.session_type)}</a>`);
+  if (s.next_session) parts.push(`${esc(s.session_type)} over · <a href="${esc(link(s.next_session))}">Go to ${esc(s.next_session.session_type)} →</a>`);
+  return parts.length ? `<p class="chain-nav" aria-label="Session chain">${parts.join(' · ')}</p>` : '';
+}
+function minuteClock(seconds) {
+  const whole = Math.round(seconds);
+  return `${Math.floor(whole/60)}:${String(whole%60).padStart(2,'0')}`;
+}
 function sessionContext(d) {
+  // Configured duration is shown only when the server derived it reliably; remaining time follows the session
+  // end clock. Unknown stays a dash: neither value is ever estimated here.
   const t = d.timing || {};
-  const configured = Number.isFinite(t.configured_minutes) && t.configured_minutes > 0 ? `${t.configured_minutes} min` :
+  const configured = Number.isFinite(t.configured_duration_seconds) && t.configured_duration_seconds > 0 ? minuteClock(t.configured_duration_seconds) :
     Number.isSafeInteger(t.configured_laps) && t.configured_laps > 0 ? `${t.configured_laps} laps` : '—';
-  return `<p>Configured distance / duration: ${configured} · Elapsed session time: ${d.live ? clockText(t.elapsed_seconds) : '—'}</p>`;
+  const remaining = d.live && Number.isFinite(t.remaining_seconds) && t.remaining_seconds >= 0 ? clockText(t.remaining_seconds) : '—';
+  return `<p>Configured distance / duration: ${configured} · Elapsed session time: ${d.live ? clockText(t.elapsed_seconds) : '—'} · Time remaining: ${remaining}</p>`;
 }
 function checkpointAge(timestamp, now) {
   // Require an explicit timezone, not Date.parse's permissive local-date formats.
@@ -296,6 +373,33 @@ function stopsText(p, focused=false) {
   if (focused) return `${p.pitstops} ${p.pitstops === 1 ? 'stop' : 'stops'}${last === null ? '' : ` · Last stop L${last}`}`;
   return `${p.pitstops}${last === null ? '' : ` · L${last}`}`;
 }
+// Sector times are last-completed-lap values (individual S1/S2/S3, never a running sector); shown as ss.mmm.
+const LAP_CLASS = {overall: 'lap-overall', personal: 'lap-personal', slower: 'lap-slower'};
+const LAP_TITLE = {overall: 'Fastest lap of the session', personal: 'Personal best', slower: 'Slower than personal best'};
+function lapTime(value, cls) {
+  const text = fmt(value);
+  return Object.hasOwn(LAP_CLASS, cls) && text !== '—'
+    ? `<span class="${LAP_CLASS[cls]}" title="${LAP_TITLE[cls]}">${text}</span>` : text;
+}
+// Best is coloured only for the unique session best; ordinary personal bests stay neutral.
+const bestTime = p => lapTime(p.best_lap_time, p.best_lap_class === 'overall' ? 'overall' : null);
+const sectorFmt = t => Number.isFinite(t) && t > 0 ? (t < 60 ? t.toFixed(3) : fmt(t)) : '—';
+const COMPOUND_SHORT = {soft:'S', medium:'M', hard:'H', wet:'W'};
+function tyreText(p) {
+  const name = typeof p.tyre_compound === 'string' ? p.tyre_compound.trim() : '';
+  const wear = Number.isFinite(p.tyre_remaining_min) && p.tyre_remaining_min >= 0 && p.tyre_remaining_min <= 1
+    ? `${Math.round(p.tyre_remaining_min * 100)}%` : null;
+  if (!name && wear === null) return '—';
+  const label = name ? (COMPOUND_SHORT[name.toLowerCase()] || name.slice(0, 3)) : '?';
+  const title = `${name || 'Compound unknown'} · remaining tyre (worst corner) ${wear ?? 'unknown'}`;
+  return `<span title="${esc(title)}">${esc(label)}${wear === null ? '' : ` ${esc(wear)}`}</span>`;
+}
+function damageText(p) {
+  const n = p.damage_regions;
+  if (!Number.isSafeInteger(n) || n < 0) return '—';
+  const title = `${n} body region(s) reported damaged · max provider severity ${p.damage_max} · experimental, not validated in-game`;
+  return n === 0 ? `<span title="${esc(title)}">0</span>` : `<span class="dmg" title="${esc(title)}">${esc(n)}</span>`;
+}
 function focusStatus(participants, focusId, race) {
   const p = participantById(participants, focusId);
   if (!p) return '';
@@ -303,18 +407,18 @@ function focusStatus(participants, focusId, race) {
   return `<p class="focus-status" aria-label="Focus status"><strong>Focus: ${esc(p.display_name)}</strong>
     <span>P${validPosition(p.position) ? p.position : '—'}</span><span>Gap ${gapText(p, race)}</span>
     <span>Interval ${intervalText(p, race)}</span><span>${laps} completed laps</span>
-    <span>Last ${fmt(p.last_lap_time)}</span><span>Best ${fmt(p.best_lap_time)}</span>
+    <span>Last ${lapTime(p.last_lap_time, p.last_lap_class)}</span><span>Best ${bestTime(p)}</span>
     <span title="Last stop: first persisted completed-lap snapshot with an increased counter; not exact entry/exit.">${stopsText(p, true)}</span>
     <span>${participantStatus(p, true)}</span></p>`;
 }
 function focusTiming(participants, focusId) {
   const p = participantById(participants, focusId);
   return p ? `<section aria-label="Focused timing">
-    <p class="sector-context">Last completed lap sectors · checkpoint lap ${esc(p.sector_lap_number)}</p>
+    <p class="sector-context">Last timed lap sectors · checkpoint lap ${esc(p.sector_lap_number)}</p>
     <div class="metrics">${['sector1','sector2','sector3'].map((key,i) => `<div class="metric">S${i+1}<div class="value">${fmt(p[key])}</div></div>`).join('')}</div></section>` : '';
 }
 function timingCells(p) {
-  return `<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td>${fmt(p.best_lap_time)}</td><td>${p.in_pits === true ? 'PIT' : '—'}</td><td>—</td>`;
+  return `<td>${esc(p.total_laps)}</td><td>${lapTime(p.last_lap_time, p.last_lap_class)}</td><td>${bestTime(p)}</td><td>${p.in_pits === true ? 'PIT' : '—'}</td><td>—</td>`;
 }
 function relativeWidget(participants, focusId) {
   const rows = relativeWindow(participants, focusId);
@@ -326,7 +430,7 @@ function relativeWidget(participants, focusId) {
 function comparisonCard(label, p, focus, race, hideClass=false) {
   return `<article class="${label === 'Focus' ? 'focus' : ''}"><h3>${label}</h3>${p ? `<strong>${esc(p.display_name)}</strong><dl>
     <dt>Position</dt><dd>${esc(p.position)}</dd>${hideClass ? '' : `<dt>Class</dt><dd>${esc(p.vehicle_class || '—')}</dd>`}
-    <dt>Last</dt><dd>${fmt(p.last_lap_time)}</dd><dt>Best</dt><dd class="best-time">${fmt(p.best_lap_time)}</dd>
+    <dt>Last</dt><dd>${lapTime(p.last_lap_time, p.last_lap_class)}</dd><dt>Best</dt><dd>${bestTime(p)}</dd>
     <dt>Interval to focus</dt><dd>${seconds(intervalToFocus(p, focus, race), true)}</dd></dl>` : '<p>—</p>'}</article>`;
 }
 function headToHeadWidget(participants, focusId, race=false) {
@@ -400,9 +504,16 @@ function strategyWidget(d) {
     ${settings.capacity_feasible===null?'<p class="muted">Tank capacity unknown · feasibility unverified</p>':''}
     ${settings.additional_stop_required?'<p class="strategy-danger">ADDITIONAL STOP REQUIRED</p>':''}</div>` : '';
   return `<p class="${tone}"><strong>${esc(statuses[d.status] || 'Resource strategy unavailable')}</strong></p>
-    <div class="resource-grid">${(d.resources || []).map(r=>`<article><h3>${r.resource_kind==='fuel'?'Fuel':ve?'Virtual Energy':'Energy'} ${d.limiting_resource===r.resource_kind?'<span class="strategy-attention">LIMIT</span>':''}</h3>
-    <strong>${amount(r.resource_kind,r.current)}</strong> · ${amount(r.resource_kind,r.consumption_per_lap)}/lap
-    <p>${r.available?fuelNumber(r.range_laps,' laps',1):'—'} · ${esc(r.sample_count)} samples${r.fresh?'':' · stale / unavailable'}</p></article>`).join('')}</div>
+    <div class="resource-grid">${(d.resources || []).map(r=>{
+      const name=r.resource_kind==='fuel'?'Fuel':ve?'Virtual Energy':'Energy';
+      const state=r.state??(r.fresh===false?'stale':r.available?'ready':'collecting');
+      const unknown=state==='no_current_value';
+      const current=unknown?'UNKNOWN':amount(r.resource_kind,r.current);
+      const rate=r.consumption_per_lap===null||r.consumption_per_lap===undefined?'consumption unknown':`${amount(r.resource_kind,r.consumption_per_lap)}/lap`;
+      const note={no_current_value:'No valid current value',stale:'Stale · not live',collecting:r.resource_kind==='energy'?`Collecting laps · ${esc(r.sample_count)}/3 valid`:'Collecting laps',ready:`${esc(r.sample_count)} samples`}[state]||'';
+      return `<article><h3>${name} ${d.limiting_resource===r.resource_kind?'<span class="strategy-attention">LIMIT</span>':''}</h3>
+    <strong class="${unknown||state==='stale'?'muted':''}">${current}</strong> · ${rate}
+    <p>${r.available?fuelNumber(r.range_laps,' laps',1):'range —'} · ${note}</p></article>`;}).join('')}</div>
     <div class="resource-plan"><p>${finish.kind==='timed_estimate'?'Projected finish ≈':'Finish'} ${lap(finish.finish_lap)}</p>
     <p>Latest resource-safe stop ${lap(d.latest_safe_stop_lap)}</p>
     <p>Plan: ${esc(d.plan_source)} ${lap(d.planned_stop_lap)}</p><p>Reserve ${fuelNumber(d.reserve_laps,' lap',1)}${d.balanced?' · BALANCED':''}</p></div>
@@ -415,6 +526,265 @@ function strategyWidget(d) {
     ${d.diagnostics?.fuel?fuelWidget(d.diagnostics.fuel):''}</details>`;
 }
 
+function mapNumber(value) { return typeof value === 'number' && Number.isFinite(value) ? value : null; }
+const SECTOR_NAMES = ['S1', 'S2', 'S3'];
+function raceControlBadges(rc) {
+  if (!rc) return '<span class="rc-badge rc-muted">RACE CONTROL · NO DATA</span>';
+  if (!rc.fresh) return '<span class="rc-badge rc-muted">RACE CONTROL · STALE</span>';
+  const badges = [];
+  const phases = {green:['GREEN','rc-ok'], formation:['FORMATION','rc-muted'], pre_session:['PRE-SESSION','rc-muted'],
+    session_over:['SESSION OVER','rc-muted'], session_stopped:['SESSION STOPPED','rc-danger rc-active'],
+    full_course_yellow:['FULL COURSE YELLOW','rc-warn rc-active']};
+  const phase = phases[rc.phase];
+  badges.push(phase ? `<span class="rc-badge ${phase[1]}">${phase[0]}</span>` : '<span class="rc-badge rc-muted">STATE UNKNOWN</span>');
+  if (rc.safety_car_active === true) badges.push('<span class="rc-badge rc-warn rc-active">SAFETY CAR ACTIVE</span>');
+  (rc.sector_flags || []).forEach((state, index) => {
+    if (state === 'local_yellow' && SECTOR_NAMES[index]) badges.push(`<span class="rc-badge rc-warn rc-active">${SECTOR_NAMES[index]} LOCAL YELLOW</span>`);
+  });
+  const unknown = (rc.sector_flags || []).map((state, index) => state === 'unknown' ? SECTOR_NAMES[index] : null).filter(Boolean);
+  if (unknown.length && rc.phase !== 'session_over') badges.push(`<span class="rc-badge rc-muted" title="Provider flag value not interpreted">${unknown.join('/')} FLAG UNRECOGNIZED</span>`);
+  return badges.join('');
+}
+function learningLabel(geometry) {
+  if (!geometry || geometry.state === 'unknown') return 'TRACK UNKNOWN';
+  if (geometry.complete) return '';
+  const progress = mapNumber(geometry.progress);
+  return progress === null ? 'LEARNING TRACK' : `LEARNING TRACK · ${Math.round(progress * 100)}%`;
+}
+// --- Orientation: presentation only. Raw coordinates, track identity and lap distance are never changed. ---
+const ORIENTATION_KEY = 'stintara:trackmap:orientation:v1';
+const ORIENTATION_MODES = ['auto', 'original'];
+const MIN_AXIS_RATIO = 0.9;   // sqrt(minor/major variance) at or above this: no meaningful dominant axis
+function orientationStore() { try { return typeof localStorage === 'undefined' ? null : localStorage; } catch { return null; } }
+function readOrientations() {
+  try {
+    const raw = JSON.parse(orientationStore()?.getItem(ORIENTATION_KEY) || '{}');
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch { return {}; }
+}
+const orientationMemory = new Map();   // keeps the choice for this page even when storage is blocked
+function trackOrientation(trackName) {
+  const mode = typeof trackName === 'string' ? orientationMemory.get(trackName) ?? readOrientations()[trackName] : null;
+  return ORIENTATION_MODES.includes(mode) ? mode : 'auto';
+}
+function saveTrackOrientation(trackName, mode) {
+  if (typeof trackName !== 'string' || !trackName || !ORIENTATION_MODES.includes(mode)) return false;
+  orientationMemory.set(trackName, mode);
+  try {
+    const all = Object.fromEntries(Object.entries(readOrientations()).filter(([, value]) => ORIENTATION_MODES.includes(value)).slice(-63));
+    delete all[trackName]; all[trackName] = mode;
+    orientationStore().setItem(ORIENTATION_KEY, JSON.stringify(all));
+    return true;
+  } catch { return false; }
+}
+// Screen plane: x right, y = -z (north-up of the simulator frame). Returns the rotation (radians) that lays the
+// principal axis of the points horizontally, or null when the data cannot support it (too few points, no spread,
+// near-isotropic shape). A rotation never mirrors: the determinant of the applied matrix is +1.
+function principalRotation(points) {
+  const pts = (points || []).filter(p => Array.isArray(p) && mapNumber(p[0]) !== null && mapNumber(p[1]) !== null);
+  if (pts.length < 8) return null;
+  const n = pts.length;
+  const cx = pts.reduce((a, p) => a + p[0], 0) / n, cy = pts.reduce((a, p) => a - p[1], 0) / n;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const p of pts) { const dx = p[0] - cx, dy = -p[1] - cy; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  sxx /= n; syy /= n; sxy /= n;
+  const half = (sxx - syy) / 2, root = Math.hypot(half, sxy), major = (sxx + syy) / 2 + root, minor = (sxx + syy) / 2 - root;
+  if (!(major > 1e-6) || !(minor >= 0) || Math.sqrt(minor / major) >= MIN_AXIS_RATIO) return null;
+  const theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  return Math.abs(theta) < 0.00873 ? null : { theta, cx, cy };   // under 0.5°: already horizontal
+}
+// Projection of one world (x, z) point to the screen plane. One instance serves every visual element.
+function trackProjection(geometry, mode) {
+  const identity = p => [p[0], -p[1]];
+  if (mode !== 'auto' || !geometry || geometry.complete !== true || geometry.closed !== true) return { project: identity, angle: 0 };
+  const rotation = principalRotation(geometry.points);
+  if (!rotation) return { project: identity, angle: 0 };
+  const cos = Math.cos(rotation.theta), sin = Math.sin(rotation.theta);
+  return { angle: -rotation.theta, project: p => {
+    const dx = p[0] - rotation.cx, dy = -p[1] - rotation.cy;
+    return [cos * dx + sin * dy + rotation.cx, -sin * dx + cos * dy + rotation.cy];
+  } };
+}
+// Opponents follow the Head-to-Head semantics (adjacent provider positions, unique only), never spatial proximity.
+function trackRoles(participants, focusId) {
+  const focus = participantById(participants, focusId);
+  if (!focus) return null;
+  const ahead = uniquePositionNeighbor(participants, focus, -1), behind = uniquePositionNeighbor(participants, focus, 1);
+  const own = p => (p && validPosition(p.position) ? `P${p.position}` : null);
+  return { focus: focus.id, ahead: ahead?.id || null, behind: behind?.id || null,
+           text: { [focus.id]: own(focus) || 'P—', ...(ahead ? { [ahead.id]: own(ahead) } : {}), ...(behind ? { [behind.id]: own(behind) } : {}) } };
+}
+const TRACK_MAP_DEFAULT_SIZE = { width: 760, height: 300 };
+let trackMapSize = TRACK_MAP_DEFAULT_SIZE;
+function measureTrackMap() {
+  try {
+    const box = document.querySelector('.map-area')?.getBoundingClientRect?.();
+    if (box && box.width > 80 && box.height > 80) trackMapSize = { width: box.width, height: box.height };
+  } catch { /* measuring is best effort; the default size keeps labels readable */ }
+}
+const rectsOverlap = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+// Greedy, priority-ordered label placement in map units; an item that cannot be placed without covering another
+// label or any vehicle dot is dropped (the focus is always first and is placed at its least-overlapping spot).
+function layoutTrackLabels(items, em, dots) {
+  const placed = [], boxes = [];
+  const dotBoxes = dots.map(d => ({ x0: d.at[0] - d.r, x1: d.at[0] + d.r, y0: d.at[1] - d.r, y1: d.at[1] + d.r, key: d.key }));
+  for (const [index, item] of items.entries()) {
+    const width = (item.text.length * 0.6 + 0.6) * em, height = 1.25 * em, gap = item.r * 1.9 + 0.15 * em;
+    const [x, y] = item.at;
+    const candidates = [[1, -1], [1, 1], [-1, -1], [-1, 1], [0, -1], [0, 1], [1, 0], [-1, 0]].map(([dx, dy]) => {
+      const x0 = dx > 0 ? x + gap : dx < 0 ? x - gap - width : x - width / 2;
+      const y0 = dy > 0 ? y + gap : dy < 0 ? y - gap - height : y - height / 2;
+      return { x0, x1: x0 + width, y0, y1: y0 + height, anchor: dx > 0 ? 'start' : dx < 0 ? 'end' : 'middle',
+               tx: dx > 0 ? x0 : dx < 0 ? x0 + width : x0 + width / 2, ty: y0 + height * 0.78 };
+    });
+    const hits = box => boxes.filter(other => rectsOverlap(box, other)).length
+      + dotBoxes.filter(dot => dot.key !== item.key && rectsOverlap(box, dot)).length;
+    // Fewest collisions first; among equals the spot farthest from any other vehicle keeps the label unambiguous.
+    const clearance = box => Math.min(...dots.filter(d => d.key !== item.key).map(d => Math.hypot((box.x0 + box.x1) / 2 - d.at[0], (box.y0 + box.y1) / 2 - d.at[1])), Infinity);
+    const best = candidates.map(box => ({ box, hits: hits(box), clear: clearance(box) }))
+      .sort((a, b) => a.hits - b.hits || b.clear - a.clear)[0];
+    if (best.hits === 0 || index === 0) {
+      boxes.push(best.box);
+      placed.push({ ...item, ...best.box, lx: Math.min(Math.max(x, best.box.x0), best.box.x1), ly: Math.min(Math.max(y, best.box.y0), best.box.y1) });
+    }
+  }
+  return placed;
+}
+function sectorMarkers(geometry) {
+  const markers = geometry?.complete === true && geometry?.closed === true ? geometry.sector_markers : null;
+  if (!Array.isArray(markers) || markers.length !== 2) return [];
+  const valid = markers.every((m, i) => m && m.boundary === i + 1 && Array.isArray(m.point) && Array.isArray(m.direction)
+    && m.point.length === 2 && m.direction.length === 2 && m.point.every(v => mapNumber(v) !== null)
+    && m.direction.every(v => mapNumber(v) !== null) && Math.abs(Math.hypot(m.direction[0], m.direction[1]) - 1) < 0.25);
+  return valid ? markers : [];
+}
+// Geometry (outline, flags, sector ticks) and the moving vehicle layer are separate parts so a vehicles-only refresh
+// (#55) can replace just the layer. Returns null when there is nothing to draw.
+function trackMapParts(track, focusId, mode = 'auto', roles = null, size = TRACK_MAP_DEFAULT_SIZE) {
+  const geometry = track?.geometry || {};
+  const points = (geometry.points || []).filter(p => Array.isArray(p) && mapNumber(p[0]) !== null && mapNumber(p[1]) !== null);
+  const vehicles = (track?.vehicles || []).filter(v => mapNumber(v.x) !== null && mapNumber(v.z) !== null);
+  const { project } = trackProjection(geometry, mode);
+  const screenPoints = points.map(project);
+  const screenVehicles = vehicles.map(v => ({ v, at: project([v.x, v.z]) }));
+  const all = screenPoints.concat(screenVehicles.map(c => c.at));
+  if (!all.length) return null;
+  const xs = all.map(p => p[0]), ys = all.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const span = Math.max(maxX - minX, maxY - minY, 50);
+  const pad = span * 0.06;
+  const fmt = n => n.toFixed(1);
+  const path = list => list.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0])} ${fmt(p[1])}`).join('');
+  const sectors = Array.isArray(geometry.point_sectors) && geometry.point_sectors.length === points.length ? geometry.point_sectors : null;
+  const rc = track?.race_control;
+  const yellow = rc && rc.fresh ? (rc.sector_flags || []).map(state => state === 'local_yellow') : [];
+  let base = '', overlay = '';
+  if (points.length > 1) {
+    // A closing edge exists only when the server learned and verified a closed lap.
+    const ring = geometry.closed ? screenPoints.concat([screenPoints[0]]) : screenPoints;
+    base = `<path class="trk-base" d="${path(ring)}"/>`;
+    if (sectors && yellow.some(Boolean)) {
+      const tags = geometry.closed ? sectors.concat([sectors[0]]) : sectors;
+      let run = [];
+      const flush = () => { if (run.length > 1) overlay += `<path class="trk-yellow" d="${path(run)}"/>`; run = []; };
+      ring.forEach((point, index) => {
+        if (yellow[tags[index] - 1] === true) {
+          if (!run.length && index) run.push(ring[index - 1]);
+          run.push(point);
+        } else flush();
+      });
+      flush();
+    }
+  }
+  // Short ticks across the learned centerline at the observed sector boundaries; nothing is drawn without them.
+  let ticks = '';
+  for (const m of sectorMarkers(geometry)) {
+    const a = project(m.point), b = project([m.point[0] + m.direction[0] * 10, m.point[1] + m.direction[1] * 10]);
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (!(len > 0)) continue;
+    const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len, half = span * 0.024;
+    ticks += `<line class="trk-sector" x1="${fmt(a[0] - nx * half)}" y1="${fmt(a[1] - ny * half)}" x2="${fmt(a[0] + nx * half)}" y2="${fmt(a[1] + ny * half)}"><title>Sector boundary S${m.boundary} | S${m.boundary + 1}</title></line>`;
+  }
+  const radius = span / 70;
+  const fresh = track?.vehicles_fresh === true;
+  const ordered = screenVehicles.slice().sort((a, b) => (a.v.participant_id === focusId) - (b.v.participant_id === focusId));
+  const scale = Math.min(size.width / (maxX - minX + 2 * pad), size.height / (maxY - minY + 2 * pad));
+  const em = Math.min(span * 0.14, 12 / scale);   // about 12 px of text at the current map size, bounded on tiny maps
+  const roleOf = id => !roles || !fresh || typeof id !== 'string' ? null : id === roles.focus ? 'focus' : id === roles.ahead ? 'ahead' : id === roles.behind ? 'behind' : null;
+  const seenRole = new Set();
+  const labelled = [];
+  const cars = ordered.map(({ v, at }, index) => {
+    let role = roleOf(v.participant_id);
+    if (role && seenRole.has(role)) role = null;   // a duplicated participant_id never labels a second dot
+    if (role) seenRole.add(role);
+    const focus = Boolean(focusId) && v.participant_id === focusId && fresh;
+    const label = `${v.position ?? '—'} · ${v.name ?? 'Unknown'}${v.in_pits ? ' · pit' : ''}${fresh ? '' : ' · stale'}`;
+    const cx = fmt(at[0]), cy = fmt(at[1]);
+    if (role) labelled.push({ key: index, role, at, r: radius * (role === 'focus' ? 2.1 : 1.5), text: roles.text[v.participant_id] || 'P—' });
+    if (focus) return `<g><circle class="trk-focus-ring" cx="${cx}" cy="${cy}" r="${fmt(radius * 2.1)}"/><circle class="trk-focus" cx="${cx}" cy="${cy}" r="${fmt(radius * 1.35)}"><title>${esc(label)} · focus</title></circle></g>`;
+    if (role) return `<g><circle class="trk-rival-ring ${role}" cx="${cx}" cy="${cy}" r="${fmt(radius * 1.5)}"/><circle class="trk-car rival" cx="${cx}" cy="${cy}" r="${fmt(radius)}"><title>${esc(label)} · ${role === 'ahead' ? 'ahead of' : 'behind'} focus</title></circle></g>`;
+    return `<circle class="trk-car${v.in_pits ? ' pit' : ''}${fresh ? '' : ' stale'}" cx="${cx}" cy="${cy}" r="${fmt(radius)}"><title>${esc(label)}</title></circle>`;
+  }).join('');
+  const order = { focus: 0, ahead: 1, behind: 2 };
+  const items = labelled.sort((a, b) => order[a.role] - order[b.role]);
+  const dots = ordered.map(({ at }, index) => ({ key: index, at, r: radius * 1.2 }));
+  const labels = layoutTrackLabels(items, em, dots).map(l =>
+    `<line class="trk-leader ${l.role}" x1="${fmt(l.at[0])}" y1="${fmt(l.at[1])}" x2="${fmt(l.lx)}" y2="${fmt(l.ly)}"/>`
+    + `<text class="trk-label ${l.role}" x="${fmt(l.tx)}" y="${fmt(l.ty)}" text-anchor="${l.anchor}" font-size="${fmt(em)}">${esc(l.text)}</text>`).join('');
+  return { viewBox: `${fmt(minX - pad)} ${fmt(minY - pad)} ${fmt(maxX - minX + 2 * pad)} ${fmt(maxY - minY + 2 * pad)}`,
+           geometry: base + overlay + ticks, vehicles: cars + labels };
+}
+const TRACK_MAP_PLACEHOLDER = '<div class="placeholder"><span>Waiting for position data</span></div>';
+function trackMapSvgOf(parts) {
+  return `<svg viewBox="${parts.viewBox}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Track map">${parts.geometry}<g id="trk-vehicles">${parts.vehicles}</g></svg>`;
+}
+function trackMapSvg(track, focusId, mode = 'auto', roles = null, size = TRACK_MAP_DEFAULT_SIZE) {
+  const parts = trackMapParts(track, focusId, mode, roles, size);
+  return parts ? trackMapSvgOf(parts) : TRACK_MAP_PLACEHOLDER;
+}
+// --- Vehicles-only refresh (#55): ordering and staleness rules. Pure; the browser wiring follows the session id. ---
+const VEHICLE_REFRESH_MIN_MS = 100, VEHICLE_REFRESH_MAX_MS = 2000, VEHICLE_REQUEST_TIMEOUT_MS = 1500, VEHICLE_SILENCE_STALE_MS = 5000;
+// Cadence advertised by the server inside track_map; absent (older server, stored track) means no fast refresh.
+function vehicleRefreshMs(track) {
+  const ms = Number(track?.vehicle_refresh_ms);
+  return track?.static_only !== true && Number.isFinite(ms) && ms > 0 ? Math.min(VEHICLE_REFRESH_MAX_MS, Math.max(VEHICLE_REFRESH_MIN_MS, ms)) : null;
+}
+// Both the full /live payload (vehicles_seq) and the vehicles endpoint (seq) describe one scoring sample.
+function vehicleSample(source) {
+  if (!source || !Array.isArray(source.vehicles)) return null;
+  const seq = source.seq ?? source.vehicles_seq;
+  if (!Number.isSafeInteger(seq) || typeof source.server_epoch !== 'string') return null;
+  return { epoch: source.server_epoch, seq, vehicles: source.vehicles, age: source.vehicles_age_s, fresh: source.vehicles_fresh === true };
+}
+// A sample replaces the held one only when it is newer (same server run) or announces a changed freshness for the
+// same sample. Older or repeated samples, e.g. a slow full /live response, never overwrite newer positions.
+function acceptVehicles(held, sample) {
+  if (!sample) return false;
+  if (!held || held.epoch !== sample.epoch) return true;
+  return sample.seq > held.seq || (sample.seq === held.seq && sample.fresh !== held.fresh);
+}
+// A silent channel must not keep positions "fresh": after silence only the browser clock is consulted.
+function vehiclesGoneStale(held, now) { return Boolean(held) && held.fresh && now - held.heardAt > VEHICLE_SILENCE_STALE_MS; }
+function vehicleBackoff(interval, failures) { return Math.min(VEHICLE_REFRESH_MAX_MS, interval * 2 ** Math.min(failures, 4)); }
+function trackMapPanel(d, focusId, mode) {
+  const track = d.track_map || {};
+  const geometry = track.geometry;
+  const rc = track.race_control;
+  const orientation = ORIENTATION_MODES.includes(mode) ? mode : trackOrientation(d.session?.track_name);
+  // A session without live runtime state shows the persisted track only: no vehicles, no race control, no flags.
+  const storedOnly = track.static_only === true && geometry?.complete === true;
+  const learning = storedOnly ? '' : learningLabel(geometry);
+  const stale = !storedOnly && track.vehicles_fresh === false && (track.vehicles || []).length ? '<span class="rc-badge rc-muted">POSITIONS STALE</span>' : '';
+  const storedBadges = storedOnly ? '<span class="rc-badge rc-muted" title="Persisted track geometry">STORED TRACK</span><span class="rc-badge rc-muted" title="No live observation of this session">POSITIONS UNAVAILABLE</span>' : '';
+  const flagOnly = !storedOnly && rc && rc.fresh && (rc.sector_flags || []).includes('local_yellow') && geometry && !geometry.point_sectors
+    ? '<p class="map-note">Yellow sector shown by flag only · sector layer not yet known</p>' : '';
+  const toggle = geometry?.complete === true && (geometry.points || []).length > 1
+    ? `<button type="button" id="orientation-toggle" class="orient-toggle" title="Presentation only; stored coordinates are never rotated. Click to switch to ${orientation === 'auto' ? 'ORIGINAL' : 'AUTO'}.">Orientation: ${orientation === 'auto' ? 'AUTO' : 'ORIGINAL'}</button>` : '';
+  return `<section class="panel map-panel" aria-label="Track map and race control"><div class="map-head"><h2>Track Map</h2>
+    ${learning ? `<span class="rc-badge rc-muted">${esc(learning)}</span>` : ''}${storedBadges}${stale}${toggle}
+    <div class="rc-badges">${storedOnly ? '' : raceControlBadges(rc)}</div></div>
+    <div class="map-area">${trackMapSvg(track, focusId, orientation, trackRoles(d.participants || [], focusId), trackMapSize)}</div>${flagOnly}</section>`;
+}
 const sessionId = __SESSION_ID__;
 const selector = document.querySelector('#focus');
 let focusId = null;
@@ -484,7 +854,8 @@ function syncFocusURL() {
   const current = new URL(location.href);
   if (next !== current.pathname + current.search + current.hash) history.replaceState(null, '', next);
 }
-function renderSession(d) {
+function renderSession(d, resized = false) {
+  const mapSizeUsed = trackMapSize;
   const root = document.querySelector('#root');
   const race = d.session.session_type === 'Race';
   const fieldClass = singleClass(d.participants);
@@ -493,20 +864,19 @@ function renderSession(d) {
     const element = document.querySelector('#'+id);
     return [id, element?.scrollLeft || 0, element?.scrollTop || 0];
   });
-  const activeId = ['full-scroll', 'relative-scroll', 'relative-toggle', 'weather-toggle'].includes(document.activeElement?.id) ? document.activeElement.id : null;
+  const activeId = ['full-scroll', 'relative-scroll', 'relative-toggle', 'weather-toggle', 'orientation-toggle'].includes(document.activeElement?.id) ? document.activeElement.id : null;
   const weatherOpen = document.querySelector('#weather-details')?.open || false;
   const relativeOpen = document.querySelector('#relative-details')?.open || false;
+  const helpOpen = document.querySelector('#full-help-details')?.open || false;
   const options = '<option value="">Choose a participant</option>' + d.participants.map(p =>
     `<option value="${esc(p.id)}">${esc(p.position)} · ${esc(p.display_name)}</option>`).join('');
   if (options !== selectorOptions) { selector.innerHTML = options; selectorOptions = options; }
   selector.value = focusId || '';
   root.innerHTML = `<header class="session-header"><div class="context"><h1>${esc(d.session.track_name)}</h1>
       <p>${esc(d.session.simulator_provider)} · ${esc(d.session.session_type)} · ${hideClass ? esc(fieldClass)+' · ' : ''}${d.participants.length} participants</p>
-      ${sessionContext(d)}</div><div>${feedIndicator(d.live)}
+      ${sessionContext(d)}${chainNav(d)}</div><div>${feedIndicator(d.live)}
       <p class="status">${esc(feedStatus(d, Date.now()))}</p></div></header>
-      <section class="panel map-panel" aria-label="Future track map"><h2>Track Map <span class="muted">· next pass</span></h2>
-      <div class="placeholder"><span>Track geometry not available yet</span></div>
-      <p class="future-status">Flags / Race Control / Car Status · not available yet</p></section>
+      ${trackMapPanel(d, focusId)}
       <section class="panel focus-panel" aria-label="Focus driver"><h2>Focus driver</h2>${focusStatus(d.participants, focusId, race) || '<p class="muted">Choose a participant using the focus selector.</p>'}
       ${focusTiming(d.participants, focusId)}</section>
       <div id="weather-panel" class="panel weather-panel">${engineerWeather(d.session.weather, d.live)}</div>
@@ -515,18 +885,27 @@ function renderSession(d) {
       <details id="relative-details"><summary id="relative-toggle">Relative standings / session details</summary>${relativeWidget(d.participants, focusId)}
       <p class="muted">Session ${esc(d.session.id)} · Started ${esc(d.session.started_at)}</p></details></section>
       <section class="panel standings-panel" aria-label="Full field"><div class="panel-heading"><h2>Full field</h2><span class="muted">${d.participants.length} entries · provider order</span></div>
+      <div class="table-legend"><span class="lap-legend" aria-label="Lap colour legend"><span class="lap-overall">Fastest Lap</span> · <span class="lap-personal">Personal Best (Last)</span> · <span class="lap-slower">Slower Lap</span> · Best otherwise neutral</span>
+      <details class="table-help" id="full-help-details"><summary id="full-help-toggle" aria-label="About this table">Info</summary><div class="help-body" id="full-help">
+      <p>Provider positions and lap times. Unknown values remain —.</p>
+      <p><strong>S1–S3</strong> are the sectors of the last timed lap (the last lap with a valid lap time); after pit laps this can be older than Laps. Sectors are not coloured.</p>
+      <p><strong>Gap</strong> is leader-relative; <strong>Interval</strong> is to the preceding position and only shown when comparable.</p>
+      <p><strong>Colours:</strong> Best is purple only for the single fastest lap of the session; ordinary personal bests stay neutral. Last is purple if it is that session best, green if it equals the driver's own best, yellow if slower than it, uncoloured if unknown.</p>
+      <p>Feed freshness does not establish race completion.</p></div></details></div>
       <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
-      <caption>Provider positions and lap times. Race Gap is leader-relative; Interval is to the preceding position when comparable. Unknown values remain —. Feed freshness does not establish race completion.</caption>
-      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col">Completed laps</th><th scope="col">Last</th><th scope="col">Best</th><th scope="col">Gap</th><th scope="col">Interval</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
+      <caption class="sr-only">Full field standings</caption>
+      <thead><tr><th scope="col">P</th><th scope="col">Driver / entry</th>${hideClass ? '' : '<th scope="col">Class</th>'}<th scope="col" class="num" title="Completed laps">Laps</th><th scope="col" class="num" title="Sector 1 of the last timed lap">S1</th><th scope="col" class="num" title="Sector 2 of the last timed lap">S2</th><th scope="col" class="num" title="Sector 3 of the last timed lap">S3</th><th scope="col" class="num">Last</th><th scope="col" class="num">Best</th><th scope="col" class="num">Gap</th><th scope="col" class="num">Interval</th><th scope="col" title="Compound and remaining tyre of the worst corner (1.0 new, 0 destroyed). Live while snapshots are fresh, otherwise as of the last timed lap.">Tyre</th><th scope="col" title="Experimental: number of body regions the provider reports as damaged (0 = none reported). Not validated in-game.">Dmg</th><th scope="col" title="Last pit lap is the first persisted completed-lap snapshot with an increased counter, not exact pit entry/exit.">Stops</th><th scope="col">Status</th></tr></thead>
       <tbody>${d.participants.map(p => {
         const vehicle = vehicleLabel(p);
         const entry = vehicle.label && !(hideClass && vehicle.label === 'Class') ? `${vehicle.label}: ${vehicle.value}` : 'Entry: —';
         return `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td class="driver-cell">${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? ` <a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}
       <span class="entry" title="${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}">${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}</span></td>
-      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td>${esc(p.total_laps)}</td><td>${fmt(p.last_lap_time)}</td><td class="best-time">${fmt(p.best_lap_time)}</td><td>${gapText(p, race)}</td><td>${intervalText(p, race)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
-      }).join('') || `<tr><td colspan="${hideClass ? 9 : 10}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
+      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td class="num">${esc(p.total_laps)}</td><td class="num sector">${sectorFmt(p.sector1)}</td><td class="num sector">${sectorFmt(p.sector2)}</td><td class="num sector">${sectorFmt(p.sector3)}</td><td class="num">${lapTime(p.last_lap_time, p.last_lap_class)}</td><td class="num">${bestTime(p)}</td><td class="num">${gapText(p, race)}</td><td class="num">${intervalText(p, race)}</td><td>${tyreText(p)}</td><td>${damageText(p)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
+      }).join('') || `<tr><td colspan="${hideClass ? 14 : 15}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
   const weatherDetails = document.querySelector('#weather-details');
   if (weatherDetails) weatherDetails.open = weatherOpen;
+  const helpDetails = document.querySelector('#full-help-details');
+  if (helpDetails) helpDetails.open = helpOpen;
   const relativeDetails = document.querySelector('#relative-details');
   if (relativeDetails) relativeDetails.open = relativeOpen;
   if (activeId) document.querySelector('#'+activeId)?.focus({preventScroll:true});
@@ -534,13 +913,94 @@ function renderSession(d) {
     const element = document.querySelector('#'+id);
     if (element) { element.scrollLeft = left; element.scrollTop = top; }
   }
+  // Labels are sized in map units for the measured map area; render once more when that area turned out different.
+  measureTrackMap();
+  paintedFresh = d.track_map?.vehicles_fresh;
+  const changed = (a, b) => Math.abs(a - b) > 0.06 * Math.max(a, b);
+  if (!resized && (changed(mapSizeUsed.width, trackMapSize.width) || changed(mapSizeUsed.height, trackMapSize.height))) renderSession(d, true);
 }
+if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('resize', () => { if (latestData) renderSession(latestData); });
+document.querySelector('#root')?.addEventListener?.('click', event => {
+  if (!event.target?.closest?.('#orientation-toggle') || !latestData) return;
+  const name = latestData.session?.track_name;
+  saveTrackOrientation(name, trackOrientation(name) === 'auto' ? 'original' : 'auto');
+  renderSession(latestData);
+});
 selector.addEventListener('change', () => {
   if (!latestData) return;
   focusId = resolveFocus(latestData.participants, selector.value);
   syncFocusURL();
   renderSession(latestData);
   void refreshFuel();
+});
+const nowMs = () => typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+let vehicleHeld = null, vehicleRun = 0, vehicleRunning = false, vehicleTimer = null, vehicleFailures = 0, vehicleInterval = null, paintedFresh = null;
+function applyHeldVehicles(track) {
+  Object.assign(track, { vehicles: vehicleHeld.vehicles, vehicles_age_s: vehicleHeld.age, vehicles_fresh: vehicleHeld.fresh, vehicles_seq: vehicleHeld.seq });
+}
+// Called for every full /live response: keeps the newer of the held and the received positions.
+function reconcileVehicles(d) {
+  const track = d.track_map;
+  const sample = d.live && track && track.static_only !== true ? vehicleSample(track) : null;
+  if (!sample) { vehicleHeld = null; return; }
+  if (acceptVehicles(vehicleHeld, sample)) vehicleHeld = { ...sample, heardAt: nowMs() };
+  else { vehicleHeld.heardAt = nowMs(); applyHeldVehicles(track); }
+}
+function paintVehicles() {
+  const d = latestData, track = d?.track_map;
+  if (!track) return;
+  if (track.vehicles_fresh !== paintedFresh) { renderSession(d); return; }   // badges change: full render, rare
+  const mode = trackOrientation(d.session?.track_name);
+  const parts = trackMapParts(track, focusId, mode, trackRoles(d.participants || [], focusId), trackMapSize);
+  const area = document.querySelector('.map-area');
+  const svg = area?.querySelector?.('svg'), layer = svg?.querySelector?.('#trk-vehicles');
+  if (parts && layer && svg.getAttribute('viewBox') === parts.viewBox) layer.innerHTML = parts.vehicles;
+  else if (area) area.innerHTML = parts ? trackMapSvgOf(parts) : TRACK_MAP_PLACEHOLDER;   // bounds changed: map area only
+}
+function stopVehicleLoop() { vehicleRunning = false; ++vehicleRun; if (vehicleTimer !== null) clearTimeout(vehicleTimer); vehicleTimer = null; }
+function ensureVehicleLoop(d) {
+  const interval = d.live ? vehicleRefreshMs(d.track_map) : null;
+  if (interval === null || document.hidden) { vehicleInterval = interval; stopVehicleLoop(); return; }
+  vehicleInterval = interval;
+  if (!vehicleRunning) { vehicleRunning = true; vehicleFailures = 0; void pollVehicles(++vehicleRun); }
+}
+async function pollVehicles(run) {
+  if (run !== vehicleRun) return;
+  const started = nowMs();
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const abort = setTimeout(() => controller?.abort(), VEHICLE_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/vehicles`, {cache:'no-store', signal: controller?.signal});
+    if (!response.ok) throw new Error('vehicles unavailable');
+    const body = await response.json();
+    if (run !== vehicleRun) return;
+    if (String(body.session_id).toLowerCase() !== String(sessionId).toLowerCase()) throw new Error('wrong session');
+    vehicleFailures = 0;
+    if (body.live === true && latestData?.track_map && latestData.track_map.static_only !== true) {
+      const sample = vehicleSample(body);
+      if (vehicleHeld) vehicleHeld.heardAt = nowMs();
+      if (acceptVehicles(vehicleHeld, sample)) {
+        vehicleHeld = { ...sample, heardAt: nowMs() };
+        applyHeldVehicles(latestData.track_map);
+        paintVehicles();
+      }
+    }
+  } catch {
+    if (run !== vehicleRun) return;
+    ++vehicleFailures;
+    if (vehiclesGoneStale(vehicleHeld, nowMs()) && latestData?.track_map) {
+      vehicleHeld.fresh = false;
+      applyHeldVehicles(latestData.track_map);
+      paintVehicles();
+    }
+  } finally {
+    clearTimeout(abort);
+    if (run === vehicleRun) vehicleTimer = setTimeout(() => { vehicleTimer = null; void pollVehicles(run); },
+      Math.max(0, vehicleBackoff(vehicleInterval ?? 250, vehicleFailures) - (nowMs() - started)));
+  }
+}
+if (typeof document !== 'undefined' && document.addEventListener) document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopVehicleLoop(); else if (latestData) ensureVehicleLoop(latestData);
 });
 async function refresh() {
   try {
@@ -554,9 +1014,11 @@ async function refresh() {
     } else {
       focusId = resolveFocus(d.participants, focusId);
     }
+    reconcileVehicles(d);
     latestData = d;
     syncFocusURL();
     renderSession(d);
+    ensureVehicleLoop(d);
     await refreshFuel();
   } catch (error) {
     document.querySelector('#root').textContent = error.message;

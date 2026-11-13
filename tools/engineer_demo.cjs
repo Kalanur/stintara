@@ -1,13 +1,67 @@
 // Wholly synthetic API presentation fixture. No real captures or production demo endpoint.
 // Run: node tools/engineer_demo.cjs --json
 // Optional browser check: node tools/engineer_demo.cjs --screenshot --browser msedge
+// Real-viewport / orientation check: node tools/engineer_demo.cjs --viewports --browser msedge
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const epoch = '2026-01-01T12:00:00.000Z';
 const id = n => `00000000-0000-7000-8000-${String(n).padStart(12,'0')}`;
 
-function engineerDemo() {
+// Synthetic stadium-shaped circuit (no real track data). Lap distance in metres, world plane (x, z).
+const TRACK_LENGTH = 3000;
+function circuitPoint(distance) {
+  const d = ((distance % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+  const straight = TRACK_LENGTH * 0.3, radius = TRACK_LENGTH * 0.2 / Math.PI, arc = Math.PI * radius;
+  if (d < straight) return [d, -radius];
+  if (d < straight + arc) { const a = -Math.PI / 2 + (d - straight) / radius; return [straight + radius * Math.cos(a), radius * Math.sin(a)]; }
+  if (d < 2 * straight + arc) return [straight - (d - straight - arc), radius];
+  const a = Math.PI / 2 + (d - 2 * straight - arc) / radius;
+  return [radius * Math.cos(a), radius * Math.sin(a)];
+}
+// Sector boundary marker as the server derives it: raw-coordinate point plus unit direction on the centerline.
+function sectorMarker(boundary, distance, turn) {
+  const [x0, z0] = turn(circuitPoint(distance)), [x1, z1] = turn(circuitPoint(distance + 1));
+  const length = Math.hypot(x1 - x0, z1 - z0);
+  return {boundary, point: [Number(x0.toFixed(1)), Number(z0.toFixed(1))], direction: [(x1 - x0) / length, (z1 - z0) / length]};
+}
+function syntheticTrackMap(participants, trackScenario = 'green') {
+  const learning = trackScenario === 'learning';
+  const step = 25, distances = [];
+  for (let d = 0; d < TRACK_LENGTH * (learning ? 0.63 : 1) - 1; d += step) distances.push(d);
+  const flags = {green: ['clear', 'clear', 'clear'], yellow: ['clear', 'local_yellow', 'clear'],
+    learning: ['clear', 'local_yellow', 'clear'], fcy: ['clear', 'clear', 'clear'], vertical: ['clear', 'clear', 'clear'],
+    stored: ['clear', 'clear', 'clear']}[trackScenario];
+  // 'vertical' encodes the same circuit rotated by 90 degrees in the simulator frame; 'stored' is a session without
+  // live runtime state (persisted geometry only).
+  const turn = ([x, z]) => trackScenario === 'vertical' ? [-z, x] : [x, z];
+  const vehicles = participants.map((p, i) => {
+    // Traffic is clustered inside S2 for the yellow scenarios so the highlighted sector is meaningful.
+    const distance = trackScenario === 'yellow' || trackScenario === 'learning' ? 1100 + (i * 23) % 800 : 2850 - i * 71;
+    const [x, z] = turn(circuitPoint(distance));
+    return {participant_id: p.id, x: Number(x.toFixed(1)), z: Number(z.toFixed(1)), in_pits: p.in_pits === true,
+      position: p.position, name: p.display_name};
+  });
+  if (trackScenario === 'stored') return {
+    geometry: {state: 'complete', complete: true, closed: true, progress: null, length_m: TRACK_LENGTH, source: 'stored',
+      points: distances.map(d => circuitPoint(d).map(v => Number(v.toFixed(1)))),
+      point_sectors: distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3), sector_boundaries_m: [1000, 2000],
+      sector_markers: [sectorMarker(1, 1000, p => p), sectorMarker(2, 2000, p => p)]},
+    vehicles: [], vehicles_age_s: null, vehicles_fresh: false, race_control: null, static_only: true};
+  return {
+    geometry: {state: learning ? 'learning' : 'complete', complete: !learning, closed: !learning,
+      progress: learning ? 0.63 : null, length_m: TRACK_LENGTH,
+      points: distances.map(d => turn(circuitPoint(d)).map(v => Number(v.toFixed(1)))),
+      point_sectors: learning ? null : distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3),
+      sector_boundaries_m: learning ? null : [1000, 2000],
+      sector_markers: learning ? null : [sectorMarker(1, 1000, turn), sectorMarker(2, 2000, turn)]},
+    vehicles, vehicles_age_s: 0.2, vehicles_fresh: true,
+    race_control: {phase: trackScenario === 'fcy' ? 'full_course_yellow' : 'green', sector_flags: flags,
+      safety_car_active: trackScenario === 'fcy', player_sector: 2, diagnostics: {}, age_s: 0.2, fresh: true},
+  };
+}
+
+function engineerDemo(scenario = 'ready', trackScenario = 'green') {
   const participants = Array.from({length:40}, (_,i) => ({
     id:id(i+1),local_vehicle_id:i,display_name:`Synthetic Driver ${String(i+1).padStart(2,'0')}`,
     vehicle_class:'GT3',entry_name:`Synthetic Entry ${i+1}`,team_name:'Synthetic Team',car_number:null,
@@ -28,10 +82,10 @@ function engineerDemo() {
     }};
   const strategy={session_id:session.id,participant_id:id(3),simulator_provider:'lmu',status:'stop_required',
     completed_laps:28,finish_projection:{kind:'exact',finish_lap:38},reserve_laps:1,plan_source:'manual',
-    resources:[{resource_kind:'fuel',current:70,capacity:100,consumption_per_lap:8.6,range_laps:70/8.6,
+    resources:[{resource_kind:'fuel',current:70,capacity:100,consumption_per_lap:8.6,range_laps:70/8.6,state:'ready',
       fresh:true,available:true,sample_count:5,units:'L',pit_service_mode:'TARGET_LEVEL'},
       {resource_kind:'energy',energy_kind:'VIRTUAL_ENERGY',current:.63,capacity:1,consumption_per_lap:.102,
-        range_laps:.63/.102,fresh:true,available:true,sample_count:5,units:'fraction',pit_service_mode:'TARGET_LEVEL'}],
+        range_laps:.63/.102,state:'ready',fresh:true,available:true,sample_count:5,units:'fraction',pit_service_mode:'TARGET_LEVEL'}],
     limiting_resource:'energy',effective_range_laps:.63/.102,latest_safe_stop_lap:33,planned_stop_lap:32,
     planned_stop_safe:true,shortfall:[],additional_stop_required:false,
     at_pit:[{resource_kind:'fuel',amount:35.6},{resource_kind:'energy',amount:.222}],
@@ -39,7 +93,16 @@ function engineerDemo() {
     provider_pit_settings:{provider:'lmu',fuel_service_mode:'TARGET_LEVEL',energy_kind:'VIRTUAL_ENERGY',
       ve_target_percent:72,measured_fuel_ratio_l_per_percent_ve:8.6/10.2,fuel_ratio_l_per_percent_ve:.85,
       resulting_fuel_target_l:61.2,projected_fuel_out_l:61.2,expected_fuel_added_l:25.6,capacity_feasible:true,additional_stop_required:false}};
-  return {strategy,focus:id(3),data:{live:true,session,participants,timing:{configured_laps:38,elapsed_seconds:2880}},
+  if(scenario==='ve-collecting') {
+    // Real LMU captures: ve_history is null, so VE is live but no completed-lap consumption exists yet.
+    Object.assign(strategy,{status:'collecting_or_stale',limiting_resource:null,effective_range_laps:null,
+      latest_safe_stop_lap:null,planned_stop_lap:null,planned_stop_safe:null,at_pit:[],next_stint_requirements:[],
+      provider_pit_settings:null});
+    Object.assign(strategy.resources[0],{state:'ready'});
+    Object.assign(strategy.resources[1],{state:'collecting',consumption_per_lap:null,range_laps:null,available:false,sample_count:2});
+  }
+  return {strategy,focus:id(3),data:{live:true,session,participants,timing:{configured_laps:38,elapsed_seconds:2880},
+      track_map:syntheticTrackMap(participants,trackScenario)},
     fuel:{session_id:session.id,participant_id:id(3),
       estimate:{status:'ready',consumption_l_per_lap:2.8,sample_count:5,estimated_range_laps:15},
       current:{fresh:true,fuel_l:42,capacity_l:100,recorded_at:epoch},provider:{},samples:[]}};
@@ -128,9 +191,215 @@ async function screenshot(channel) {
   } finally { await browser.close(); }
 }
 
+async function screenshotVeCollecting(channel) {
+  const {chromium} = require('playwright');
+  const repo = path.resolve(__dirname,'..'), output = path.join(repo,'build');
+  fs.mkdirSync(output,{recursive:true});
+  const demo=engineerDemo('ve-collecting');
+  const html=fs.readFileSync(path.join(repo,'server/static/session.html'),'utf8')
+    .replace('__SESSION_ID__',JSON.stringify(demo.data.session.id))
+    .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+    .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
+  const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
+  try {
+    const page=await browser.newPage({viewport:{width:1920,height:1080},reducedMotion:'reduce'});
+    await page.addInitScript(({epoch})=>{Date.now=()=>Date.parse(epoch);},{epoch});
+    await page.route('**/*',route=>route.fulfill(route.request().url().includes('/api/') ?
+      {json:route.request().url().includes('/strategy')?demo.strategy:demo.data} : {contentType:'text/html',body:html}));
+    await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
+    await page.locator('.resource-grid article').nth(1).waitFor();
+    for (const [width,height] of [[1920,1080],[1920,900]]) {
+      await page.setViewportSize({width,height});
+      const panel=await page.locator('.fuel-panel').evaluate(el=>{const r=el.getBoundingClientRect();
+        return {text:el.innerText,bottom:r.bottom,scrollOverflow:el.scrollHeight>el.clientHeight+1,
+          pageWidth:document.documentElement.scrollWidth};});
+      assert.match(panel.text,/Collecting samples/i);
+      assert.match(panel.text,/Virtual Energy[\s\S]*63\.0%[\s\S]*consumption unknown[\s\S]*Collecting laps · 2\/3 valid/);
+      assert.doesNotMatch(panel.text,/SET (VE|FUEL) TO/,'No pit settings without VE consumption');
+      assert.ok(panel.pageWidth<=width && panel.bottom<=height,JSON.stringify(panel));
+      const file=path.join(output,`engineer-ve-collecting-${width}x${height}.png`);
+      await page.screenshot({path:file,fullPage:true});
+      console.log(JSON.stringify({file,bottom:panel.bottom,scrollOverflow:panel.scrollOverflow}));
+    }
+  } finally { await browser.close(); }
+}
+
+async function screenshotTrackScenarios(channel) {
+  const {chromium} = require('playwright');
+  const repo = path.resolve(__dirname,'..'), output = path.join(repo,'build');
+  fs.mkdirSync(output,{recursive:true});
+  const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
+  try {
+    for (const scenario of ['green','yellow','learning','fcy']) {
+      const demo=engineerDemo('ready',scenario);
+      const html=fs.readFileSync(path.join(repo,'server/static/session.html'),'utf8')
+        .replace('__SESSION_ID__',JSON.stringify(demo.data.session.id))
+        .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+        .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
+      const page=await browser.newPage({viewport:{width:1920,height:1080},reducedMotion:'reduce'});
+      await page.addInitScript(({epoch,sid,pid})=>{Date.now=()=>Date.parse(epoch);
+        localStorage.setItem(`stintara:strategy:v1:${sid}:${pid}`,'32');},{epoch,sid:demo.data.session.id,pid:demo.focus});
+      await page.route('**/*',route=>route.fulfill(route.request().url().includes('/api/') ?
+        {json:route.request().url().includes('/strategy')?demo.strategy:demo.data} : {contentType:'text/html',body:html}));
+      await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
+      await page.locator('.map-area svg').waitFor();
+      for (const [width,height] of [[1920,1080],[1920,900],[1920,800],[2560,1300]]) {
+        await page.setViewportSize({width,height});
+        const result=await page.evaluate(()=>{
+          const area=document.querySelector('.map-area'), svg=area.querySelector('svg'), box=svg.getBoundingClientRect();
+          const panel=document.querySelector('.map-panel').getBoundingClientRect();
+          const settings=document.querySelector('.resource-settings')?.getBoundingClientRect();
+          return {text:document.querySelector('.map-panel').innerText,html:document.querySelector('.map-panel').innerHTML,
+            svgW:box.width,svgH:box.height,areaScroll:area.scrollHeight>area.clientHeight+1||area.scrollWidth>area.clientWidth+1,
+            pageW:document.documentElement.scrollWidth,panelBottom:panel.bottom,panelRight:panel.right,
+            focus:document.querySelectorAll('.trk-focus').length,yellowPaths:document.querySelectorAll('.trk-yellow').length,
+            cars:document.querySelectorAll('.trk-car,.trk-focus').length,
+            settingsVisible:settings?settings.bottom<=window.innerHeight+1&&settings.top>=0:null,
+            scrollH:document.documentElement.scrollHeight};});
+        const where=`${scenario} ${width}x${height}`;
+        assert.doesNotMatch(result.html,/NaN|Infinity|undefined/,where);
+        assert.equal(result.areaScroll,false,`${where}: no scrollbars inside the map`);
+        assert.ok(result.svgW>60&&result.svgH>40,`${where}: map has usable size ${result.svgW}x${result.svgH}`);
+        assert.ok(result.pageW<=width,where);
+        assert.equal(result.focus,1,`${where}: exactly one highlighted focus driver`);
+        assert.equal(result.cars,40,where);
+        if (width>=1800&&height>=800&&height<=1100) assert.ok(result.scrollH<=height,`${where}: no page scroll`);
+        if (width>=1800&&height>=800) assert.equal(result.settingsVisible,true,`${where}: PIT SETTINGS reachable`);
+        if (scenario==='green') { assert.match(result.text,/GREEN/); assert.equal(result.yellowPaths,0); assert.doesNotMatch(result.text,/YELLOW|SAFETY|STOPPED/); }
+        if (scenario==='yellow') { assert.match(result.text,/S2 LOCAL YELLOW/); assert.ok(result.yellowPaths>=1); assert.doesNotMatch(result.text,/S1 LOCAL|S3 LOCAL/); }
+        if (scenario==='learning') { assert.match(result.text,/LEARNING TRACK · 63%/); assert.equal(result.yellowPaths,0); assert.match(result.text,/S2 LOCAL YELLOW/); assert.match(result.text,/flag only/); }
+        if (scenario==='fcy') { assert.match(result.text,/FULL COURSE YELLOW/); assert.match(result.text,/SAFETY CAR ACTIVE/); }
+        await page.screenshot({path:path.join(output,`engineer-trackmap-${scenario}-${width}x${height}.png`),fullPage:true});
+        console.log(JSON.stringify({scenario,width,height,svg:`${Math.round(result.svgW)}x${Math.round(result.svgH)}`,settingsVisible:result.settingsVisible,scrollH:result.scrollH}));
+      }
+      await page.close();
+    }
+  } finally { await browser.close(); }
+}
+
+// Real browser viewports measured on 2026-11-07 (CSS px, DPR 1) plus stress sizes. Developer tooling only.
+const REAL_VIEWPORTS = [[1920, 911, 'real 1080p display'], [2560, 1271, 'real 1440p display'],
+  [1920, 900, 'stress'], [1920, 800, 'stress'], [2560, 1300, 'stress']];
+async function verifyViewports(channel) {
+  const {chromium} = require('playwright');
+  const repo = path.resolve(__dirname,'..'), output = path.join(repo,'build');
+  fs.mkdirSync(output,{recursive:true});
+  const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
+  try {
+    for (const scenario of ['green','vertical','stored']) {
+      const demo=engineerDemo('ready',scenario);
+      const html=fs.readFileSync(path.join(repo,'server/static/session.html'),'utf8')
+        .replace('__SESSION_ID__',JSON.stringify(demo.data.session.id))
+        .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+        .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
+      const page=await browser.newPage({viewport:{width:1920,height:911},reducedMotion:'reduce'});
+      try {
+      await page.addInitScript(({epoch,sid,pid})=>{Date.now=()=>Date.parse(epoch);
+        localStorage.setItem(`stintara:strategy:v1:${sid}:${pid}`,'32');},{epoch,sid:demo.data.session.id,pid:demo.focus});
+      await page.route('**/*',route=>route.fulfill(route.request().url().includes('/api/') ?
+        {json:route.request().url().includes('/strategy')?demo.strategy:demo.data} : {contentType:'text/html',body:html}));
+      await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
+      await page.locator('.map-area svg').waitFor();
+      await page.locator('#fuel strong').first().waitFor();
+      for (const [width,height,label] of REAL_VIEWPORTS) {
+        await page.setViewportSize({width,height});
+        await page.waitForTimeout(1300);   // two polls: map labels are sized for the measured map area
+        const m=await page.evaluate(()=>{
+          const rect=sel=>{const e=document.querySelector(sel);if(!e)return null;const r=e.getBoundingClientRect();
+            return {height:r.height,width:r.width,clipped:e.scrollHeight>e.clientHeight+1,hidden:Math.max(0,e.scrollHeight-e.clientHeight)};};
+          const field=document.querySelector('#full-scroll'),f=field.getBoundingClientRect(),head=field.querySelector('thead').getBoundingClientRect();
+          const rows=[...field.querySelectorAll('tbody tr')].filter(row=>{const r=row.getBoundingClientRect();return r.top>=head.bottom-1&&r.bottom<=f.bottom+1;}).length;
+          const box=document.querySelector('.map-area svg').getBoundingClientRect();
+          const base=document.querySelector('.trk-base').getBBox();
+          const names=['.session-header','.focus-panel','.standings-panel','.map-panel','.fuel-panel','#weather-panel','#comparison-panel'];
+          const boxes=names.map(n=>[n,document.querySelector(n).getBoundingClientRect()]);
+          const overlaps=[];
+          for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++){const a=boxes[i][1],b=boxes[j][1];
+            if(a.left<b.right-1&&b.left<a.right-1&&a.top<b.bottom-1&&b.top<a.bottom-1)overlaps.push(boxes[i][0]+' x '+boxes[j][0]);}
+          const settings=document.querySelector('.resource-settings')?.getBoundingClientRect();
+          const toggle=document.querySelector('#orientation-toggle');
+          // Labels, rivals and sector ticks (Trackmap V2): measured on screen, not inferred from markup.
+          const rectOf=e=>{const r=e.getBoundingClientRect();return {l:r.left,r:r.right,t:r.top,b:r.bottom};};
+          const labels=[...document.querySelectorAll('.map-area .trk-label')].map(e=>({role:e.getAttribute('class').split(' ')[1],text:e.textContent,font:parseFloat(getComputedStyle(e).fontSize),...rectOf(e)}));
+          const dots=[...document.querySelectorAll('.map-area circle.trk-car, .map-area circle.trk-focus')].map(rectOf);
+          const path=document.querySelector('.trk-base'),ctm=path.getScreenCTM(),total=path.getTotalLength();
+          const samples=Array.from({length:600},(_,i)=>{const q=path.getPointAtLength(total*i/600);return [q.x*ctm.a+ctm.e,q.y*ctm.d+ctm.f];});
+          const ticks=[...document.querySelectorAll('.map-area .trk-sector')].map(e=>{const r=e.getBoundingClientRect(),cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;
+            return {length:Math.hypot(r.width,r.height),offPath:Math.min(...samples.map(([x,y])=>Math.hypot(x-cx,y-cy)))};});
+          return {labels,dots,ticks,docW:document.documentElement.scrollWidth,docH:document.documentElement.scrollHeight,rows,
+            h2h:rect('#comparison-panel'),weather:rect('#weather-panel'),strategy:rect('.fuel-panel'),map:rect('.map-panel'),
+            svg:{w:box.width,h:box.height},trackAspect:base.width/base.height,overlaps,
+            settingsInside:settings?settings.top>=0&&settings.bottom<=innerHeight+1:null,
+            toggle:toggle?toggle.getBoundingClientRect().right<=document.querySelector('.map-panel').getBoundingClientRect().right:null,
+            text:document.querySelector('.map-panel').innerText};});
+        const where=`${scenario} ${width}x${height} (${label})`;
+        assert.ok(m.docW<=width,`${where}: no horizontal scrolling`);
+        assert.ok(m.docH<=height,`${where}: no document scrolling (${m.docH}>${height})`);
+        assert.deepEqual(m.overlaps,[],`${where}: panels overlap`);
+        assert.ok(m.rows>=(height>=1200?14:height>=900?7:5),`${where}: Full Field shows ${m.rows} rows`);
+        assert.ok(m.h2h.hidden<=8,`${where}: Head-to-Head cut by ${m.h2h.hidden}px`);
+        assert.equal(m.weather.clipped,false,`${where}: Weather clipped`);
+        assert.equal(m.settingsInside,true,`${where}: PIT SETTINGS visible`);
+        assert.ok(m.svg.w>300&&m.svg.h>120,`${where}: map size`);
+        assert.ok(m.map.height<=Math.max(height*0.45,200),`${where}: map not oversized (${Math.round(m.map.height)}px)`);
+        if (width>=2560) assert.equal(m.strategy.clipped,false,`${where}: Strategy fully visible`);
+        if (scenario==='stored') {
+          assert.match(m.text,/STORED TRACK/); assert.match(m.text,/POSITIONS UNAVAILABLE/);
+          assert.doesNotMatch(m.text,/GREEN|RACE CONTROL/);
+        } else assert.equal(m.toggle,true,`${where}: orientation control inside the panel`);
+        assert.ok(m.trackAspect>1,`${where}: circuit is laid out horizontally (${m.trackAspect.toFixed(2)})`);
+        // Trackmap V2: two sector ticks on the centerline; focus label first; no label hides a label or the focus dot.
+        assert.equal(m.ticks.length,2,`${where}: two sector boundary ticks`);
+        for (const tick of m.ticks) assert.ok(tick.offPath<4&&tick.length>6,`${where}: tick sits on the centerline (${tick.offPath.toFixed(1)}px off)`);
+        const overlap=(a,b)=>a.l<b.r&&b.l<a.r&&a.t<b.b&&b.t<a.b;
+        if (scenario==='stored') assert.equal(m.labels.length,0,`${where}: stored track has no vehicle labels`);
+        else {
+          const focusLabel=m.labels.find(l=>l.role==='focus');
+          assert.equal(focusLabel?.text,'P3',`${where}: focus labelled P3`);
+          assert.ok(m.labels.every(l=>l.b-l.t>=9),`${where}: labels stay readable (${m.labels.map(l=>(l.b-l.t).toFixed(1))}px high)`);
+          for(let i=0;i<m.labels.length;i++)for(let j=i+1;j<m.labels.length;j++)assert.equal(overlap(m.labels[i],m.labels[j]),false,`${where}: labels ${m.labels[i].text}/${m.labels[j].text} overlap`);
+          const shrink=d=>({l:d.l+1,r:d.r-1,t:d.t+1,b:d.b-1});
+          for (const label of m.labels) assert.equal(m.dots.some(d=>overlap(label,shrink(d))),false,`${where}: label ${label.text} covers a vehicle dot`);
+          assert.ok(m.labels.every(l=>['focus','ahead','behind'].includes(l.role)),`${where}: only focus and direct rivals are labelled`);
+        }
+        console.log(JSON.stringify({where,rows:m.rows,docH:m.docH,map:Math.round(m.map.height),svg:`${Math.round(m.svg.w)}x${Math.round(m.svg.h)}`,
+          strategyHidden:Math.round(m.strategy.hidden),h2hHidden:Math.round(m.h2h.hidden),aspect:Number(m.trackAspect.toFixed(2)),
+          labels:m.labels.map(l=>`${l.text}:${Math.round(l.b-l.t)}px`).join(' '),ticks:m.ticks.length}));
+        await page.screenshot({path:path.join(output,`engineer-v02-${scenario}-${width}x${height}.png`),fullPage:true});
+      }
+      if (scenario==='vertical') {
+        await page.setViewportSize({width:1920,height:911});
+        await page.locator('#orientation-toggle').click();
+        assert.match(await page.locator('#orientation-toggle').innerText(),/ORIGINAL/);
+        const original=await page.evaluate(()=>{const b=document.querySelector('.trk-base').getBBox();return b.width/b.height;});
+        assert.ok(original<1,`ORIGINAL keeps the simulator orientation (aspect ${original.toFixed(2)})`);
+        await page.reload(); await page.locator('.map-area svg').waitFor();
+        assert.match(await page.locator('#orientation-toggle').innerText(),/ORIGINAL/,'per-track choice persists across reloads');
+        await page.locator('#orientation-toggle').click();
+      }
+      } catch (error) {
+        // A failure on the first viewport must still leave a useful artifact for GitHub Actions.
+        await page.screenshot({path:path.join(output,`engineer-v02-failure-${scenario}.png`),fullPage:true}).catch(() => {});
+        throw error;
+      } finally {
+        await page.close();
+      }
+    }
+  } finally { await browser.close(); }
+}
+
 module.exports={engineerDemo};
 if(require.main===module) {
-  if(process.argv.includes('--screenshot')) {
+  if(process.argv.includes('--viewports')) {
+    const index=process.argv.indexOf('--browser');
+    verifyViewports(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
+  } else if(process.argv.includes('--screenshot') && process.argv.includes('--track-scenarios')) {
+    const index=process.argv.indexOf('--browser');
+    screenshotTrackScenarios(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
+  } else if(process.argv.includes('--screenshot') && process.argv.includes('--ve-collecting')) {
+    const index=process.argv.indexOf('--browser');
+    screenshotVeCollecting(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
+  } else if(process.argv.includes('--screenshot')) {
     const index=process.argv.indexOf('--browser');
     screenshot(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
   } else if(process.argv.includes('--json')) console.log(JSON.stringify(engineerDemo(),null,2));

@@ -77,7 +77,30 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_seen_at timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Session limits (#20), written only after a SessionInfo is bracketed by frames of this very session.
+-- session_end_et_seconds: end of the session on the provider's session clock (same clock as the scoring
+-- session_time), NOT a duration. session_duration_seconds: configured duration, only when derived reliably.
+-- Legacy session_minutes is no longer written; its old values are not trustworthy and are never read.
+-- session_laps_confirmed: provenance of session_laps. A lap limit counts only when it was bound by session_meta
+-- (bracketed, repeated). Rows written before that rule keep their value untouched but default to false, so an
+-- old, unverified value (for example a placeholder) is treated as unknown and never as a race length.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_laps_confirmed boolean NOT NULL DEFAULT false;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_end_et_seconds double precision
+    CHECK (session_end_et_seconds IS NULL OR session_end_et_seconds > 0);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_duration_seconds double precision
+    CHECK (session_duration_seconds IS NULL OR session_duration_seconds > 0);
+-- Persisted Practice -> Qualifying -> Race order (#43): set only from a directly observed same-agent
+-- transition, never inferred afterwards. One successor per session; races/events carry the shared context.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id uuid
+    REFERENCES sessions(id) ON DELETE SET NULL CHECK (previous_session_id IS NULL OR previous_session_id <> id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_previous ON sessions(previous_session_id)
+    WHERE previous_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_sessions_race ON sessions(race_id) WHERE race_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_sessions_live ON sessions(status, started_at DESC);
+-- History browser (newest start first) and Home "recent results" (completed races by completion time).
+CREATE INDEX IF NOT EXISTS ix_sessions_history ON sessions(started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ix_sessions_recent_races ON sessions(ended_at DESC, id DESC)
+    WHERE status='complete' AND session_type='Race' AND ended_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS session_observations (
     id uuid PRIMARY KEY,
@@ -187,6 +210,7 @@ ALTER TABLE session_observations ADD COLUMN IF NOT EXISTS last_seen_at timestamp
 ALTER TABLE session_observations ADD COLUMN IF NOT EXISTS last_session_time double precision;
 ALTER TABLE laps ADD COLUMN IF NOT EXISTS tyre_snapshot jsonb;
 ALTER TABLE laps ADD COLUMN IF NOT EXISTS damage jsonb;
+ALTER TABLE laps ADD COLUMN IF NOT EXISTS energy_remaining_fraction double precision;
 CREATE INDEX IF NOT EXISTS ix_observations_agent ON session_observations(agent_id);
 CREATE INDEX IF NOT EXISTS ix_observations_active ON session_observations(last_seen_at) WHERE ended_at IS NULL;
 ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_temp_inner_fl_c double precision;
@@ -205,3 +229,22 @@ ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_temp_inner_rr_c doubl
 ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_temp_mid_rr_c double precision;
 ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_temp_outer_rr_c double precision;
 ALTER TABLE strategy_samples ADD COLUMN IF NOT EXISTS tyre_brake_temp_rr_c double precision;
+
+-- Learned track centerlines (simulator-neutral). Only fully accepted, closed geometry is stored; raw simulator
+-- coordinates are kept unrotated. Identity is (provider, track name, rounded track length) and never fuzzy.
+-- No vehicle positions and no race-control history are persisted here.
+CREATE TABLE IF NOT EXISTS track_geometries (
+    id uuid PRIMARY KEY,
+    provider text NOT NULL,
+    track_name text NOT NULL,
+    track_length_key integer NOT NULL,
+    schema_version integer NOT NULL,
+    length_m double precision NOT NULL,
+    points jsonb NOT NULL,
+    distances jsonb NOT NULL,
+    sector_observations jsonb,
+    sector_boundaries_m jsonb,
+    learned_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(provider, track_name, track_length_key)
+);

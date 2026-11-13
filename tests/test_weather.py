@@ -106,13 +106,14 @@ def test_invalid_forecast_container(forecast):
 
 
 async def test_api_weather_latest_snapshot_shared_and_stale_read_only(db):
-    agent, sid, _ = await scoring_session(db, "synthetic-weather")
+    agent, sid, frame = await scoring_session(db, "synthetic-weather")
     raw = synthetic_weather()
     # Use the established synthetic session's track so SessionInfo updates that session.
     track = main.runtime[str(agent["id"])]["persisted_track"]
     await main.handle_message(agent, "lmu", "session_info", {"track_name": track, "weather": raw})
     raw["air_temp"] = 25
     await main.handle_message(agent, "lmu", "session_info", {"track_name": track, "weather": raw})
+    await main.handle_message(agent, "lmu", "scoring", frame)  # persisted on the next resolved scoring frame
     expected = normalize_weather(raw, "lmu")
     async with db.acquire() as conn:
         before = await conn.fetchval("SELECT weather FROM sessions WHERE id=$1", sid)

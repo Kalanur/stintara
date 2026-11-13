@@ -4,8 +4,39 @@ import math
 MESSAGE_TYPES = {
     "ConnectionStatus": "connection", "SessionInfo": "session_info",
     "ScoringUpdate": "scoring", "AllDriversUpdate": "lap_snapshots",
-    "TelemetryUpdate": "telemetry",
+    "TelemetryUpdate": "telemetry", "VehicleStatusUpdate": "race_control",
 }
+
+# Evidence (two championship captures): sector flag 11 = no flag; 1 = local yellow (short, per-sector,
+# only during the green phase). 2 and 3 occurred exclusively once the session was over and are NOT
+# interpreted. Game phases 0, 3, 5, 8 were observed; 6 and 7 never occurred in the captures and are
+# mapped from the documented rFactor 2 phase enum only. Every other raw value stays "unknown".
+SECTOR_FLAG_STATES = {11: "clear", 1: "local_yellow"}
+GAME_PHASES = {0: "pre_session", 3: "formation", 5: "green", 6: "full_course_yellow",
+               7: "session_stopped", 8: "session_over"}
+PLAYER_SECTORS = {1: 1, 2: 2, 0: 3}  # provider sector 0 is the last sector (observed 1 -> 2 -> 0 -> 1)
+
+
+def integer(value):
+    return value if type(value) is int else None
+
+
+def race_control(payload):
+    flags = payload.get("sector_flags")
+    # Anything but exactly three entries is a malformed structure: no sector gets a meaning.
+    raw = [integer(v) for v in flags] if isinstance(flags, list) and len(flags) == 3 else [None] * 3
+    phase = integer(payload.get("game_phase"))
+    safety = payload.get("safety_car_active")
+    return {
+        "phase": GAME_PHASES.get(phase, "unknown"),
+        "sector_flags": [SECTOR_FLAG_STATES.get(v, "unknown") for v in raw],
+        "safety_car_active": safety if type(safety) is bool else None,
+        "player_sector": PLAYER_SECTORS.get(integer(payload.get("player_sector"))),
+        # Raw provider values are diagnostic only; the UI never shows them as state.
+        "diagnostics": {"phase_raw": phase, "sector_flags_raw": raw,
+                        "yellow_flag_state_raw": integer(payload.get("yellow_flag_state")),
+                        "player_flag_raw": integer(payload.get("player_flag"))},
+    }
 
 
 def energy_fraction(value):
@@ -51,6 +82,8 @@ def normalize(message):
     if kind is None:
         return None
     payload = clean({k: v for k, v in message.items() if k != "type"})
+    if kind == "race_control":
+        return kind, race_control(payload)
     if kind == "session_info":
         # Pitwall can emit empty metadata during session teardown. Ignore the
         # whole snapshot so the server retains its last valid session metadata.
@@ -61,6 +94,10 @@ def normalize(message):
         for vehicle in payload.get("vehicles", []):
             # Pitwall uses mID here: keep it as id, never as a race number.
             vehicle["car_number"] = None
+            for key in ("lap_dist", "pos_x", "pos_y", "pos_z"):
+                value = vehicle.get(key)
+                vehicle[key] = value if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                                         and math.isfinite(value)) else None
             vehicle["energy_current_fraction"] = energy_fraction(vehicle.pop("virtual_energy", None))
     elif kind == "telemetry":
         available = payload.pop("ve_available", None)

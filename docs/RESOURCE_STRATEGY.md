@@ -58,7 +58,31 @@ but cannot independently prove vehicle capability. This remains a provider
 limitation, particularly at zero/depleted readings. No vehicle-name/class inference
 or ElectronicsUpdate support is added.
 
-Four nullable columns are added idempotently to existing `strategy_samples`:
+**Observed in real captures (2026-11-01 championship, inspector reports).**
+`TelemetryUpdate.ve_history` was null in every record while `ve_available` was true.
+Scoring `virtual_energy` for the player vehicle was valid and, at lap rollovers, matched
+`ElectronicsUpdate.virtual_energy` within about 0.0003 (for example 0.1670 → 0.1330 →
+0.0986 on consecutive laps). The provider history is therefore treated only as a fallback.
+
+**Lap-checkpoint VE consumption (primary source).** Each persisted lap checkpoint stores
+`laps.energy_remaining_fraction`: the scoring VE of that vehicle at the moment the lap
+snapshot is stored, or NULL when scoring is older than 5 seconds or the value is not a
+finite number in [0,1]. Consumption uses the same exclusions as fuel: consecutive laps,
+unchanged pit-stop count, no pit context on either checkpoint and a strictly positive
+decrease; last five transitions, minimum three, median. The checkpoint is taken when the
+snapshot arrives, not at the start/finish line, so it carries the same small timing
+offset as fuel checkpoints. Existing rows keep NULL and simply yield "collecting".
+If checkpoints are insufficient the older `energy_history` estimate is used when present.
+`diagnostics.energy` reports the source (`lap_checkpoints`, `provider_history` or null).
+
+**Resource data states.** Every resource carries `state`: `no_current_value` (unknown or
+invalid level), `stale` (strategy sample older than 15 s), `collecting` (live value, fewer
+than three valid transitions) or `ready`. The Engineer page shows live VE whenever it is
+fresh, labels unknown values `UNKNOWN`, marks consumption as unknown while collecting and
+shows no range, VE target, Fuel Ratio or pit recommendation until every resource required by
+the capability is ready. A VE-capable car never falls back to a fuel-only recommendation.
+
+Four nullable columns are added idempotently to existing `strategy_samples` (and one, `laps.energy_remaining_fraction`, to `laps`):
 `energy_current_fraction` (double precision), `energy_available` (boolean),
 `energy_kind` (text), `energy_history` (JSONB). Each accepted 1 Hz sample stores
 the same observer's current player scoring level plus normalized telemetry
@@ -133,7 +157,7 @@ renders the actual template at 1920×1080 and 900×900 into ignored
 `build/engineer-resource-strategy-1920.png` and `build/engineer-resource-strategy-900.png`.
 The fixture mocks API responses; it is not an end-to-end ingestion replay.
 
-Remaining uncertainties: real LMU VE-history timing and capability signals require
+Remaining uncertainties: lap-checkpoint VE consumption is verified only against synthetic tests and capture reports, not yet in a live container run; real LMU VE-history timing and capability signals require
 field validation; current in-game Fuel Ratio is unavailable through this WebSocket
 path; timed finish is a conservative estimate without within-lap progress; other
 simulator mappings remain future work. Tyre/weather/traffic strategy, automation,
