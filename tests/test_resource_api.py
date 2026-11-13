@@ -17,7 +17,7 @@ async def prepared(db, available=True):
     await main.handle_message(agent, 'lmu', 'scoring', scoring)
     await main.handle_message(agent, 'lmu', 'session_info', dict(track_name='Synthetic Circuit', session_laps=38))
     async with db.acquire() as conn:  # limits are captured at INSERT and immutable; this fixture sets the lap limit
-        await conn.execute('UPDATE sessions SET session_laps=38 WHERE id=$1', sid)
+        await conn.execute('UPDATE sessions SET session_laps=38,session_laps_confirmed=true WHERE id=$1', sid)
     kind, payload = normalize(dict(type='TelemetryUpdate', current_et=100, fuel=42, fuel_capacity=100,
                                    ve_available=available, ve_history=[1, .898, .796, .694, .592, .49, .4]))
     await main.handle_message(agent, 'lmu', kind, Telemetry.model_validate(payload).model_dump())
@@ -98,7 +98,7 @@ async def test_resource_stale_session_clock_and_samples(db):
 async def test_resource_timed_projection_api(db):
     _, sid, pid = await prepared(db)
     async with db.acquire() as conn:
-        await conn.execute('UPDATE sessions SET session_minutes=20 WHERE id=$1', sid)
+        await conn.execute('UPDATE sessions SET session_end_et_seconds=1200 WHERE id=$1', sid)
     p = await main.api_participant_strategy(sid, pid, 32)
     assert p['finish_projection'] == dict(kind='timed_estimate', finish_lap=40, pace_seconds=100)
 
@@ -106,7 +106,7 @@ async def test_resource_timed_projection_api(db):
 async def test_timed_pace_excludes_only_identified_pit_context(db):
     _, sid, pid = await prepared(db)
     async with db.acquire() as conn:
-        await conn.execute('UPDATE sessions SET session_minutes=20 WHERE id=$1', sid)
+        await conn.execute('UPDATE sessions SET session_end_et_seconds=1200 WHERE id=$1', sid)
         await conn.execute('DELETE FROM laps WHERE session_participant_id=$1', pid)
         for lap, seconds, in_pits in [(20, 90, False), (21, 100, False), (22, 110, False), (23, 400, True)]:
             await conn.execute('''INSERT INTO laps(id,session_participant_id,lap_number,lap_time,in_pits)

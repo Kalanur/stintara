@@ -19,7 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ValidationError
 
-from . import history, track_repo
+from . import history, session_meta, track_repo
 from .build import APP_VERSION, build_info, inject_build_label
 from .chain import CHAIN_COLUMNS, CHAIN_JOINS, pop_chain
 from .domain import sample_due
@@ -446,7 +446,7 @@ async def api_session_live(session_id: UUID) -> dict[str, Any]:
     async with pool.acquire() as conn:
         session = await conn.fetchrow(f"""SELECT s.id, s.track_name, s.session_type,
             s.simulator_provider, s.started_at, s.last_seen_at, s.status,
-            s.session_laps, s.session_minutes, s.weather, s.track_length_m, ({SESSION_LIVE_SQL}) AS live,
+            s.session_laps, s.session_laps_confirmed, s.session_end_et_seconds, s.session_duration_seconds, s.weather, s.track_length_m, ({SESSION_LIVE_SQL}) AS live,
             {CHAIN_COLUMNS}
             FROM sessions s {CHAIN_JOINS} WHERE s.id=$1""", session_id)
         if not session:
@@ -542,7 +542,7 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
     # The GET is entirely read-only, including local Engineer overrides.
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         context = await conn.fetchrow(f"""SELECT p.total_laps,p.finish_status,p.local_vehicle_id,
-            s.session_type,s.session_laps,s.session_minutes,s.simulator_provider,({SESSION_LIVE_SQL}) AS live
+            s.session_type,s.session_laps,s.session_laps_confirmed,s.session_end_et_seconds,s.session_duration_seconds,s.simulator_provider,({SESSION_LIVE_SQL}) AS live
             FROM sessions s JOIN session_participants p ON p.session_id=s.id
             WHERE s.id=$1 AND p.id=$2""", session_id, participant_id)
         if not context:
@@ -671,8 +671,10 @@ async def authenticate_agent(token: str) -> asyncpg.Record | None:
         )
 
 
-async def current_or_create_session(agent, payload):
+async def current_or_create_session(agent, payload, *, changed=False, source_epoch=None):
     state = runtime.setdefault(str(agent["id"]), {})
+    # Taken out of the runtime state first: whatever happens during resolution, the evidence is used at most once.
+    candidate = state.pop("meta_candidate", None)
     resolution_state = state.copy()
     known = {}
     async with pool.acquire() as conn, conn.transaction():
@@ -681,15 +683,16 @@ async def current_or_create_session(agent, payload):
             known = await upsert_participants_on_connection(conn, agent, session_id, payload, state["provider"])
             if state.get("session_meta_pending"):
                 # SessionInfo carries no session identity, so a scoring frame resolving to A does not prove the
-                # preceding SessionInfo describes A. session_minutes/session_laps are therefore captured at INSERT
-                # only and never updated afterwards (not even unknown -> known). Weather is mutable; track length
-                # is only filled in while unknown.
+                # preceding SessionInfo describes A. Session limits (end clock, duration, laps) are therefore never
+                # taken from here: session_meta commits them only after the bracketing check below. Weather is
+                # mutable; track length is only filled in while unknown.
                 await conn.execute("""UPDATE sessions SET
                     track_length_m=CASE WHEN track_length_m IS NULL OR track_length_m<=0 THEN $2 ELSE track_length_m END,
                     weather=$3::jsonb WHERE id=$1 AND status='live'""",
                     session_id, state.get("track_length_m"), state.get("weather_json", "{}"))
     if session_id:
         state.pop("session_meta_pending", None)
+        await bind_session_meta(state, candidate, session_id, payload, changed, source_epoch)
     for key in ("pending_convergence", "convergence_invalidated", "post_finish_idle"):
         state.pop(key, None)
         if key in resolution_state:
@@ -703,6 +706,25 @@ async def current_or_create_session(agent, payload):
         remember_participants(state, session_id, known)
     state["session_type"] = payload["session_type"]
     return session_id
+
+
+async def bind_session_meta(state, candidate, session_id, payload, changed, source_epoch):
+    """Commit SessionInfo limits only when the candidate is bracketed by frames of this very session (#20)."""
+    accepted = session_meta.confirm(
+        state, candidate, provider=state["provider"], resolved_session_id=session_id, scoring=payload, changed=changed,
+        source_epoch=source_epoch, now=time.monotonic())
+    if not accepted:
+        return
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow("""SELECT session_end_et_seconds,session_duration_seconds,session_laps,
+            session_laps_confirmed FROM sessions WHERE id=$1 AND status='live' FOR UPDATE""", session_id)
+        if not row:
+            return
+        end, duration, laps, confirmed = session_meta.merge(row, accepted)
+        if (end, duration, laps, confirmed) != (row["session_end_et_seconds"], row["session_duration_seconds"],
+                                                row["session_laps"], row["session_laps_confirmed"]):
+            await conn.execute("""UPDATE sessions SET session_end_et_seconds=$2,session_duration_seconds=$3,
+                session_laps=$4,session_laps_confirmed=$5 WHERE id=$1""", session_id, end, duration, laps, confirmed)
 
 
 def remember_participants(state, session_id, known):
@@ -959,6 +981,7 @@ async def handle_message(agent, provider, kind, payload, source_epoch=None):
         # resolved the target session (current_or_create_session): a SessionInfo may already describe the next,
         # still unconfirmed session while the live row belongs to the previous one (#46).
         state["session_meta_pending"] = True
+        session_meta.observe(state, provider, payload, source_epoch, time.monotonic())
         return
     if state.get("game_connected") is False:
         return
@@ -977,7 +1000,7 @@ async def handle_message(agent, provider, kind, payload, source_epoch=None):
                    or (previous.get("session_time") is not None and payload.get("session_time") is not None
                        and payload["session_time"] < previous["session_time"] - 2))
         if state.get("pending_convergence") or state.get("session_meta_pending") or changed or sample_due(state.get("last_persisted_scoring"), now):
-            session_id = await current_or_create_session(agent, payload)
+            session_id = await current_or_create_session(agent, payload, changed=changed, source_epoch=source_epoch)
             if not session_id:
                 return
             if session_id != session_before:

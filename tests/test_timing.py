@@ -78,10 +78,15 @@ def test_session_clock_newest_fresh_same_session_and_configuration():
     states = [state(sid, 98, 3), state(sid, 99, 4), state(uuid7(), 100, 5), state(sid, 101, 6)]
     scoring = newest_scoring(sid, True, states, 100)
     assert scoring["session_time"] == 4
-    fixed = dict(session_type="Race", session_laps=20, session_minutes=0)
-    assert session_timing(fixed, scoring) == dict(elapsed_seconds=4, configured_laps=20, configured_minutes=None)
-    assert session_timing(dict(fixed, session_minutes=30), scoring)["configured_laps"] is None
-    assert session_timing(dict(fixed, session_minutes=30), scoring)["configured_minutes"] == 30
+    fixed = dict(session_type="Race", session_laps=20, session_laps_confirmed=True, session_minutes=0)
+    assert session_timing(fixed, scoring) == dict(elapsed_seconds=4, configured_laps=20, end_et_seconds=None,
+                                                  remaining_seconds=None, configured_duration_seconds=None)
+    timed = session_timing(dict(fixed, session_end_et_seconds=1934, session_duration_seconds=1800), scoring)
+    assert timed["configured_laps"] is None  # a known end takes precedence over a lap value
+    assert (timed["end_et_seconds"], timed["remaining_seconds"], timed["configured_duration_seconds"]) == (1934, 1930, 1800)
+    # The end is not a duration: without a derived duration it stays unknown.
+    assert session_timing(dict(fixed, session_end_et_seconds=1934), scoring)["configured_duration_seconds"] is None
+    assert session_timing(dict(fixed, session_end_et_seconds=3), scoring)["remaining_seconds"] == 0  # clamped
     for live, at in ((False, 99), (True, 85), (True, 80)):
         result = newest_scoring(sid, live, [state(sid, at, 10)], 100)
         assert session_timing(fixed, result)["elapsed_seconds"] is None
@@ -98,7 +103,7 @@ async def test_api_sectors_latest_lap_gap_clock_and_raw_data_unchanged(db):
     scoring["vehicles"][1]["total_laps"] = 1
     async with db.acquire() as conn:
         pid = await conn.fetchval("SELECT id FROM session_participants WHERE session_id=$1 AND local_vehicle_id=7", sid)
-        await conn.execute("UPDATE sessions SET session_laps=20,session_minutes=0 WHERE id=$1", sid)
+        await conn.execute("UPDATE sessions SET session_laps=20,session_laps_confirmed=true WHERE id=$1", sid)
         for lap, s1, s2, s3 in ((2, 31, 32, None), (1, 25, 26, 27)):
             await conn.execute("""INSERT INTO laps(id,session_participant_id,lap_number,sector1,sector2,sector3)
                 VALUES($1,$2,$3,$4,$5,$6)""", uuid7(), pid, lap, s1, s2, s3)
@@ -110,7 +115,8 @@ async def test_api_sectors_latest_lap_gap_clock_and_raw_data_unchanged(db):
     assert other["sector1"] is None and other["sector_lap_number"] is None
     assert other["interval"] == 3.5
     assert p["total_laps"] == 1  # Provider completed laps, not +1 or snapshot substitution.
-    assert data["timing"] == dict(elapsed_seconds=100, configured_laps=20, configured_minutes=None)
+    assert data["timing"] == dict(elapsed_seconds=100, configured_laps=20, end_et_seconds=None,
+                                  remaining_seconds=None, configured_duration_seconds=None)
     async with db.acquire() as conn:
         assert before == await conn.fetch("SELECT * FROM laps ORDER BY id")
     main.runtime[str(agent["id"])]["last_scoring_at"] -= 16

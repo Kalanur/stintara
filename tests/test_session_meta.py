@@ -1,0 +1,686 @@
+"""#20: SessionInfo limits are bound to a session only when bracketed, repeated and (for an end) green.
+
+Synthetic data only. The Qualifying -> Race sequence mirrors the order and values observed in a real LMU
+capture (end clock 630 s for the 10 minute qualifying, pre-race countdown 1.07 / 0 / 2.23 minutes, then
+32.23 minutes at green for a 30 minute race), without any participant data.
+"""
+import pytest
+
+from server.app import session_meta
+from server.app.uuid7 import uuid7
+
+TRACK = "Synthetic Circuit"
+
+
+class Stream:
+    """One agent stream as handle_message sees it: SessionInfo candidates, race control and resolved frames."""
+
+    def __init__(self, provider="lmu", epoch=None):
+        self.state = {"track_name": TRACK}
+        self.provider, self.epoch, self.now = provider, epoch, 100.0
+        self.accepted = []
+
+    def phase(self, phase):
+        self.now += 0.01  # a race-control message is a distinct observation, later than the frame before it
+        self.state["race_control"], self.state["race_control_at"] = {"phase": phase}, self.now
+
+    def info(self, minutes=None, laps=0, epoch="same", track=TRACK):
+        payload = {"track_name": track, "session_minutes": minutes, "session_laps": laps}
+        session_meta.observe(self.state, self.provider, payload, self.epoch if epoch == "same" else epoch, self.now)
+
+    def frame(self, session_id, clock, kind="Race", changed=False, epoch="same", dt=0.1):
+        """The scoring frame that resolved to `session_id` (None = resolution found no session)."""
+        self.now += dt
+        resolved = self.epoch if epoch == "same" else epoch
+        accepted = None
+        candidate = self.state.pop("meta_candidate", None)  # current_or_create_session takes it out first
+        if session_id is not None:
+            accepted = session_meta.confirm(
+                self.state, candidate, provider=self.provider, resolved_session_id=session_id,
+                scoring=dict(session_time=clock, session_type=kind), changed=changed, source_epoch=resolved, now=self.now)
+        self.state["session_id"] = session_id
+        self.accepted.append(accepted)
+        return accepted
+
+    def pair(self, session_id, clock, minutes=None, laps=0, **frame):
+        self.info(minutes, laps)
+        return self.frame(session_id, clock, **frame)
+
+
+def bound_race(stream, race, minutes=32.2333333, clock=300.0):
+    stream.phase("green")
+    return [stream.pair(race, clock + i, minutes) for i in range(3)]
+
+
+def test_single_claim_is_never_accepted_and_two_bracketed_claims_are():
+    s, sid = Stream(), uuid7()
+    s.phase("green")
+    assert s.pair(sid, 300, 10.5, kind="Qualifying") is None  # cold start: no previous resolved session
+    assert s.pair(sid, 301, 10.5, kind="Qualifying") is None  # first bracketed claim
+    assert s.pair(sid, 302, 10.5, kind="Qualifying") == {"end_et": pytest.approx(630.0)}
+
+
+def test_qualifying_to_race_never_hands_the_stale_end_to_the_race():
+    """The observed fault: Race scoring arrives 0.8 s before the first Race SessionInfo; the old value was 10.5."""
+    s, quali, race = Stream(), uuid7(), uuid7()
+    s.phase("green")
+    for i in range(3):
+        s.pair(quali, 300 + i, 10.5, kind="Qualifying")
+    assert s.accepted[-1] == {"end_et": pytest.approx(630.0)}
+    s.info(10.5)  # stale Qualifying value, still current when the Race frame arrives
+    assert s.frame(race, 0.0, changed=True) is None  # resolves to another session than the candidate
+    assert s.pair(race, 2.8, 1.0666667) is None  # first claim for the race: nothing bound yet
+    assert all(a is None or a.get("end_et") != pytest.approx(630.0) for a in s.accepted[3:])
+
+
+def test_early_next_session_info_before_the_switch_is_dropped():
+    s, a, b = Stream(), uuid7(), uuid7()
+    s.phase("green")
+    for i in range(3):
+        s.pair(a, 300 + i, 82.6, kind="Race")
+    s.info(5 / 60)  # SessionInfo of the next session arrives before its first scoring frame
+    assert s.frame(b, 0.0, kind="Race", changed=False) is None
+    assert s.state.get("meta_seen") is None  # a dropped candidate also forgets earlier repetitions
+
+
+def test_delayed_session_info_is_bound_only_after_it_is_bracketed_twice():
+    s, race = Stream(), uuid7()
+    s.phase("green")
+    s.frame(race, 135.0)  # scoring first, SessionInfo only afterwards
+    assert s.pair(race, 135.2, 32.2333333) is None
+    assert s.pair(race, 136.2, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_pre_race_countdown_is_never_an_end_and_derives_the_30_minute_duration():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("pre_session")
+    for clock, minutes in ((2.8, 1.0666667), (67.0, 0.0), (134.4, 2.2333333)):
+        for _ in range(2):
+            assert s.pair(race, clock, minutes) is None  # countdown values are not accepted, however often seen
+    s.phase("green")
+    assert s.pair(race, 135.6, 32.2333333) is None
+    accepted = s.pair(race, 136.6, 32.2333333)
+    assert accepted == {"end_et": pytest.approx(1934.0), "duration": pytest.approx(1800.0)}
+
+
+def test_pre_race_countdown_derives_the_80_minute_duration_of_the_second_reference_race():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 156.0, 2.6)
+    s.phase("green")
+    s.pair(race, 157.0, 82.6)
+    accepted = s.pair(race, 158.0, 82.6)
+    assert accepted == {"end_et": pytest.approx(4956.0), "duration": pytest.approx(4800.0)}
+
+
+def test_duration_stays_unknown_without_a_consistent_pre_race_reference():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("pre_session")
+    s.pair(race, 67.0, 0.0)  # last observed countdown does not coincide with the clock
+    s.pair(race, 67.1, 2.5)  # 150 s end at clock 67: more than 5 s away
+    s.phase("green")
+    s.pair(race, 135.0, 32.2333333)
+    accepted = s.pair(race, 136.0, 32.2333333)
+    assert accepted == {"end_et": pytest.approx(1934.0)}  # the end is known, the duration is not guessed
+
+
+@pytest.mark.parametrize("wait", [5.0, 60.0])  # within the expiry (clock mismatch) and beyond it (expired)
+def test_stale_pre_race_reference_keeps_the_end_but_not_the_duration(wait):
+    """Codex P2 (#65): reference at clock 64, race green at 134, end 1934 must not yield 1870 s."""
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 64.0, 64 / 60)  # consistent with its own clock, but not the clock of the green transition
+    s.now += wait
+    s.phase("formation")
+    s.frame(race, 130.0)
+    s.phase("green")
+    s.pair(race, 134.0, 32.2333333)
+    assert s.pair(race, 135.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+    assert session_meta.merge(row(), s.accepted[-1]) == (pytest.approx(1934.0), None, None, False)
+
+
+def test_reference_from_another_session_or_epoch_is_not_used():
+    for kind in ("session", "epoch"):
+        s, race, other = Stream(epoch=3), uuid7(), uuid7()
+        s.frame(race, 0.0)
+        s.phase("formation")
+        s.pair(race, 134.0, 134 / 60)
+        if kind == "session":
+            s.frame(other, 134.2)  # the stream resolved to another session in between
+            race = other
+        else:
+            s.epoch = 4  # Pitwall reconnected
+            s.frame(race, 134.2)
+        s.phase("green")
+        s.pair(race, 135.0, 32.2333333)
+        assert s.pair(race, 136.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}, kind
+
+
+def test_changed_frame_discards_the_reference():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 134.0, 134 / 60)
+    s.frame(race, 3.0, changed=True)
+    s.phase("green")
+    s.pair(race, 135.0, 32.2333333)
+    assert s.pair(race, 136.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_reference_expires_before_a_late_green():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 134.0, 134 / 60)
+    s.now += session_meta.PRE_MAX_AGE_SECONDS + 5
+    s.phase("green")
+    s.frame(race, 140.0)
+    assert s.pair(race, 141.0, 32.2333333) is None
+    assert s.pair(race, 142.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}  # clock 134 vs green 140: no duration
+
+
+def test_missing_phase_before_green_means_no_observed_transition():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 134.0, 134 / 60)
+    s.now += 2
+    s.state.pop("race_control")  # race control silent: the transition itself was not observed
+    s.frame(race, 135.5)
+    s.phase("green")
+    s.pair(race, 136.0, 32.2333333)
+    assert s.pair(race, 137.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_green_clock_is_taken_once_at_the_first_green_frame():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 134.0, 134 / 60)
+    s.phase("green")
+    s.frame(race, 135.0)
+    green = s.state["meta_pre"]["green_clock"]
+    s.frame(race, 200.0)
+    assert s.state["meta_pre"]["green_clock"] == green == 135.0
+
+
+def test_last_pre_race_candidate_bracketed_by_the_first_green_frame_keeps_the_transition():
+    """Codex P2 (#65): the reference is consumed by the very frame that observes the green transition."""
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)  # last pre-race frame at 133
+    s.info(134 / 60)  # reference end 134, captured while the phase was still pre-race
+    s.phase("green")
+    s.frame(race, 134.5)  # first green frame brackets it
+    pre = s.state["meta_pre"]
+    assert (pre["end_et"], pre["green_clock"]) == (pytest.approx(134.0), 134.5)
+    s.pair(race, 135.5, 32.2333333)
+    accepted = s.pair(race, 136.5, 32.2333333)
+    assert accepted == {"end_et": pytest.approx(1934.0), "duration": pytest.approx(1800.0)}
+    assert session_meta.merge(row(), accepted)[:3] == (pytest.approx(1934.0), pytest.approx(1800.0), None)
+
+
+def test_track_green_works_without_any_candidate():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)
+    s.phase("green")
+    assert s.frame(race, 134.5) is None and "meta_candidate" not in s.state  # no SessionInfo at all
+    assert s.state["meta_pre"]["green_clock"] == 134.5
+
+
+@pytest.mark.parametrize("fault", ["epoch", "session", "track"])
+def test_unbracketed_candidate_neither_replaces_nor_extends_the_reference(fault):
+    s, race, other = Stream(epoch=3), uuid7(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)
+    before = dict(s.state["meta_pre"])
+    s.info(300 / 60, epoch=4 if fault == "epoch" else "same", track="Other Circuit" if fault == "track" else TRACK)
+    s.phase("green")
+    s.frame(other if fault == "session" else race, 134.5)
+    pre = s.state.get("meta_pre")
+    if fault == "session":
+        assert pre is None  # a reference never survives a session change
+    else:
+        assert pre["end_et"] == before["end_et"] and pre["green_clock"] == 134.5  # the foreign candidate is no reference
+
+
+def test_observed_transition_is_not_overwritten_by_a_later_pre_race_candidate():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)
+    s.phase("green")
+    s.frame(race, 134.5)
+    green = s.state["meta_pre"]["green_clock"]
+    s.info(500 / 60)
+    s.state["meta_candidate"]["phase"] = "formation"  # a stale candidate that still carries a pre-race phase
+    s.frame(race, 135.0)
+    assert s.state["meta_pre"]["green_clock"] == green and s.state["meta_pre"]["end_et"] == pytest.approx(134.0)
+
+
+def test_joining_a_running_race_knows_the_end_but_not_the_duration():
+    s, race = Stream(), uuid7()
+    assert all(a is None or "duration" not in a for a in bound_race(s, race))
+    assert s.accepted[-1] == {"end_et": pytest.approx(1934.0)}
+
+
+def test_practice_and_qualifying_never_derive_a_duration():
+    s, quali = Stream(), uuid7()
+    s.frame(quali, 0.0, kind="Qualifying")
+    s.phase("pre_session")
+    s.pair(quali, 30.0, 0.5, kind="Qualifying")
+    s.phase("green")
+    s.pair(quali, 31.0, 10.5, kind="Qualifying")
+    accepted = s.pair(quali, 32.0, 10.5, kind="Qualifying")
+    assert accepted == {"end_et": pytest.approx(630.0)}
+
+
+@pytest.mark.parametrize("phase", [None, "pre_session", "formation", "session_over", "session_stopped", "unknown"])
+def test_end_is_unknown_unless_the_phase_is_fresh_and_green(phase):
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    if phase:
+        s.phase(phase)
+    assert [s.pair(race, 300 + i, 32.2333333) for i in range(4)] == [None] * 4
+
+
+def test_stale_race_control_is_not_a_green_phase():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.now += 60  # no race control for a minute
+    assert [s.pair(race, 300 + i, 32.2333333) for i in range(4)] == [None] * 4
+
+
+def test_full_course_yellow_still_counts_as_a_running_session():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("full_course_yellow")
+    s.pair(race, 300, 32.2333333)
+    assert s.pair(race, 301, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_an_end_that_the_clock_has_already_passed_is_rejected():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    assert [s.pair(race, 700, 10.5) for _ in range(4)] == [None] * 4  # 630 s end at clock 700: stale Qualifying
+
+
+def test_claim_changes_reset_the_repetition_count():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    assert s.pair(race, 300, 32.0) is None
+    assert s.pair(race, 301, 40.0) is None  # a different claim: count restarts
+    assert s.pair(race, 302, 40.0) == {"end_et": pytest.approx(2400.0)}
+
+
+def test_candidate_expires_when_no_frame_follows_in_time():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.pair(race, 300, 32.0)
+    s.info(32.0)
+    assert s.frame(race, 301, dt=session_meta.BIND_MAX_AGE_SECONDS + 1) is None
+
+
+def test_epoch_change_between_info_and_frame_drops_the_candidate():
+    s, race = Stream(epoch=7), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.pair(race, 300, 32.0)
+    s.info(32.0)
+    assert s.frame(race, 301, epoch=8) is None  # Pitwall reconnected between the two messages
+    assert s.pair(race, 302, 32.0) is None  # and the repetition count starts over
+
+
+def test_agent_without_source_epoch_gets_the_same_guards_and_no_extra_trust():
+    s, race = Stream(epoch=None), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    assert s.pair(race, 300, 32.2333333) is None
+    assert s.pair(race, 301, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+    s.info(40.0)  # without an epoch a reconnect cannot be seen; the age bound still limits the evidence
+    assert s.frame(race, 302, dt=session_meta.BIND_MAX_AGE_SECONDS + 1) is None
+
+
+def test_reconnect_starts_cold_and_binds_again_only_after_two_pairs():
+    s, race = Stream(), uuid7()
+    bound_race(s, race)
+    fresh = Stream()  # game_connected false/true resets the runtime state
+    fresh.phase("green")
+    assert [fresh.pair(race, 400 + i, 32.2333333) for i in range(3)] == [None, None, {"end_et": pytest.approx(1934.0)}]
+
+
+def test_changed_frames_never_confirm():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.pair(race, 300, 32.0)
+    assert s.pair(race, 5.0, 32.0, changed=True) is None  # clock rollback / session type change in this frame
+
+
+def test_other_track_never_confirms():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.pair(race, 300, 32.0)
+    s.info(32.0, track="Other Circuit")
+    assert s.frame(race, 301) is None
+
+
+def test_unresolved_frame_consumes_the_candidate():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.info(0.0833)
+    assert s.frame(None, 0.0) is None and "meta_candidate" not in s.state
+    assert session_meta.confirm(s.state, None, provider="lmu", resolved_session_id=race,
+                                scoring=dict(session_time=1.0), changed=False, source_epoch=None, now=s.now) is None
+
+
+def test_other_providers_define_no_end_clock():
+    s, race = Stream(provider="acc"), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    assert [s.pair(race, 300 + i, 32.0) for i in range(4)] == [None] * 4
+
+
+@pytest.mark.parametrize("phase", ["green", "full_course_yellow"])
+def test_real_lap_limited_race_confirms_its_laps_with_a_running_phase(phase):
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase(phase)
+    assert s.pair(race, 300, None, laps=20) is None
+    assert s.pair(race, 301, None, laps=20) == {"laps": 20}
+    assert session_meta.merge(row(), {"laps": 20}) == (None, None, 20, True)
+
+
+@pytest.mark.parametrize("phase", [None, "pre_session", "formation", "session_over", "session_stopped", "unknown"])
+def test_lap_limit_is_unknown_without_fresh_running_phase_evidence(phase):
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    if phase:
+        s.phase(phase)
+    assert [s.pair(race, 300 + i, None, laps=20) for i in range(4)] == [None] * 4
+
+
+def test_lap_limit_with_stale_phase_is_unknown():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.now += 60
+    assert [s.pair(race, 300 + i, None, laps=20) for i in range(4)] == [None] * 4
+
+
+def test_only_a_race_has_a_lap_limit():
+    s, quali = Stream(), uuid7()
+    s.frame(quali, 0.0, kind="Qualifying")
+    s.phase("green")
+    assert [s.pair(quali, 300 + i, None, laps=20, kind="Qualifying") for i in range(4)] == [None] * 4
+
+
+@pytest.mark.parametrize("phase", ["pre_session", "formation"])
+def test_lap_placeholder_in_the_pre_race_countdown_never_blocks_the_later_time_end(phase):
+    """Codex P2 (#65): countdown 0 plus a lap placeholder must not become a confirmed 999-lap race."""
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase(phase)
+    assert [s.pair(race, 67.0 + i, 0.0, laps=999) for i in range(4)] == [None] * 4  # however often it is repeated
+    s.phase("green")
+    assert s.pair(race, 135.0, 32.2333333, laps=999) is None
+    accepted = s.pair(race, 136.0, 32.2333333, laps=999)
+    assert accepted == {"end_et": pytest.approx(1934.0)}  # laps never taken beside a time end
+    assert session_meta.merge(row(), accepted)[:3] == (pytest.approx(1934.0), None, None)
+
+
+def test_pre_race_lap_claims_are_ignored_and_the_real_lap_race_is_confirmed_once_running():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    assert [s.pair(race, 10.0 + i, None, laps=20) for i in range(3)] == [None] * 3
+    s.phase("green")
+    assert s.pair(race, 30.0, None, laps=20) is None
+    assert s.pair(race, 31.0, None, laps=20) == {"laps": 20}
+
+
+def quali_then_race_with_stale_green(s, quali, race):
+    """Qualifying runs green; Race scoring arrives with its SessionInfo before any new race-control message."""
+    s.phase("green")
+    for i in range(3):
+        s.pair(quali, 300 + i, 10.5, kind="Qualifying")
+    s.info(10.5)
+    assert s.frame(race, 0.0, changed=True) is None  # the session change; the cached Qualifying phase is still fresh
+
+
+def test_cached_qualifying_green_never_binds_a_race_countdown_as_the_end():
+    """Codex P2 (#65): end=64 (countdown) at clocks 1 and 2 right after the change must stay unknown."""
+    s, quali, race = Stream(), uuid7(), uuid7()
+    quali_then_race_with_stale_green(s, quali, race)
+    assert [s.pair(race, 1.0 + i, 64 / 60) for i in range(4)] == [None] * 4
+    assert all(a is None or "end_et" not in a for a in s.accepted[3:])
+
+
+def test_new_race_control_after_the_change_allows_the_real_end_to_bind():
+    s, quali, race = Stream(), uuid7(), uuid7()
+    quali_then_race_with_stale_green(s, quali, race)
+    s.pair(race, 1.0, 64 / 60)
+    s.phase("formation")  # first race-control observation of this session
+    s.pair(race, 67.0, 0.0)
+    s.phase("green")
+    assert s.pair(race, 135.0, 32.2333333) is None
+    assert s.pair(race, 136.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_race_control_received_after_the_change_but_before_the_next_frame_is_evidence():
+    s, quali, race = Stream(), uuid7(), uuid7()
+    quali_then_race_with_stale_green(s, quali, race)
+    s.phase("green")  # fresh message after the boundary frame
+    assert s.pair(race, 300.0, 32.2333333) is None
+    assert s.pair(race, 301.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+@pytest.mark.parametrize("boundary", ["session", "epoch", "rollback"])
+def test_boundaries_without_a_changed_flag_invalidate_the_old_phase(boundary):
+    s, a, b = Stream(epoch=1), uuid7(), uuid7()
+    s.phase("green")
+    for i in range(3):
+        s.pair(a, 300 + i, 32.2333333)
+    assert s.accepted[-1] == {"end_et": pytest.approx(1934.0)}
+    target, clock = a, 303.0
+    if boundary == "session":
+        target, clock = b, 0.0
+    elif boundary == "epoch":
+        s.epoch = 2
+    else:
+        clock = 100.0  # clock rolled back by 200 s without the ingest path flagging it
+    assert s.pair(target, clock, 40.0) is None  # the old phase is no evidence any more
+    assert s.pair(target, clock + 1, 40.0) is None
+    assert s.pair(target, clock + 2, 40.0) is None
+    s.phase("green")
+    assert s.pair(target, clock + 3, 40.0) is None
+    assert s.pair(target, clock + 4, 40.0) == {"end_et": pytest.approx(2400.0)}
+
+
+def test_first_frame_of_a_stream_is_not_a_boundary():
+    s, race = Stream(), uuid7()
+    s.phase("green")  # cold start: race control was seen before the first resolved frame, nothing precedes it
+    assert [s.pair(race, 300 + i, 32.2333333) for i in range(2)] == [None, None]  # first pair: no earlier session
+    assert s.pair(race, 302, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_boundary_discards_repetitions_and_the_pre_race_reference():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)
+    s.frame(race, 3.0, changed=True)
+    assert "meta_pre" not in s.state and "meta_seen" not in s.state and "meta_phase" in s.state
+
+
+def test_green_clock_and_reference_keep_working_after_an_earlier_boundary():
+    s, quali, race = Stream(), uuid7(), uuid7()
+    quali_then_race_with_stale_green(s, quali, race)
+    s.phase("formation")
+    s.pair(race, 133.0, 134 / 60)
+    s.phase("green")
+    s.frame(race, 134.5)
+    s.pair(race, 135.5, 32.2333333)
+    assert s.pair(race, 136.5, 32.2333333) == {"end_et": pytest.approx(1934.0), "duration": pytest.approx(1800.0)}
+
+
+def test_contradicting_claims_never_accumulate():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    for minutes in (32.0, 40.0, 32.0, 40.0, 32.0):  # alternating: no claim is ever repeated back to back
+        assert s.pair(race, 300, minutes) is None
+
+
+def test_one_off_placeholder_is_not_enough_for_either_limit():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.pair(race, 300, 0.0, laps=999)  # a single wrong value
+    assert s.pair(race, 301, 32.2333333) is None
+    assert s.pair(race, 302, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+
+
+def test_two_observers_of_one_session_keep_independent_evidence():
+    """Observer A just crossed a boundary; observer B did not. A stale phase of A never moves B or the row."""
+    a, b, quali, race = Stream(), Stream(), uuid7(), uuid7()
+    b.phase("green")
+    b.frame(race, 300.0)
+    quali_then_race_with_stale_green(a, quali, race)
+    assert [a.pair(race, 1.0 + i, 64 / 60) for i in range(3)] == [None] * 3
+    assert b.pair(race, 301.0, 32.2333333) is None
+    assert b.pair(race, 302.0, 32.2333333) == {"end_et": pytest.approx(1934.0)}
+    assert session_meta.merge(row(), b.accepted[-1])[0] == pytest.approx(1934.0)  # A's countdown never reached it
+
+
+def test_state_machine_invariants_hold_over_random_message_orders():
+    """Seeded fuzz over SessionInfo/scoring/race-control orders, session changes, epochs and placeholders.
+
+    Whatever the order, an accepted end or lap limit must rest on a running race-control phase that was received
+    after the latest boundary (session change, epoch change, clock rollback or changed frame) and is still fresh,
+    and must be a value the stream actually claimed. No order may bind a pre-race value or a stale phase.
+    """
+    import random
+    for seed in range(300):
+        rng = random.Random(seed)
+        s = Stream(epoch=1)
+        sessions = [uuid7(), uuid7()]
+        current, clock, boundary_at, last_epoch, last_session = sessions[0], 100.0, None, s.epoch, None
+        claims = []
+        for _ in range(60):
+            action = rng.choice(["phase", "pair", "pair", "pair", "info", "frame", "switch", "epoch", "rollback", "wait"])
+            if action == "phase":
+                phase = rng.choice(["green", "formation", "pre_session", "full_course_yellow", "session_over", None])
+                s.phase(phase)
+                if phase is None:
+                    s.state.pop("race_control")
+            elif action == "wait":
+                s.now += rng.choice([1.0, 6.0, 40.0])
+            elif action == "info":
+                minutes, laps = rng.choice([(None, 0), (0.0, 999), (1.07, 0), (32.2333333, 0), (None, 20)])
+                s.info(minutes, laps)
+                claims.append((minutes, laps))
+            else:
+                changed, previous_clock = False, clock
+                if action == "switch":
+                    current, clock, changed = rng.choice(sessions), 0.0, True
+                elif action == "epoch":
+                    s.epoch += 1
+                elif action == "rollback":
+                    clock = max(0.0, clock - rng.choice([1.0, 50.0]))
+                else:
+                    clock += rng.choice([0.5, 1.0, 3.0])
+                if action != "frame" and rng.random() < 0.7:
+                    minutes, laps = rng.choice([(None, 0), (0.0, 999), (1.07, 0), (32.2333333, 0), (None, 20)])
+                    s.info(minutes, laps)
+                    claims.append((minutes, laps))
+                boundary = (changed or s.epoch != last_epoch or clock < previous_clock - session_meta.CLOCK_ROLLBACK_SECONDS
+                            or (last_session is not None and current != last_session))
+                accepted = s.frame(current, clock, changed=changed)
+                if boundary and last_session is not None:
+                    boundary_at = s.now
+                last_epoch, last_session = s.epoch, current
+                if accepted:
+                    received = s.state.get("race_control_at")
+                    phase = (s.state.get("race_control") or {}).get("phase")
+                    assert phase in session_meta.TIMED_PHASES, (seed, accepted, phase)
+                    assert s.now - received <= session_meta.RACE_CONTROL_FRESH_SECONDS, (seed, accepted)
+                    if boundary_at is not None:
+                        assert received > boundary_at, (seed, accepted, received, boundary_at)
+                    if "end_et" in accepted:
+                        assert any(m and m * 60 == pytest.approx(accepted["end_et"]) for m, _ in claims), seed
+                    if "laps" in accepted:
+                        assert accepted["laps"] in [n for _, n in claims], seed
+
+
+def test_info_with_time_end_and_lap_value_is_ambiguous_for_laps():
+    s, race = Stream(), uuid7()
+    s.frame(race, 0.0)
+    s.phase("green")
+    s.pair(race, 300, 32.0, laps=1)
+    assert s.pair(race, 301, 32.0, laps=1) == {"end_et": pytest.approx(1920.0)}  # laps=1 is never taken
+
+
+@pytest.mark.parametrize("laps", [0, -1, None, 2**31 - 1, True, 12.0])
+def test_unusable_lap_values_are_never_a_limit(laps):
+    assert session_meta.lap_limit({"session_laps": laps}) is None
+
+
+@pytest.mark.parametrize("minutes", [0, -5, None, float("nan"), float("inf"), True, "30"])
+def test_unusable_end_values_are_never_an_end(minutes):
+    assert session_meta.provider_end_clock_seconds("lmu", {"session_minutes": minutes}) is None
+
+
+def row(end=None, duration=None, laps=None, confirmed=None):
+    """A session row; a lap value is confirmed unless the test says it is a legacy, unverified one."""
+    return dict(session_end_et_seconds=end, session_duration_seconds=duration, session_laps=laps,
+                session_laps_confirmed=bool(laps) if confirmed is None else confirmed)
+
+
+def test_merge_is_write_once_per_dimension():
+    assert session_meta.merge(row(), {"end_et": 1934.0, "duration": 1800.0}) == (1934.0, 1800.0, None, False)
+    assert session_meta.merge(row(1934.0, 1800.0), {"end_et": 2400.0}) == (1934.0, 1800.0, None, False)  # never replaced
+    assert session_meta.merge(row(1934.0), {"end_et": 1934.2, "duration": 1800.0}) == (1934.0, 1800.0, None, False)
+    assert session_meta.merge(row(1934.0), {"end_et": 3000.0, "duration": 2866.0}) == (1934.0, None, None, False)
+
+
+def test_merge_keeps_one_limit_dimension_per_session():
+    assert session_meta.merge(row(laps=20), {"end_et": 5.0}) == (None, None, 20, True)
+    assert session_meta.merge(row(end=1934.0), {"laps": 1}) == (1934.0, None, None, False)
+    assert session_meta.merge(row(laps=0), {"laps": 20}) == (None, None, 20, True)
+    assert session_meta.merge(row(laps=20), {"laps": 30}) == (None, None, 20, True)
+
+
+def test_legacy_lap_placeholder_does_not_block_a_confirmed_end_and_stays_untouched():
+    legacy = row(laps=999, confirmed=False)  # written before the provenance rule, e.g. a placeholder
+    assert session_meta.trusted_laps(legacy) is None
+    assert session_meta.merge(legacy, {"end_et": 4956.0, "duration": 4800.0}) == (4956.0, 4800.0, 999, False)
+
+
+def test_confirmed_lap_limit_replaces_a_legacy_value_and_is_then_write_once():
+    legacy = row(laps=999, confirmed=False)
+    assert session_meta.merge(legacy, {"laps": 20}) == (None, None, 20, True)
+    assert session_meta.merge(row(laps=20), {"laps": 30}) == (None, None, 20, True)
+    assert session_meta.merge(row(laps=20), {"end_et": 4956.0}) == (None, None, 20, True)  # confirmed laps still win
+
+
+@pytest.mark.parametrize("laps,confirmed,expected", [
+    (20, True, 20), (20, False, None), (20, None, None), (999, False, None), (0, True, None), (None, True, None),
+    (True, True, None), (2**31 - 1, True, None), (12.0, True, None)])
+def test_trusted_laps_needs_provenance_and_a_usable_value(laps, confirmed, expected):
+    assert session_meta.trusted_laps(dict(session_laps=laps, session_laps_confirmed=confirmed)) == expected
+    assert session_meta.trusted_laps(dict(session_laps=laps)) is None  # a row without the flag is unverified

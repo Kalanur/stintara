@@ -318,11 +318,18 @@ function chainNav(d) {
   if (s.next_session) parts.push(`${esc(s.session_type)} over · <a href="${esc(link(s.next_session))}">Go to ${esc(s.next_session.session_type)} →</a>`);
   return parts.length ? `<p class="chain-nav" aria-label="Session chain">${parts.join(' · ')}</p>` : '';
 }
+function minuteClock(seconds) {
+  const whole = Math.round(seconds);
+  return `${Math.floor(whole/60)}:${String(whole%60).padStart(2,'0')}`;
+}
 function sessionContext(d) {
+  // Configured duration is shown only when the server derived it reliably; remaining time follows the session
+  // end clock. Unknown stays a dash: neither value is ever estimated here.
   const t = d.timing || {};
-  const configured = Number.isFinite(t.configured_minutes) && t.configured_minutes > 0 ? `${t.configured_minutes} min` :
+  const configured = Number.isFinite(t.configured_duration_seconds) && t.configured_duration_seconds > 0 ? minuteClock(t.configured_duration_seconds) :
     Number.isSafeInteger(t.configured_laps) && t.configured_laps > 0 ? `${t.configured_laps} laps` : '—';
-  return `<p>Configured distance / duration: ${configured} · Elapsed session time: ${d.live ? clockText(t.elapsed_seconds) : '—'}</p>`;
+  const remaining = d.live && Number.isFinite(t.remaining_seconds) && t.remaining_seconds >= 0 ? clockText(t.remaining_seconds) : '—';
+  return `<p>Configured distance / duration: ${configured} · Elapsed session time: ${d.live ? clockText(t.elapsed_seconds) : '—'} · Time remaining: ${remaining}</p>`;
 }
 function checkpointAge(timestamp, now) {
   // Require an explicit timezone, not Date.parse's permissive local-date formats.

@@ -172,12 +172,17 @@ def test_stale_unknown_capability_and_unavailable_finish():
 
 def test_finish_laps_timed_upper_bound_and_pace():
     assert finish_projection(28, dict(configured_laps=48), [])['finish_lap'] == 48
-    t = dict(configured_minutes=80, elapsed_seconds=2880, configured_laps=999)
+    t = dict(end_et_seconds=4800, remaining_seconds=4800 - 2880, configured_laps=999)
     f = finish_projection(28, t, [100, 102, 101, None, -1, math.nan])
     assert f == dict(kind='timed_estimate', finish_lap=49, pace_seconds=101)
     assert finish_projection(28, t, [100, 101])['kind'] == 'unavailable'
     assert finish_projection(28, t, [100]*3, race=False)['kind'] == 'unavailable'
-    assert finish_projection(28, dict(configured_minutes=1, elapsed_seconds=70), [100]*3)['finish_lap'] == 29
+    assert finish_projection(28, dict(end_et_seconds=60, remaining_seconds=0), [100]*3)['finish_lap'] == 29
+    # An unknown end (or unknown remaining time) never yields a timed estimate.
+    assert finish_projection(28, dict(end_et_seconds=None, remaining_seconds=None), [100]*3)['kind'] == 'unavailable'
+    assert finish_projection(28, dict(end_et_seconds=4800, remaining_seconds=None), [100]*3)['kind'] == 'unavailable'
+    # The stale qualifying value of the 2026-11-11 race: a 630 s end at clock 721 s gives "current lap" forever.
+    # It must never reach this function again, because it is no longer bound to the race (see test_session_meta).
 
 
 def test_lmu_capability_is_not_inferred_from_zero():
@@ -198,7 +203,7 @@ def test_setting_rounding_handles_binary_noise_without_safety_multiplier():
 
 
 def test_finite_extremes_cannot_overflow_public_projection_or_settings():
-    projection = finish_projection(1, dict(configured_minutes=10, elapsed_seconds=1), [1e308]*4)
+    projection = finish_projection(1, dict(end_et_seconds=600, remaining_seconds=599), [1e308]*4)
     assert projection['pace_seconds'] == 1e308
     p = plan([resource('fuel', 1, 1.7e308, 8e307, True, 5, 'L')], completed=1, stop=3, end=4)
     assert p['status'] == 'unsafe_plan'

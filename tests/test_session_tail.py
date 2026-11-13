@@ -1,7 +1,10 @@
 """#46: an idle post-race provider state must not become a second Race session.
 
 Messages are delivered in the order observed in production: LMU first reports SessionInfo of its empty
-state (5 s placeholder duration), only then the reset scoring (clock 0, every vehicle at 0 laps).
+state (5 s placeholder), only then the reset scoring (clock 0, every vehicle at 0 laps).
+
+Session limits are persisted only after a SessionInfo is bracketed by frames of the same resolved session and
+confirmed twice (#20), so ``deliver`` repeats the info/scoring pair; ``rounds=1`` models a single pair.
 """
 import pytest
 
@@ -13,12 +16,17 @@ RACE = dict(minutes=82.6, laps=0)
 PLACEHOLDER = dict(minutes=5 / 60, laps=0)
 
 
-async def deliver(agent, payload, minutes=82.6, laps=0, track="Synthetic Circuit"):
-    # Production persists the clock at 1 Hz; make every synthetic frame count.
-    main.runtime.get(str(agent["id"]), {}).pop("last_persisted_scoring", None)
+END = 82.6 * 60  # Pitwall reports the session END on the session clock: 82.6 min
+
+
+async def deliver(agent, payload, minutes=82.6, laps=0, track="Synthetic Circuit", rounds=3, phase="green"):
     info = {"track_name": track, "session_minutes": minutes, "session_laps": laps}
-    await main.handle_message(agent, "lmu", "session_info", info)
-    await main.handle_message(agent, "lmu", "scoring", payload)
+    for _ in range(rounds):
+        # Production persists the clock at 1 Hz; make every synthetic frame count.
+        main.runtime.get(str(agent["id"]), {}).pop("last_persisted_scoring", None)
+        await main.handle_message(agent, "lmu", "race_control", {"phase": phase})
+        await main.handle_message(agent, "lmu", "session_info", info)
+        await main.handle_message(agent, "lmu", "scoring", payload)
     return main.runtime[str(agent["id"])]["session_id"]
 
 
@@ -41,7 +49,7 @@ async def finish_race(agent, sid, clock=5331.6, driven=39, **limits):
 
 async def sessions(db):
     async with db.acquire() as conn:
-        return await conn.fetch("SELECT id,session_type,status,ended_at,session_minutes,session_laps "
+        return await conn.fetch("SELECT id,session_type,status,ended_at,session_end_et_seconds,session_laps "
                                 "FROM sessions ORDER BY id")
 
 
@@ -59,7 +67,7 @@ async def test_production_order_creates_no_tail_and_keeps_limits_and_standings(d
     rows = await sessions(db)
     assert [r["id"] for r in rows] == [sid]
     assert rows[0]["status"] == "complete" and rows[0]["ended_at"] is not None
-    assert rows[0]["session_minutes"] == 82.6  # the placeholder was never written to the finished race
+    assert rows[0]["session_end_et_seconds"] == END  # the placeholder was never written to the finished race
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT max(total_laps) FROM session_participants WHERE session_id=$1", sid) == 39
     assert main.runtime[str(agent["id"])].get("session_id") is None
@@ -87,8 +95,8 @@ async def test_mid_race_reset_with_placeholder_is_a_new_session_not_post_finish(
     assert new not in (None, sid)
     rows = {r["id"]: r for r in await sessions(db)}
     assert len(rows) == 2 and rows[sid]["status"] == "complete"
-    assert rows[sid]["session_minutes"] == 82.6  # old limits stay with the old session
-    assert rows[new]["session_minutes"] == pytest.approx(5 / 60)  # the new session takes the current SessionInfo
+    assert rows[sid]["session_end_et_seconds"] == END  # old limits stay with the old session
+    assert rows[new]["session_end_et_seconds"] == pytest.approx(5.0)  # the new session's own, confirmed SessionInfo
 
 
 async def test_laps_limited_restart_with_placeholder_laps_is_not_post_finish(db):
@@ -114,17 +122,21 @@ async def test_laps_limited_finish_is_post_finish_idle(db):
 async def test_unknown_session_limits_remain_unknown_after_creation(db):
     agent = await make_agent(db)
     sid = await start_race(agent, minutes=0, laps=0)  # no positive limit known yet
-    assert await deliver(agent, running(300.0, laps=3), minutes=90.0, laps=0) == sid
-    assert (await row(db, sid))["session_minutes"] in (None, 0)  # deliberately conservative: no session identity
-    assert main.runtime[str(agent["id"])]["session_minutes"] == 90.0
+    assert (await row(db, sid))["session_end_et_seconds"] is None
+    # A single pair is not enough: bracketing plus a repeated claim is required.
+    assert await deliver(agent, running(300.0, laps=3), minutes=90.0, laps=0, rounds=1) == sid
+    assert (await row(db, sid))["session_end_et_seconds"] is None
+    assert main.runtime[str(agent["id"])]["session_minutes"] == 90.0  # runtime context is current at once
     assert main.runtime[str(agent["id"])].get("session_meta_pending") is None  # consumed by that resolution
+    assert await deliver(agent, running(301.0, laps=3), minutes=90.0, laps=0, rounds=2) == sid
+    assert (await row(db, sid))["session_end_et_seconds"] == 90.0 * 60  # now bound to a confirmed session
 
 
 async def test_known_limit_is_stable_but_runtime_follows_session_info(db):
     agent = await make_agent(db)
     sid = await start_race(agent)
     assert await deliver(agent, running(300.0, laps=3), minutes=90.0, laps=0) == sid
-    assert (await row(db, sid))["session_minutes"] == 82.6  # limits are immutable after INSERT
+    assert (await row(db, sid))["session_end_et_seconds"] == END  # a known limit is write-once
     assert main.runtime[str(agent["id"])]["session_minutes"] == 90.0
 
 
@@ -133,7 +145,8 @@ async def interleave(db, clock, driven, limits, info, reset_info=None):
     agent = await make_agent(db)
     sid = await start_race(agent, **limits)
     await finish_race(agent, sid, clock=clock, driven=driven, **limits)
-    assert await deliver(agent, running(clock + 0.1, laps=driven), **info) == sid  # resolves to A, carries next info
+    # resolves to A, carries next info: one pair only, never a repeated claim bracketed by frames of A
+    assert await deliver(agent, running(clock + 0.1, laps=driven), rounds=1, **info) == sid
     return agent, sid, await deliver(agent, idle(), **(reset_info or info))
 
 
@@ -141,15 +154,15 @@ async def test_interleaving_mid_race_keeps_limit_and_separates(db):
     agent, sid, new = await interleave(db, 900.0, 8, RACE, PLACEHOLDER)
     assert new not in (None, sid)
     rows = {r["id"]: r for r in await sessions(db)}
-    assert len(rows) == 2 and rows[sid]["session_minutes"] == 82.6 and rows[sid]["status"] == "complete"
-    assert rows[new]["session_minutes"] == pytest.approx(5 / 60)  # the new session takes the current SessionInfo
+    assert len(rows) == 2 and rows[sid]["session_end_et_seconds"] == END and rows[sid]["status"] == "complete"
+    assert rows[new]["session_end_et_seconds"] == pytest.approx(5.0)  # the new session's own, confirmed SessionInfo
 
 
 async def test_interleaving_finished_race_stays_one_session(db):
     agent, sid, new = await interleave(db, 5331.6, 39, RACE, PLACEHOLDER)
     assert new is None
     rows = await sessions(db)
-    assert len(rows) == 1 and rows[0]["session_minutes"] == 82.6 and rows[0]["status"] == "complete"
+    assert len(rows) == 1 and rows[0]["session_end_et_seconds"] == END and rows[0]["status"] == "complete"
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT max(total_laps) FROM session_participants WHERE session_id=$1", sid) == 39
 
@@ -162,8 +175,8 @@ async def test_interleaving_lap_limit_mid_race(db, info):  # second case: lap ra
     agent, sid, new = await interleave(db, 900.0, 8, LAPS, info)
     assert new not in (None, sid)
     rows = {r["id"]: r for r in await sessions(db)}
-    assert len(rows) == 2 and (rows[sid]["session_laps"], rows[sid]["session_minutes"]) == (20, 0)
-    assert rows[new]["session_minutes"] == pytest.approx(info["minutes"])  # the new session takes the current info
+    assert len(rows) == 2 and (rows[sid]["session_laps"], rows[sid]["session_end_et_seconds"]) == (20, None)
+    assert rows[new]["session_end_et_seconds"] == (pytest.approx(info["minutes"] * 60) if info["minutes"] else None)
 
 
 @pytest.mark.parametrize("info", [dict(minutes=0, laps=0), dict(minutes=0, laps=1), dict(minutes=5 / 60, laps=0)])
@@ -172,7 +185,7 @@ async def test_interleaving_lap_limit_finished(db, info):
     assert new is None
     rows = await sessions(db)
     assert len(rows) == 1 and rows[0]["status"] == "complete"
-    assert (rows[0]["session_laps"], rows[0]["session_minutes"]) == (20, 0)
+    assert (rows[0]["session_laps"], rows[0]["session_end_et_seconds"]) == (20, None)
 
 
 @pytest.mark.parametrize("info", [dict(minutes=82.6, laps=1), dict(minutes=0, laps=1)])
@@ -180,8 +193,9 @@ async def test_interleaving_time_limit_mid_race_with_lap_placeholder(db, info):
     agent, sid, new = await interleave(db, 900.0, 8, RACE, info)
     assert new not in (None, sid)
     rows = {r["id"]: r for r in await sessions(db)}
-    assert len(rows) == 2 and (rows[sid]["session_minutes"], rows[sid]["session_laps"]) == (82.6, 0)
-    assert rows[new]["session_laps"] == 1
+    assert len(rows) == 2 and rows[sid]["session_end_et_seconds"] == END and rows[sid]["session_laps"] is None
+    # A SessionInfo that carries a time end AND a lap value is ambiguous: the lap value is never taken then.
+    assert rows[new]["session_laps"] == (None if info["minutes"] else 1)
 
 
 @pytest.mark.parametrize("info", [dict(minutes=82.6, laps=1), dict(minutes=0, laps=1)])
@@ -190,7 +204,7 @@ async def test_interleaving_time_limit_finished_with_lap_placeholder(db, info):
     assert new is None
     rows = await sessions(db)
     assert len(rows) == 1 and rows[0]["status"] == "complete"
-    assert (rows[0]["session_minutes"], rows[0]["session_laps"]) == (82.6, 0)
+    assert (rows[0]["session_end_et_seconds"], rows[0]["session_laps"]) == (END, None)
 
 
 async def test_session_info_alone_does_not_touch_the_persisted_row(db):
@@ -198,7 +212,7 @@ async def test_session_info_alone_does_not_touch_the_persisted_row(db):
     sid = await start_race(agent)
     await main.handle_message(agent, "lmu", "session_info", {"track_name": "Synthetic Circuit", "session_minutes": 7})
     assert main.runtime[str(agent["id"])]["session_minutes"] == 7  # runtime context is immediate
-    assert (await row(db, sid))["session_minutes"] == 82.6  # persistence waits for scoring to confirm the session
+    assert (await row(db, sid))["session_end_et_seconds"] == END  # persistence waits for confirmation
 
 
 async def test_genuine_new_race_after_idle_reset_takes_its_own_session_info(db):
@@ -210,7 +224,7 @@ async def test_genuine_new_race_after_idle_reset_takes_its_own_session_info(db):
     assert new and new != sid
     assert await deliver(agent, running(30, laps=1), **RACE) == new
     rows = {r["id"]: r for r in await sessions(db)}
-    assert len(rows) == 2 and rows[sid]["session_minutes"] == rows[new]["session_minutes"] == 82.6
+    assert len(rows) == 2 and rows[sid]["session_end_et_seconds"] == rows[new]["session_end_et_seconds"] == END
 
 
 @pytest.mark.parametrize("case", ["idle_not_all_zero", "wrong_session_type", "other_track"])
@@ -228,7 +242,7 @@ async def test_real_resets_still_separate_sessions(db, case):
     else:
         new = await deliver(agent, idle(), track="Other Circuit", **PLACEHOLDER)
     assert new not in (None, sid)
-    assert len(await sessions(db)) == 2 and (await row(db, sid))["session_minutes"] == 82.6
+    assert len(await sessions(db)) == 2 and (await row(db, sid))["session_end_et_seconds"] == END
 
 
 async def test_server_restart_in_idle_state_does_not_resurrect_or_merge(db):
@@ -240,7 +254,7 @@ async def test_server_restart_in_idle_state_does_not_resurrect_or_merge(db):
     assert await deliver(agent, idle(), **PLACEHOLDER) not in (None, sid)
     rows = await sessions(db)
     assert len(rows) == 2 and {r["status"] for r in rows if r["id"] == sid} == {"complete"}
-    assert (await row(db, sid))["session_minutes"] == 82.6
+    assert (await row(db, sid))["session_end_et_seconds"] == END
 
 
 async def test_two_observers_idle_reset_by_one_keeps_shared_race_live_for_other(db):
@@ -254,4 +268,4 @@ async def test_two_observers_idle_reset_by_one_keeps_shared_race_live_for_other(
         assert await conn.fetchval("SELECT status FROM sessions WHERE id=$1", sid) == "live"
         assert await conn.fetchval(
             "SELECT count(*) FROM session_observations WHERE session_id=$1 AND ended_at IS NULL", sid) == 1
-    assert len(await sessions(db)) == 1 and (await row(db, sid))["session_minutes"] == 82.6
+    assert len(await sessions(db)) == 1 and (await row(db, sid))["session_end_et_seconds"] == END
