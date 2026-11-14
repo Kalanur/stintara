@@ -8,6 +8,7 @@ function Assert($condition, $message) { if (-not $condition) { throw $message } 
 function docker {
     $global:LASTEXITCODE = 0
     $runnerTestState.calls.Add(($args -join ' '))
+    if ($runnerTestState.stderrNoise -and $args[0] -ne 'info') { Write-Error 'Container synthetic Stopping' }
     if ($args[0] -eq 'info') { return 'linux' }
     Assert ($args -contains 'stintara-tests') 'Wrong Compose project'
     Assert ($args -contains (Join-Path (Split-Path $PSScriptRoot -Parent) 'docker-compose.test.yml')) 'Wrong Compose file'
@@ -58,7 +59,19 @@ try {
     & $runner -Python TestPython
     Assert ($LASTEXITCODE -eq 0) 'Default run failed'
     Assert ($null -eq [Environment]::GetEnvironmentVariable('TEST_DATABASE_URL', 'Process')) 'Absent URL was not restored'
-    Write-Output '8 runner control-flow cases passed (mock commands; not a PostgreSQL integration test).'
+    # Compose writes progress to stderr. Under Windows PowerShell 5.1 a caller-side 2>&1 turns that into
+    # ErrorRecords; with $ErrorActionPreference = Stop the runner used to abort mid-teardown and lose the exit code.
+    foreach ($pytestCode in 0, 5) {
+        $runnerTestState.calls = [Collections.Generic.List[string]]::new()
+        $runnerTestState.stderrNoise=$true; $runnerTestState.pytestCode=$pytestCode; $runnerTestState.startupCode=0; $runnerTestState.cleanupCode=0
+        $runnerTestState.occupied=$false; $runnerTestState.pythonCalled=$false
+        & $runner -Python TestPython
+        Assert ($LASTEXITCODE -eq $pytestCode) 'stderr output changed the exit code'
+        Assert (($runnerTestState.calls | Where-Object { $_ -match 'down --volumes$' }).Count -eq 1) 'stderr output prevented a single teardown'
+        Assert ($null -eq [Environment]::GetEnvironmentVariable('TEST_DATABASE_URL', 'Process')) 'stderr case left the URL set'
+    }
+    $runnerTestState.stderrNoise=$false
+    Write-Output '10 runner control-flow cases passed (mock commands; not a PostgreSQL integration test).'
 } finally {
     [Environment]::SetEnvironmentVariable("TEST_DATABASE_URL", $savedUrl, "Process")
 }
