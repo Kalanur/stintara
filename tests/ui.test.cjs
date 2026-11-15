@@ -2025,6 +2025,66 @@ test('hidden fields never block Calculate; their draft text survives for switchi
   assert.deepEqual({...saved.stamps.duration_minutes}, SPA);
 });
 
+test('hidden saved values keep value, origin and stamp; adoption metadata survives postponed saves', () => {
+  const h = harness();
+  const ve = v => h.handlers.change({target: {id: 'pr-ve', value: v}});
+  h.type('duration_minutes', '60'); h.type('lap_time_s', '120'); h.type('fuel_per_lap_l', '3');
+  ve('yes'); h.type('ve_per_lap_percent', '2.5'); h.submit();
+  // VE Yes -> No: the saved VE consumption stays (value, origin, stamp) but is not part of the query or stale flags.
+  ve('no'); h.submit();
+  let saved = h.ui.read(h.store, 'one');
+  assert.equal(saved.ve_capable, false); assert.equal(saved.values.ve_per_lap_percent, 2.5);
+  assert.equal(saved.sources.ve_per_lap_percent, 'manual'); assert.deepEqual({...saved.stamps.ve_per_lap_percent}, SPA);
+  assert.equal(new URLSearchParams(h.ui.query(saved)).get('ve_per_lap_percent'), null);
+  assert.doesNotMatch(new URLSearchParams(h.ui.query(saved)).get('sources'), /ve_per_lap_percent/);
+  assert.deepEqual([...h.ui.staleFields(saved, {track_name: 'Monza', car_name: 'Car B'})].sort(), ['duration_minutes', 'fuel_per_lap_l', 'lap_time_s', 've_capable']);
+  // ... and comes back when VE is switched on again.
+  ve('yes'); h.submit();
+  saved = h.ui.read(h.store, 'one');
+  assert.equal(new URLSearchParams(h.ui.query(saved)).get('ve_per_lap_percent'), '2.5');
+  assert.equal(saved.sources.ve_per_lap_percent, 'manual');
+  // Use (confirmed duration) -> Lap limit -> Calculate -> Timed -> Calculate: origin and adoption context survive.
+  const g = harness(SPA, 'S1');
+  g.adopt('duration_minutes', '60');
+  g.handlers.change({target: {name: 'pr-mode', value: 'laps'}}); g.type('race_laps', '20'); g.submit();
+  g.setContext({track_name: 'Monza', car_name: 'Car B'});
+  g.handlers.change({target: {name: 'pr-mode', value: 'time'}}); g.submit();
+  saved = g.ui.read(g.store, 'one');
+  assert.equal(saved.values.duration_minutes, 60); assert.equal(saved.sources.duration_minutes, 'confirmed');
+  assert.deepEqual({...saved.stamps.duration_minutes}, SPA);
+  assert.ok(g.ui.staleFields(saved, {track_name: 'Monza', car_name: 'Car B'}).includes('duration_minutes'));
+});
+
+test('state matrix: VE No -> Yes shows the kept value with origin and stale flag; Clear plan removes it with the draft', () => {
+  const h = harness();
+  const ve = v => h.handlers.change({target: {id: 'pr-ve', value: v}});
+  h.type('duration_minutes', '60'); h.type('lap_time_s', '120'); h.type('fuel_per_lap_l', '3');
+  ve('yes'); h.type('ve_per_lap_percent', '2.5'); h.submit(); ve('no'); h.submit(); ve('yes');
+  const other = {track_name: 'Monza', car_name: 'Car B'};
+  const state = h.ui.read(h.store, 'one');
+  assert.deepEqual([...h.ui.staleFields({...state, ve_capable: true}, other)].includes('ve_per_lap_percent'), true);   // still unverified
+  const html = h.ui.engineer(respOf('S1', {plan: planOf()}), state, {sessionId: 'S1', context: other, draft: h.ui.working('one')});
+  assert.match(html, /id="pr-ve_per_lap_percent"[^>]*value="2.5"/); assert.match(html, /<option value="yes" selected>/);
+  assert.match(html, /manual<\/small> <small class="pr-bad">· other car\/track/);
+  // A hidden invalid draft plus a saved VE value: Clear plan wipes values, origins, stamps and the draft.
+  h.type('race_laps', 'zzz'); h.handlers.click({target: {id: 'pr-clear', dataset: {}}});
+  const cleared = h.ui.read(h.store, 'one');
+  assert.deepEqual({...cleared.values}, {}); assert.deepEqual({...cleared.sources}, {}); assert.deepEqual({...cleared.stamps}, {});
+  assert.deepEqual({...h.ui.working('one').text}, {});
+});
+
+test('state matrix: manual value survives Use of another field; Still valid confirms only the chosen value', () => {
+  const h = harness();
+  h.type('fuel_per_lap_l', '3'); h.type('duration_minutes', '60'); h.submit();
+  h.setContext({track_name: 'Monza', car_name: 'Car B'});
+  h.adopt('lap_time_s', '90'); h.submit();
+  let saved = h.ui.read(h.store, 'one');
+  assert.equal(saved.sources.fuel_per_lap_l, 'manual'); assert.equal(saved.values.fuel_per_lap_l, 3);
+  h.handlers.click({target: {dataset: {confirm: 'fuel_per_lap_l'}}});
+  saved = h.ui.read(h.store, 'one');
+  assert.deepEqual([...h.ui.staleFields(saved, {track_name: 'Monza', car_name: 'Car B'})], ['duration_minutes']);
+});
+
 test('Use ignores a suggestion that belongs to another session than the one viewed', () => {
   const h = harness(SPA, 'SESSION-A');
   h.adopt('fuel_per_lap_l', '2.5', 'SESSION-B');

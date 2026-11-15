@@ -56,6 +56,7 @@ const PreRaceUI = (() => {
     if (!current) return stale;
     for (const f of [...FIELDS, 've_capable']) {
       const s = state.stamps?.[f];
+      if ((f === (state.mode === 'laps' ? 'duration_minutes' : 'race_laps')) || (f === 've_per_lap_percent' && state.ve_capable !== true)) continue;   // hidden: not part of the plan
       if (!s || (f === 've_capable' ? state.ve_capable === null : !(f in state.values))) continue;
       if ((s.track_name && current.track_name && s.track_name !== current.track_name)
           || (s.car_name && current.car_name && s.car_name !== current.car_name)) stale.push(f);
@@ -67,7 +68,7 @@ const PreRaceUI = (() => {
   function query(state) {
     const p = new URLSearchParams(), skip = state.mode === 'laps' ? 'duration_minutes' : 'race_laps', used = [];
     for (const f of FIELDS) {
-      if (f === skip || !Number.isFinite(state.values[f])) continue;
+      if (f === skip || (f === 've_per_lap_percent' && state.ve_capable !== true) || !Number.isFinite(state.values[f])) continue;
       p.set(f, String(state.values[f]));
       used.push(`${f}:${state.sources[f] || 'manual'}`);
     }
@@ -217,7 +218,6 @@ const PreRaceUI = (() => {
     if (Object.hasOwn(draft, 've')) {
       const capable = draft.ve === 'yes' ? true : draft.ve === 'no' ? false : null;
       if (capable !== state.ve_capable || draft.adopted.ve_capable) { state.ve_capable = capable; touch('ve_capable', draft.adopted.ve_capable?.source || 'manual', draft.adopted.ve_capable?.context); }
-      if (capable !== true) { delete state.values.ve_per_lap_percent; delete state.sources.ve_per_lap_percent; delete state.stamps.ve_per_lap_percent; }
     }
     return {state, inactive};
   }
@@ -244,7 +244,7 @@ const PreRaceUI = (() => {
       if (done.error) { if (feedback) feedback.textContent = done.error; return; }
       if (!write(ctx.storage, slug, done.state)) { if (feedback) feedback.textContent = 'Browser storage unavailable: plan not saved'; return; }
       const next = newDraft();
-      for (const f of done.inactive) if (Object.hasOwn(d.text, f)) next.text[f] = d.text[f];
+      for (const f of done.inactive) if (Object.hasOwn(d.text, f)) { next.text[f] = d.text[f]; if (d.adopted[f]) next.adopted[f] = d.adopted[f]; }
       drafts.set(slug, next);
       ctx.refresh(true);
     });
