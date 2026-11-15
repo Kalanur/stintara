@@ -35,6 +35,7 @@ from .lap_sensors import (
 from .lifecycle import end_observation, expire_observations, resolve_session
 from .lmu_resources import energy_diagnostics, lmu_resources, pit_settings
 from .migrations import migrate_sample_ids
+from .prerace import plan_prerace, prerace_evidence
 from .protocol import PAYLOADS, Hello, Lap, Vehicle, Wheel
 from .resource_strategy import finish_projection, fraction, plan_resources
 from .secrets import read_secret
@@ -294,6 +295,7 @@ async def history_page() -> HTMLResponse:
 async def driver_live_page(slug: str) -> HTMLResponse:
     html = (STATIC_DIR / "live.html").read_text(encoding="utf-8")
     html = html.replace("__WEATHER_UI__", (STATIC_DIR / "weather.js").read_text(encoding="utf-8"))
+    html = html.replace("/*__PRERACE_UI__*/", (STATIC_DIR / "prerace.js").read_text(encoding="utf-8"))
     return HTMLResponse(inject_build_label(html.replace("__DRIVER_SLUG__", json.dumps(slug).replace("<", "\\u003c"))))
 
 
@@ -341,6 +343,7 @@ async def api_live() -> list[dict[str, Any]]:
 async def session_live_page(session_id: UUID) -> HTMLResponse:
     html = (STATIC_DIR / "session.html").read_text(encoding="utf-8")
     html = html.replace("__WEATHER_UI__", (STATIC_DIR / "weather.js").read_text(encoding="utf-8"))
+    html = html.replace("/*__PRERACE_UI__*/", (STATIC_DIR / "prerace.js").read_text(encoding="utf-8"))
     return HTMLResponse(inject_build_label(html.replace("__SESSION_ID__", json.dumps(str(session_id)))))
 
 
@@ -573,6 +576,64 @@ async def api_participant_strategy(session_id: UUID, participant_id: UUID,
                   diagnostics={"fuel": fuel, "energy_history_samples": len(sample.get("energy_history") or []),
                                "energy": energy_diagnostics(laps, sample)})
     return result
+
+
+PRERACE_SESSION_SQL = """
+    SELECT s.id,s.session_type,s.track_name,s.simulator_provider,s.session_laps,s.session_laps_confirmed,
+           s.session_duration_seconds
+    FROM sessions s JOIN session_participants sp ON sp.session_id=s.id
+    WHERE sp.driver_id=$1 AND s.status='live' AND EXISTS (
+        SELECT 1 FROM session_observations o JOIN agents a ON a.id=o.agent_id
+        WHERE o.session_id=s.id AND a.driver_id=sp.driver_id AND o.ended_at IS NULL
+        AND o.last_seen_at > now() - interval '15 seconds')
+    ORDER BY s.started_at DESC LIMIT 2"""
+
+
+@app.get("/api/drivers/{slug}/prerace")
+async def api_driver_prerace(
+    slug: str,
+    duration_minutes: float | None = None, race_laps: int | None = None, lap_time_s: float | None = None,
+    fuel_per_lap_l: float | None = None, ve_per_lap_percent: float | None = None,
+    tank_capacity_l: float | None = None, reserve_laps: float | None = None, ve_capable: bool | None = None,
+    sources: str | None = Query(default=None, max_length=300),
+) -> dict[str, Any]:
+    """Read-only pre-race plan for one driver. All plan inputs come from the request (manual or adopted
+    suggestions); `evidence` only offers suggestions from this driver's own participant in the one live session
+    this driver's own agent observes. Nothing is stored, no session or split is linked by track or time."""
+    assert pool
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        driver = await conn.fetchrow("SELECT id,slug,display_name FROM drivers WHERE slug=$1", slug.lower())
+        if not driver:
+            raise HTTPException(404, "driver not found")
+        sessions = await conn.fetch(PRERACE_SESSION_SQL, driver["id"])
+        evidence = context = None
+        if len(sessions) == 1:     # two simultaneous live sessions of one driver are ambiguous: no evidence
+            session = sessions[0]
+            own = await conn.fetch("""SELECT id,car_name FROM session_participants
+                WHERE session_id=$1 AND driver_id=$2 LIMIT 2""", session["id"], driver["id"])
+            if len(own) == 1:
+                laps = await conn.fetch("""SELECT lap_number,lap_time,fuel_remaining_l,pitstops,in_pits,
+                    energy_remaining_fraction FROM laps WHERE session_participant_id=$1 ORDER BY lap_number""",
+                                        own[0]["id"])
+                sample = await conn.fetchrow("""SELECT fuel_capacity_l,energy_available,energy_kind,energy_history,
+                    energy_current_fraction FROM strategy_samples WHERE session_participant_id=$1
+                    ORDER BY recorded_at DESC,id DESC LIMIT 1""", own[0]["id"])
+                sample = dict(sample) if sample else {}
+                if isinstance(sample.get("energy_history"), str):
+                    sample["energy_history"] = json.loads(sample["energy_history"])
+                evidence = prerace_evidence(dict(session), laps, sample, session["simulator_provider"])
+                context = {"session_id": session["id"], "session_type": session["session_type"],
+                           "track_name": session["track_name"], "car_name": own[0]["car_name"]}
+    origin = {}
+    for part in (sources or "").split(","):
+        field, _, value = part.partition(":")
+        if value in ("manual", "observed", "confirmed"):
+            origin[field] = value
+    plan = plan_prerace(dict(duration_minutes=duration_minutes, race_laps=race_laps, lap_time_s=lap_time_s,
+                             fuel_per_lap_l=fuel_per_lap_l, ve_per_lap_percent=ve_per_lap_percent,
+                             tank_capacity_l=tank_capacity_l, reserve_laps=reserve_laps, ve_capable=ve_capable),
+                        origin)
+    return {"driver": {"slug": driver["slug"]}, "plan": plan, "evidence": evidence, "context": context}
 
 
 OWN_LAP_HISTORY_SQL = """

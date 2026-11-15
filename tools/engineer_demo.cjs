@@ -388,11 +388,84 @@ async function verifyViewports(channel) {
   } finally { await browser.close(); }
 }
 
+// Pre-Race planner overlay (#66): opens over the dashboard without changing its layout and stays inside small viewports.
+async function verifyPrerace(channel) {
+  const {chromium} = require('playwright');
+  const repo = path.resolve(__dirname,'..'), output = path.join(repo,'build');
+  fs.mkdirSync(output,{recursive:true});
+  const demo=engineerDemo('ready');
+  demo.data.participants=demo.data.participants.map(p=>p.id===demo.focus?{...p,driver_slug:'synthetic',car_name:'Synthetic Car'}:p);
+  const plan={status:'incomplete',recommendation_available:false,start:null,fuel:null,energy:null,reserve_laps:1,pace_margin:.02,sources:{},
+    issues:[{code:'missing_lap_time',field:'lap_time_s',severity:'missing'}],
+    distance:{kind:'timed',duration_minutes:60,laps_min:null,laps_planning:null,pace_s:null}};
+  const evidence={session_type:'Qualify',representative_of_race:null,race_rules:{available:false},lap_time:{value:101.2,sample_count:5},
+    fuel_per_lap:{value:2.5,sample_count:4},ve_per_lap_percent:{value:null},ve_capable:false,tank_capacity_l:90};
+  const html=fs.readFileSync(path.join(repo,'server/static/session.html'),'utf8')
+    .replace('__SESSION_ID__',JSON.stringify(demo.data.session.id))
+    .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+    .replace('/*__PRERACE_UI__*/',fs.readFileSync(path.join(repo,'server/static/prerace.js'),'utf8'))
+    .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
+  const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
+  try {
+    const page=await browser.newPage({viewport:{width:1920,height:900},reducedMotion:'reduce'});
+    const problems=[];
+    page.on('pageerror',e=>problems.push(e.message));
+    await page.route('**/*',route=>{
+      const url=route.request().url();
+      if(!url.includes('/api/')) return route.fulfill({contentType:'text/html',body:html});
+      if(url.includes('/prerace')) return route.fulfill({json:{driver:{slug:'synthetic'},plan,evidence,context:{session_id:demo.data.session.id,track_name:'Synthetic Circuit',car_name:'Synthetic Car'}}});
+      return route.fulfill({json:url.includes('/strategy')?demo.strategy:demo.data});
+    });
+    await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
+    await page.locator('#prerace-toggle').waitFor();
+    const layout=()=>page.evaluate(()=>({h:document.documentElement.scrollHeight,fuel:document.querySelector('.fuel-panel').getBoundingClientRect().top}));
+    for (const [width,height] of [[1920,900],[1366,768]]) {
+      await page.setViewportSize({width,height});
+      await page.waitForTimeout(300);
+      const before=await layout();
+      if(!await page.locator('#prerace-panel').isVisible()) await page.locator('#prerace-toggle').click();
+      await page.locator('#pr-form').waitFor();
+      const m=await page.evaluate(()=>{const r=document.querySelector('#prerace-panel').getBoundingClientRect();
+        return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,docW:document.documentElement.scrollWidth,
+          text:document.querySelector('#prerace-panel').innerText,expanded:document.querySelector('#prerace-toggle').getAttribute('aria-expanded')};});
+      assert.equal(m.expanded,'true');
+      assert.ok(m.left>=0&&m.right<=width&&m.top>=0&&m.bottom<=height,`${width}x${height}: planner inside the viewport ${JSON.stringify(m)}`);
+      assert.ok(m.docW<=width,`${width}x${height}: no horizontal scrolling`);
+      assert.match(m.text,/not available[\s\S]*enter it manually/);
+      assert.match(m.text,/Qualify session, not race-representative/);
+      assert.match(m.text,/No recommendation: data missing/); assert.match(m.text,/Lap time is missing/);
+      assert.doesNotMatch(m.text,/Start\s+\d/);
+      await page.screenshot({path:path.join(output,`engineer-prerace-${width}x${height}.png`)});
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#prerace-panel').isVisible(),false,'Escape closes the planner');
+      // The overlay never moves the existing dashboard.
+      assert.deepEqual(await layout(),before,`${width}x${height}: dashboard layout unchanged by the planner`);
+    }
+    // Typing survives the periodic refresh; adopting an observation fills the field with its origin.
+    await page.setViewportSize({width:1920,height:900});
+    await page.locator('#prerace-toggle').click(); await page.locator('#pr-form').waitFor();
+    await page.waitForTimeout(400);   // the opening refresh replaces the previous form once
+    await page.locator('#pr-duration_minutes').fill('45');
+    await page.waitForTimeout(1500);
+    assert.equal(await page.locator('#pr-duration_minutes').inputValue(),'45','typed value is not overwritten by refresh');
+    await page.locator('button[data-adopt="lap_time_s"]').click();
+    await page.waitForFunction(()=>/observed/.test(document.querySelector('label[for="pr-lap_time_s"]')?.textContent||''),null,{timeout:4000});
+    assert.equal(await page.locator('#pr-lap_time_s').inputValue(),'101.200');
+    assert.equal(await page.locator('#pr-duration_minutes').inputValue(),'45','Use keeps the other unsaved input');
+    await page.locator('#pr-form button[type=submit]').click();
+    await page.waitForFunction(()=>/observed/.test(document.querySelector('label[for="pr-lap_time_s"]')?.textContent||'')&&!/unsaved/.test(document.querySelector('label[for="pr-lap_time_s"]').textContent),null,{timeout:4000});
+    assert.equal(await page.locator('#pr-duration_minutes').inputValue(),'45','saved value shown after Calculate');
+    assert.match(await page.locator('label[for="pr-lap_time_s"]').innerText(),/observed/);
+    assert.deepEqual(problems,[],'no JavaScript errors');
+    console.log('engineer pre-race gate passed');
+  } finally { await browser.close(); }
+}
+
 module.exports={engineerDemo};
 if(require.main===module) {
   if(process.argv.includes('--viewports')) {
     const index=process.argv.indexOf('--browser');
-    verifyViewports(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
+    verifyViewports(index<0?undefined:process.argv[index+1]).then(()=>verifyPrerace(index<0?undefined:process.argv[index+1])).catch(error=>{console.error(error);process.exitCode=1;});
   } else if(process.argv.includes('--screenshot') && process.argv.includes('--track-scenarios')) {
     const index=process.argv.indexOf('--browser');
     screenshotTrackScenarios(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});

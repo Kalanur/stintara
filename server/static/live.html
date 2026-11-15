@@ -49,6 +49,11 @@ tr.me{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus)}
 details summary{cursor:pointer}
 section[aria-label="Weather"] p{margin:2px 0}
 section[aria-label="Weather"] ul{margin:2px 0;padding-left:18px}
+.pr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:6px}
+.pr-ok{color:var(--ok)}.pr-warn{color:var(--pit)}.pr-bad{color:var(--live)}
+.pr-notes{margin:4px 0;padding-left:18px}.pr-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px}
+.pr-form>p,.pr-form>.pr-actions,.pr-mode{grid-column:1/-1}.pr-field{display:flex;flex-direction:column;gap:2px}.pr-hint{font-size:12px}
+.pr-mode{border:0;padding:0;display:flex;gap:16px}.pr-dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px}.pr-dl dd{margin:0}
 footer{margin-top:4px;font-size:12px;overflow-wrap:anywhere}
 @media(max-width:1100px),(max-height:700px){
   .dash{display:flex;flex-direction:column}
@@ -62,6 +67,7 @@ footer{margin-top:4px;font-size:12px;overflow-wrap:anywhere}
 <footer class="muted">__BUILD_LABEL__</footer>
 <script>
 __WEATHER_UI__
+/*__PRERACE_UI__*/
 
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = t => Number.isFinite(t) && t > 0 ? `${Math.floor(t/60)}:${(t%60).toFixed(3).padStart(6,'0')}` : '—';
@@ -142,6 +148,10 @@ function focusStrip(d, me) {
     <div class="card"><div class="label">Best lap</div><div class="big">${fmt(f.best_lap_time)}</div><div class="small">&nbsp;</div></div>
     <div class="card" aria-label="Last timed lap sectors"><div class="label">Last timed lap sectors${int(last.lap_number, 1) === null ? '' : ` · lap ${last.lap_number}`}</div><div class="sectors">${sectors}</div></div></section>`;
 }
+function focusQueryOf(d) {
+  const own = d.participants.filter(p => p.is_stintara_driver);
+  return own.length === 1 && own[0].participant_id ? `?focus=${encodeURIComponent(own[0].participant_id)}` : '';
+}
 function tyreTable(s) {
   return `<h2>Tyres</h2><table class="tyres"><thead><tr><th>Corner</th><th>Remaining</th><th>Pressure</th>
     <th>Inner / Mid / Outer</th><th>Brake</th></tr></thead><tbody>${['fl','fr','rl','rr'].map(c =>
@@ -172,6 +182,7 @@ function render(d) {
         <td>${p.in_pits ? 'PIT' : ''}</td></tr>`).join('')}</tbody></table></div></section>
     <div class="side-col"><section class="panel" aria-label="Tyres and fuel"><div class="metrics">${metric('Fuel', num(s.fuel_l, ' L'))}${metric('Fuel/lap', num(s.fuel_avg_consumption_lap, ' L', 2))}
       ${metric('Fuel laps remaining', num(s.fuel_laps_remaining))}</div>${tyreTable(s)}</section>
+      ${preraceHtml}
       <section class="panel">${weatherWidget(d.session.weather, d.live, true)}</section></div>`;
   if (html === lastHtml) return;   // identical frame: leave focus, disclosures and scroll untouched
   lastHtml = html;
@@ -190,6 +201,19 @@ function render(d) {
     : activeId ? document.querySelector('#' + activeId) : null;
   target?.focus?.({preventScroll:true});
 }
+// Pre-race summary: own loop (the plan lives in this browser), re-rendered into the live frame when it changes.
+let preraceHtml = '', preraceAt = 0, preraceStorage = null;
+try { preraceStorage = typeof localStorage === 'undefined' ? null : localStorage; } catch { /* storage may be blocked */ }
+async function refreshPrerace(engineerHref) {
+  if (typeof PreRaceUI === 'undefined' || Date.now() - preraceAt < 5000) return;
+  preraceAt = Date.now();
+  try {
+    const state = PreRaceUI.read(preraceStorage, slug);
+    const next = PreRaceUI.summary(await PreRaceUI.load(slug, state, fetch), state, engineerHref);
+    if (next !== preraceHtml) { preraceHtml = next; lastHtml = null; }
+  } catch { if (preraceHtml) { preraceHtml = ''; lastHtml = null; } }
+}
+if (typeof addEventListener === 'function') addEventListener('storage', () => { preraceAt = 0; });
 async function refresh() {
   const root = document.querySelector('#root');
   try {
@@ -200,6 +224,7 @@ async function refresh() {
       root.innerHTML = `<h1>${esc(d.driver.display_name)}</h1><p class="muted">Offline</p><p><a href="/">← Stintara</a></p>`;
       return;
     }
+    await refreshPrerace(`/sessions/${encodeURIComponent(d.session.id)}/live${focusQueryOf(d)}#prerace`);
     render(d);
   } catch (error) { lastHtml = null; root.className = 'plain muted'; root.textContent = error.message; }
   finally { setTimeout(refresh, 500); }

@@ -266,6 +266,43 @@ Restart/disconnect loses the pending deadline; the next connection resolves afre
 
 The existing Fuel Foundation stays unchanged. Optional fraction-based Energy fields are normalized by the LMU agent adapter and stored in four nullable columns on the existing 1 Hz strategy sample. The same observer's scoring provides current player Energy; telemetry supplies explicit tri-state availability and completed-level history. The evolving last provider history entry is excluded. Because real LMU captures delivered no history, the primary VE consumption source is the nullable `laps.energy_remaining_fraction` (fresh scoring VE stored with each lap checkpoint, same exclusions as fuel); provider history is a fallback and each resource exposes an explicit data state (unknown/stale/collecting/ready). The GET Strategy endpoint reads existing session/lap/sample data in a read-only transaction and uses fresh session scoring; no plan state is persisted. Browser plans are versioned and scoped by session/participant UUID. The Engineer replaces its Fuel fetch with the Strategy fetch using the same polling loop and stale-response guard. Full details, source evidence and outstanding field uncertainties are in [RESOURCE_STRATEGY.md](RESOURCE_STRATEGY.md). This pass references #22/#9/#8 and does not complete those milestones.
 
+## Pre-race planning (#66; implemented MVP, synthetic and browser-viewport verification only)
+
+A race-distance and starting-resource estimate that is available before green, including during Qualifying. It is a **manual planning aid**, distinct from the live next-stop Strategy, and it never changes LMU pit settings.
+
+### Data availability (verified against the code and the documented Pitwall contract)
+
+| Information | State | Basis |
+| --- | --- | --- |
+| Duration / lap limit of the **current** session | confirmed only after the #20 binding | `SessionInfo` carries `session_laps` and `session_minutes`; `session_minutes` is the session **end on the session clock**, not a configured duration. Only `session_meta` commits `session_laps_confirmed` / `session_duration_seconds`. |
+| Duration / lap limit of the **upcoming race**, seen from Qualifying | **not available** | `SessionInfo` describes the current session; nothing in the adapter or in the Pitwall interfaces reviewed here describes the next one. Qualifying values are never reused for the race. Other local LMU sources were not validated and are not used. |
+| Fuel and VE multipliers, tyre/fuel rules | **not available** | Not part of any consumed message. Consumption is measured, never derived from a multiplier. |
+| Tank capacity of the own car | confirmed (own car) | `fuel_capacity_l` of the driver's own strategy sample (player-only fields, see lap sensor provenance). |
+| VE capability of the own car | confirmed when reported, otherwise unknown | `energy_available` of the own strategy sample. Unknown is never treated as "no VE". |
+| Lap time, fuel per lap, VE per lap | **estimated**, same session/car/track only | Median of the last valid laps / checkpoint transitions of the driver's own participant (existing `fuel.consumption_estimate`, VE checkpoints, clean non-pit laps). Qualifying values are flagged as not race-representative. |
+| Race duration or lap count, pace, consumption (fallback) | **manual** | Required whenever the above is unavailable. |
+
+### Model
+
+`app/prerace.py` is pure and simulator-neutral: `plan_prerace` (calculation from explicit inputs with their origin) and `prerace_evidence` (suggested values for one own participant; never applied automatically).
+
+- Timed race: `laps_min = ceil(T / pace)`, `laps_planning = ceil(T / (pace · (1 − 2 %))) + 1` (the flag falls at the first leader crossing after the clock, as in `finish_projection`). Lap-limited race: exact.
+- `required fuel = (laps_planning + reserve_laps) · fuel_per_lap`, default reserve 1.0 lap (0..5); VE analogously in percent against 100 %. Fuel and VE are separate results; formation, out-lap and in-lap are not modelled.
+- Status `ready` (start values), `ready_capacity_unchecked`, `stop_required` (one load does not cover the race; no start value, no stop optimisation), `incomplete` (missing inputs), `invalid_input`, `conflicting_input`. Missing or invalid inputs, contradictory race length, a VE car without VE consumption and an **unknown** VE capability all yield **no recommendation**; there is no fuel-only advice for a VE-capable or unknown car.
+
+### API and UI
+
+`GET /api/drivers/{slug}/prerace` is read-only and writes nothing. Plan inputs come only from query parameters (manual values or adopted suggestions, each with its origin). `evidence` and `context` come from the driver's own participant in the one live session that this driver's own agent observes; two simultaneous live sessions of one driver, or a missing/ambiguous own participant, yield no evidence. Other drivers' sessions and other splits are never read.
+
+The plan itself lives only in the browser (`localStorage`, per driver slug, not per session or participant), so it is not session telemetry and survives the Qualifying → Race session change **without linking sessions by track or time**. Every value keeps its own origin and a track/car stamp from when it was entered or adopted; Calculate and Use never restamp untouched values. Values stamped for another car or track are flagged as not verified (in Driver Live and Engineer) until explicitly confirmed ("Still valid"); the same car and track across Qualifying → Race is not flagged. Unsaved form input lives in an in-memory draft: Use only fills the chosen field. Fields hidden by the chosen race-length mode or by "no VE" are neither validated nor saved, but their saved value, origin and stamp and their draft text (with adoption metadata) are kept for switching back; which fields are active is defined once (`activeFields(state, draft)`): the Engineer form and its warnings use the draft, the plan query and Driver Live the saved state only; hidden values are omitted from the plan query and from stale flags. The Engineer applies suggestions only when the response's `context.session_id` equals the session being viewed; evidence of another session (second split, or the driver moving on) is hidden and ignored. Driver Live shows a compact read-only "Race prep" panel; the Engineer has an on-demand Pre-Race overlay (toolbar button, `#prerace`) with manual inputs, adoptable evidence and the full derivation. The session overview shows nothing private.
+
+### Limitations
+
+- The upcoming race's duration cannot be read automatically; it must be entered once. After green in a Race session, confirmed rules are offered as a suggestion (not applied silently).
+- The plan is per browser profile and driver slug: Driver Live and Engineer in the same profile share it; another PC or profile does not.
+- Qualifying pace and fuel are suggestions marked as not race-representative; no cross-car, cross-track or cross-session consumption history is used.
+- No multi-stint optimisation, no VE/fuel ratio recommendation for pit settings, no real-LMU validation yet.
+
 ## Track map and race control (experimental)
 
 The Engineer shows a learned track outline, current vehicle positions and a small simulator-neutral race-control state. Spatial scoring fields and a `race_control` message are additive on `stintara-agent-v1`; vehicle positions and race control live only in bounded runtime memory (no PostgreSQL history), the closed track geometry is persisted in `track_geometries` (V0.2: PostgreSQL is the durable source, `TrackStore` the hot cache, fail-closed validation on load, static-only payload for historical sessions, AUTO/ORIGINAL orientation is browser presentation only), and `GET /api/sessions/{id}/live` carries a read-only `track_map` object. For smoother vehicle motion (#55) `GET /api/sessions/{id}/vehicles` serves only the runtime positions of the newest fresh observation of that session, polled by the page every 250 ms alongside the unchanged 500 ms `/live` poll; it performs no PostgreSQL query (participant IDs come from a session-tagged runtime cache filled by the existing participant upsert), orders samples by a process-wide sequence plus server epoch, and adds no schema, agent-protocol or Strategy/Driver Live change. The outline is never closed by lap-distance wrap alone; closure requires lap-distance and spatial plausibility together. Provider flag semantics are evidence-based and unknown values degrade safely. Details, evidence table and limitations: [TRACKMAP_RACE_CONTROL.md](TRACKMAP_RACE_CONTROL.md).

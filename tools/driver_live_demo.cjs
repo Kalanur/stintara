@@ -51,6 +51,15 @@ function driverLive(scenario, tick = 0) {
   }
 }
 
+// Synthetic pre-race plan (#66): what GET /api/drivers/{slug}/prerace returns for the stored manual plan below.
+const preraceFixture = {driver:{slug:'synthetic'},evidence:null,context:null,plan:{status:'ready',recommendation_available:true,
+  issues:[{code:'tank_capacity_unknown',field:'tank_capacity_l',severity:'warning'}],sources:{duration_minutes:'manual',lap_time_s:'manual',fuel_per_lap_l:'manual'},
+  reserve_laps:1,pace_margin:.02,start:{fuel_l:99,ve_percent:82.5},energy:{capable:true,per_lap_percent:2.5,required_percent:82.5,single_stint_feasible:true},
+  distance:{kind:'timed',duration_minutes:60,laps_min:30,laps_planning:32,pace_s:120},
+  fuel:{per_lap_l:3,required_l:99,tank_capacity_l:null,full_tank_laps:null,single_stint_feasible:null}}};
+const storedPlan = {v:1,mode:'time',values:{duration_minutes:60,lap_time_s:120,fuel_per_lap_l:3,ve_per_lap_percent:2.5},ve_capable:true,
+  sources:{duration_minutes:'manual',lap_time_s:'manual',fuel_per_lap_l:'manual',ve_per_lap_percent:'manual',ve_capable:'manual'},context:null};
+
 const VIEWPORTS = [[1920,911,'real 1080p display'],[2560,1271,'real 1440p display']];
 const PANELS = '.dash > .panel, .side-col > .panel';
 
@@ -61,14 +70,17 @@ async function verifyDriverLive(channel) {
   const html = fs.readFileSync(path.join(repo,'server/static/live.html'),'utf8')
     .replace('__DRIVER_SLUG__',JSON.stringify('synthetic'))
     .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+    .replace('/*__PRERACE_UI__*/',fs.readFileSync(path.join(repo,'server/static/prerace.js'),'utf8'))
     .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
   const browser = await chromium.launch({headless:true,...(channel?{channel}:{})});
   const page = await browser.newPage({viewport:{width:1920,height:911},reducedMotion:'reduce'});
   const problems = [], state = {scenario:'green',tick:0,status:200,requests:0};
   page.on('console',m=>{ if (m.type()==='error' && !/status of 500/.test(m.text())) problems.push(`console: ${m.text()}`); });
   page.on('pageerror',e=>problems.push(`pageerror: ${e.message}`));
+  await page.addInitScript(plan => { try { localStorage.setItem('stintara:prerace:v1:synthetic',plan); } catch {} },JSON.stringify(storedPlan));
   await page.route('**/*',route => {
     if (!route.request().url().includes('/api/')) return route.fulfill({contentType:'text/html',body:html});
+    if (route.request().url().includes('/prerace')) return route.fulfill({json:preraceFixture});
     state.requests++;
     if (state.status !== 200) return route.fulfill({status:state.status,json:{}});
     return route.fulfill({json:driverLive(state.scenario,++state.tick)});
@@ -103,7 +115,7 @@ async function verifyDriverLive(channel) {
       const m = await measure(), where = `${width}x${height} (${label})`;
       assert.ok(m.docW <= width,`${where}: no horizontal scrolling`);
       assert.ok(m.docH <= height,`${where}: no document scrolling (${m.docH} > ${height})`);
-      assert.equal(m.panelCount,5,`${where}: header, focus, standings, tyres, weather`);
+      assert.equal(m.panelCount,6,`${where}: header, focus, standings, race prep, tyres, weather`);
       assert.deepEqual(m.overlaps,[],`${where}: panels overlap`);
       assert.deepEqual(m.clipped,[],`${where}: clipped focus text`);
       assert.deepEqual(m.small,[],`${where}: text below 12 px`);
@@ -112,7 +124,7 @@ async function verifyDriverLive(channel) {
       assert.equal(m.sectorsVisible,true,`${where}: S1/S2/S3 visible`);
       assert.ok(m.standingsOverflow,`${where}: standings scroll internally, not the page`);
       const t = await text();
-      for (const expected of ['TRACK','P7','+22.4','13','12 completed','1:31.512','1:30.612','29.101','34.226','28.185','S2 · now','1 stop · last stop L6','42.3 L','82.0%'])
+      for (const expected of ['TRACK','P7','+22.4','13','12 completed','1:31.512','1:30.612','29.101','34.226','28.185','S2 · now','1 stop · last stop L6','42.3 L','82.0%','Race prep','30–32 laps','99.0 L','82.5 %','Manual: 3 inputs'])
         assert.ok(t.includes(expected),`${where}: shows ${expected}`);
       await page.screenshot({path:path.join(output,`driver-live-${width}x${height}.png`),fullPage:true});
       console.log(JSON.stringify({where,docH:m.docH,rows:m.rows,sideHidden:m.sideHidden}));
