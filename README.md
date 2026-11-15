@@ -369,6 +369,7 @@ This workflow change does not create `dev`, merge code or deploy an image. Publi
 - A driver is associated through the authenticated agent and the simulator's player vehicle ID, never through a display name. No public account/login system is implemented.
 - Session end is inferred from source disconnect, transition or inactivity; no official results finalization yet.
 - The live pages poll REST. A single server worker is required for the current in-memory live cache.
+- Pre-race planning (Engineer "Pre-Race", Driver Live "Race prep") is a manual, per-browser estimate: LMU does not provide the upcoming race length, so it must be entered; see [Pre-race planning](docs/ARCHITECTURE.md#pre-race-planning-66-implemented-mvp-synthetic-and-browser-viewport-verification-only).
 - No raw high-frequency storage, Parquet, historical UI, Results XML reconciliation, Redis or microservices.
 - The operator has completed an initial real LMU/container-host smoke test of the baseline. This hardening revision still requires a repeat real test; optional reverse-proxy integration remains unverified. See docs/VALIDATION.md for the distinction.
 
