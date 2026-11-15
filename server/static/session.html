@@ -222,18 +222,30 @@ h1{font-size:22px}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
 }
 
+.pr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:6px}
+.pr-ok{color:var(--ok)}.pr-warn{color:var(--pit)}.pr-bad{color:var(--live)}
+.pr-notes{margin:4px 0;padding-left:18px}.pr-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px}
+.pr-form>p,.pr-form>.pr-actions,.pr-mode{grid-column:1/-1}.pr-field{display:flex;flex-direction:column;gap:2px}.pr-hint{font-size:12px}
+.pr-overlay{position:fixed;z-index:30;top:48px;right:12px;width:min(640px,calc(100vw - 24px));max-height:calc(100vh - 64px);overflow:auto;box-shadow:0 6px 24px rgba(0,0,0,.55)}
+.pr-overlay[hidden]{display:none}.pr-head{display:flex;justify-content:space-between;align-items:center}
+.pr-mode{border:0;padding:0;display:flex;gap:16px}.pr-dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px}.pr-dl dd{margin:0}
 </style></head><body>
 <nav class="toolbar" aria-label="Engineer controls"><a class="brand" href="/">STINTARA <small>RACE ENGINEER</small></a>
-<div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div></nav>
+<div class="focus-control"><label for="focus">Focus participant</label> <select id="focus"><option value="">Choose a participant</option></select></div>
+<button type="button" id="prerace-toggle" class="pr-toggle" aria-expanded="false" aria-controls="prerace-panel" hidden>Pre-Race</button></nav>
 <main class="dashboard">
 <div id="root">Loading…</div>
 <section class="panel fuel-panel" aria-label="Resource strategy"><h2>Strategy <small class="muted">· Experimental</small></h2>
 <form id="plan-form" class="plan-control"><label for="planned-stop">Pit at end of lap</label><input id="planned-stop" type="number" min="1" step="1" aria-describedby="plan-feedback"><button type="submit">Apply</button><button id="plan-auto" type="button">AUTO</button><span id="plan-feedback" class="muted" role="status"></span></form>
 <div id="fuel">Choose a participant to inspect resource data.</div></section>
 </main>
+<section class="panel pr-overlay" id="prerace-panel" aria-label="Pre-race planner" hidden>
+<div class="pr-head"><h2>Pre-Race <small class="muted">· Experimental planner</small></h2><button type="button" id="prerace-close">Close</button></div>
+<div id="prerace" class="muted">Choose a registered driver as focus to plan the race.</div></section>
 <footer>__BUILD_LABEL__</footer>
 <script>
 __WEATHER_UI__
+/*__PRERACE_UI__*/
 const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = t => Number.isFinite(t) && t > 0 ? `${Math.floor(t/60)}:${(t%60).toFixed(3).padStart(6,'0')}` : '—';
 
@@ -795,6 +807,41 @@ let fuelRequest = 0;
 let fuelParticipant = null;
 let planStorage = null;
 try { planStorage = typeof localStorage==='undefined'?null:localStorage; } catch { /* Storage may be blocked by browser policy. */ }
+let preraceKey = null, preraceAt = 0, preraceRun = 0, preraceBound = false;
+async function refreshPrerace(force = false) {
+  if (typeof PreRaceUI === 'undefined') return;
+  try {
+    const panel = document.querySelector('#prerace-panel');
+    if (!panel || panel.hidden !== false) return;   // the planner only polls while it is open
+    const box = document.querySelector('#prerace');
+    const me = latestData && focusId ? participantById(latestData.participants, focusId) : null;
+    const slug = me?.driver_slug || null;
+    if (!preraceBound) {
+      PreRaceUI.bind(box, {storage: planStorage, slug: () => preraceKey, refresh: refreshPrerace,
+        context: () => ({track_name: latestData?.session?.track_name, car_name: participantById(latestData?.participants || [], focusId)?.car_name})});
+      preraceBound = true;
+    }
+    if (!slug) { preraceKey = null; ++preraceRun; box.className = 'muted'; box.textContent = 'Choose a registered driver as focus to plan the race.'; return; }
+    if (!force && slug === preraceKey && Date.now() - preraceAt < 5000) return;
+    if (!force && box.contains(document.activeElement)) return;   // never overwrite what is being typed
+    preraceKey = slug; preraceAt = Date.now();
+    const run = ++preraceRun, state = PreRaceUI.read(planStorage, slug);
+    const data = await PreRaceUI.load(slug, state, fetch);
+    if (run !== preraceRun || preraceKey !== slug) return;
+    if (!force && box.contains(document.activeElement)) return;   // typing started while the request was in flight
+    box.className = ''; box.innerHTML = PreRaceUI.engineer({...data, context: data.context}, state);
+  } catch { /* the planner must never disturb the live view; the next tick retries */ }
+}
+function setupPrerace() {
+  const toggle = document.querySelector('#prerace-toggle'), panel = document.querySelector('#prerace-panel'), close = document.querySelector('#prerace-close');
+  if (typeof PreRaceUI === 'undefined' || typeof toggle?.addEventListener !== 'function' || typeof close?.addEventListener !== 'function') return;
+  toggle.hidden = false;
+  const show = open => { panel.hidden = !open; toggle.setAttribute('aria-expanded', String(open)); if (open) void refreshPrerace(true); else toggle.focus?.(); };
+  toggle.addEventListener('click', () => show(panel.hidden));
+  close.addEventListener('click', () => show(false));
+  addEventListener('keydown', event => { if (event.key === 'Escape' && !panel.hidden) show(false); });
+  if (location.hash === '#prerace') show(true);
+}
 function updatePlanControl() {
   const input=document.querySelector('#planned-stop');
   if(input) { input.value=readPlan(planStorage,sessionId,focusId) ?? ''; input.disabled=!focusId; }
@@ -1020,6 +1067,7 @@ async function refresh() {
     renderSession(d);
     ensureVehicleLoop(d);
     await refreshFuel();
+    void refreshPrerace();
   } catch (error) {
     document.querySelector('#root').textContent = error.message;
     ++fuelRequest;
@@ -1027,5 +1075,6 @@ async function refresh() {
   }
   finally { setTimeout(refresh, 500); }
 }
+setupPrerace();
 refresh();
 </script></body></html>

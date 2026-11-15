@@ -1805,3 +1805,123 @@ test('load probe summary reports rate, errors and percentiles without inventing 
   assert.equal(report.response_ms.max, 100);
   assert.deepEqual(summarise([], 4, 2, 1).response_ms, {median: null, p95: null, max: null});
 });
+
+// ---- Pre-race planner (#66)
+function preraceUI() {
+  const context = vm.createContext({URL, URLSearchParams, Date});
+  vm.runInContext(readFileSync(path.join(__dirname, '../server/static/prerace.js'), 'utf8') + ';this.PreRaceUI=PreRaceUI;', context);
+  return context.PreRaceUI;
+}
+const fakeStorage = (initial = {}) => { const m = new Map(Object.entries(initial));
+  return {m, getItem: k => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k)}; };
+const planOf = (over = {}) => ({status: 'ready', recommendation_available: true, issues: [], sources: {duration_minutes: 'manual'},
+  reserve_laps: 1, pace_margin: .02, start: {fuel_l: 99, ve_percent: null}, energy: {capable: false},
+  distance: {kind: 'timed', duration_minutes: 60, laps_min: 30, laps_planning: 32, pace_s: 120},
+  fuel: {per_lap_l: 3, required_l: 99, tank_capacity_l: 100, full_tank_laps: 33.3, single_stint_feasible: true}, ...over});
+
+test('pre-race plan storage is per driver, validated and survives corrupt data', () => {
+  const ui = preraceUI(), store = fakeStorage();
+  const state = {v: 1, mode: 'time', values: {duration_minutes: 60, lap_time_s: 'x', bogus: 1}, ve_capable: false,
+    sources: {duration_minutes: 'manual', lap_time_s: 'hack'}, context: {track_name: 'Spa', car_name: 'Car'}};
+  assert.equal(ui.write(store, 'one', state), true);
+  const back = ui.read(store, 'one');
+  assert.deepEqual({...back.values}, {duration_minutes: 60});
+  assert.deepEqual({...back.sources}, {duration_minutes: 'manual'});
+  assert.equal(back.ve_capable, false);
+  assert.deepEqual({...ui.read(store, 'two').values}, {});            // another driver never sees this plan
+  store.setItem('stintara:prerace:v1:one', '{not json');
+  assert.deepEqual({...ui.read(store, 'one').values}, {});
+  assert.equal(ui.write(null, 'one', state), false);
+  assert.equal(ui.read(null, 'one').mode, 'time');
+});
+
+test('pre-race query sends only the selected race-length field and the origin of every value', () => {
+  const ui = preraceUI();
+  const base = {v: 1, values: {duration_minutes: 60, race_laps: 20, lap_time_s: 120.5}, ve_capable: true,
+    sources: {lap_time_s: 'observed', ve_capable: 'observed'}, context: null};
+  const timed = new URLSearchParams(ui.query({...base, mode: 'time'}));
+  assert.equal(timed.get('duration_minutes'), '60'); assert.equal(timed.get('race_laps'), null);
+  assert.equal(timed.get('ve_capable'), 'true');
+  assert.match(timed.get('sources'), /lap_time_s:observed/); assert.match(timed.get('sources'), /duration_minutes:manual/);
+  const laps = new URLSearchParams(ui.query({...base, mode: 'laps'}));
+  assert.equal(laps.get('race_laps'), '20'); assert.equal(laps.get('duration_minutes'), null);
+});
+
+test('driver summary escapes content, hides a recommendation it does not have and flags a changed context', () => {
+  const ui = preraceUI();
+  const empty = ui.summary({plan: planOf({status: 'incomplete', start: null}), context: null}, ui.read(null, 'x'), '/sessions/s/live#prerace');
+  assert.match(empty, /No race plan/); assert.match(empty, /Open planner/);
+  const state = {v: 1, mode: 'time', values: {duration_minutes: 60}, ve_capable: false, sources: {duration_minutes: 'manual'},
+    context: {track_name: 'Spa', car_name: 'Car A'}};
+  const html = ui.summary({plan: planOf(), context: {track_name: '<img onerror=x>', car_name: 'Car A'}}, state, null);
+  assert.match(html, /99\.0 L/); assert.match(html, /30–32 laps/); assert.match(html, /different context/);
+  assert.doesNotMatch(html, /<img/);
+  const blocked = ui.summary({plan: planOf({status: 'incomplete', start: null, issues: [{code: 've_capability_unknown', field: 've_capable'}]}), context: null}, state, null);
+  assert.doesNotMatch(blocked, /99\.0 L/); assert.match(blocked, /Unknown whether this car uses Virtual Energy/);
+  const tank = ui.summary({plan: planOf({status: 'stop_required', start: null}), context: null}, state, null);
+  assert.match(tank, /More than one load/); assert.match(tank, /does not cover the race/);
+});
+
+test('engineer planner offers observed values as suggestions and marks qualifying data as not race-representative', () => {
+  const ui = preraceUI();
+  const evidence = {session_type: 'Qualify', representative_of_race: null, race_rules: {available: false},
+    lap_time: {value: 101.234, sample_count: 5}, fuel_per_lap: {value: 2.5, sample_count: 4},
+    ve_per_lap_percent: {value: null}, ve_capable: true, tank_capacity_l: 90};
+  const html = ui.engineer({plan: planOf({status: 'incomplete', start: null, fuel: null}), evidence, context: null}, ui.read(null, 'x'));
+  assert.match(html, /not available/); assert.match(html, /enter it manually/);
+  assert.match(html, /data-adopt="lap_time_s" data-value="101.234"/);
+  assert.match(html, /Qualify session, not race-representative/);
+  assert.match(html, /data-adopt-ve="true"/);
+  assert.match(html, /No recommendation: data missing/);
+  assert.doesNotMatch(html, /99\.0 L/);
+});
+
+test('engineer actions save manual and adopted values with their origin and never invent values', () => {
+  const ui = preraceUI(), store = fakeStorage(), handlers = {}, fields = [];
+  const feedback = {textContent: ''};
+  const field = (name, value) => { const f = {dataset: {field: name}, value}; fields.push(f); return f; };
+  const box = {addEventListener: (type, fn) => { handlers[type] = fn; },
+    querySelector: s => s === 'input[name="pr-mode"]:checked' ? {value: 'time'} : s === '#pr-ve' ? {value: 'no'} : s === '#pr-feedback' ? feedback : null,
+    querySelectorAll: () => fields};
+  let refreshed = 0;
+  ui.bind(box, {storage: store, slug: () => 'one', refresh: () => { refreshed++; }, context: () => ({track_name: 'Spa', car_name: 'Car'})});
+  field('duration_minutes', '45'); field('lap_time_s', '118,5'); field('fuel_per_lap_l', '');
+  handlers.submit({preventDefault() {}});
+  let saved = ui.read(store, 'one');
+  assert.deepEqual({...saved.values}, {duration_minutes: 45, lap_time_s: 118.5});
+  assert.deepEqual({...saved.sources}, {duration_minutes: 'manual', lap_time_s: 'manual', ve_capable: 'manual'});
+  assert.equal(saved.ve_capable, false); assert.deepEqual({...saved.context}, {track_name: 'Spa', car_name: 'Car'});
+  handlers.click({target: {dataset: {adopt: 'fuel_per_lap_l', value: '2.50'}}});
+  saved = ui.read(store, 'one');
+  assert.equal(saved.values.fuel_per_lap_l, 2.5); assert.equal(saved.sources.fuel_per_lap_l, 'observed');
+  handlers.click({target: {dataset: {adopt: 'fuel_per_lap_l', value: 'NaN'}}});
+  assert.equal(ui.read(store, 'one').values.fuel_per_lap_l, 2.5);            // a non-number is never stored
+  fields[0].value = 'abc'; handlers.submit({preventDefault() {}});
+  assert.match(feedback.textContent, /not a number/); assert.equal(ui.read(store, 'one').values.duration_minutes, 45);
+  assert.equal(ui.read(store, 'two').values.duration_minutes, undefined);    // other drivers are untouched
+  handlers.click({target: {id: 'pr-clear', dataset: {}}});
+  assert.deepEqual({...ui.read(store, 'one').values}, {});
+  assert.ok(refreshed >= 3);
+});
+
+test('driver live shows the race prep summary and keeps rendering when the plan endpoint fails', async () => {
+  for (const planOk of [true, false]) {
+    const root = {innerHTML: '', textContent: '', className: ''};
+    const live = {live: true, driver: {display_name: 'Synthetic'}, session: {id: 's1', track_name: 'Spa', session_type: 'Qualify', weather: {}},
+      participants: [{participant_id: 'p1', is_stintara_driver: true, position: 1}], focus: null, strategy: null};
+    const prerace = {driver: {slug: 'synthetic'}, plan: planOf(), evidence: null, context: null};
+    let done;
+    const script = readFileSync(path.join(__dirname, '../server/static/live.html'), 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1]
+      .replace('__WEATHER_UI__', weatherScript()).replace('/*__PRERACE_UI__*/', readFileSync(path.join(__dirname, '../server/static/prerace.js'), 'utf8'))
+      .replace('__DRIVER_SLUG__', '"synthetic"');
+    const wait = new Promise(resolve => { done = resolve; });
+    const storage = fakeStorage({'stintara:prerace:v1:synthetic': JSON.stringify({v: 1, mode: 'time', values: {duration_minutes: 60}, sources: {duration_minutes: 'manual'}, ve_capable: false})});
+    vm.runInNewContext(script, {document: {querySelector: () => root, activeElement: null}, localStorage: storage, URL, URLSearchParams, Date,
+      fetch: async url => url.includes('/prerace') ? {ok: planOk, status: planOk ? 200 : 500, json: async () => prerace} : {ok: true, json: async () => live},
+      setTimeout: done});
+    await wait;
+    assert.match(root.innerHTML, /Standings/);
+    if (planOk) { assert.match(root.innerHTML, /Race prep/); assert.match(root.innerHTML, /99\.0 L/); assert.match(root.innerHTML, /\/sessions\/s1\/live\?focus=p1#prerace/); }
+    else assert.doesNotMatch(root.innerHTML, /Race prep/);
+  }
+});
