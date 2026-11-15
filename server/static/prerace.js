@@ -1,13 +1,15 @@
 // Shared pre-race planner UI (#66), injected into Driver Live (compact summary) and Engineer (detailed planner).
 // The plan lives only in this browser (localStorage, per driver slug, never per session): it is a manual
 // planning aid, not session telemetry, and survives the Qualifying -> Race session change because it is bound
-// to nothing but the driver. All calculation happens on the server (GET /api/drivers/{slug}/prerace).
+// to nothing but the driver. Every value keeps its own origin and the car/track it was entered for (`stamps`);
+// values stamped for another car or track are flagged and must be confirmed again. Unsaved form input lives in
+// an in-memory draft until "Calculate". All calculation happens on the server (GET /api/drivers/{slug}/prerace).
 const PreRaceUI = (() => {
   const FIELDS = ['duration_minutes', 'race_laps', 'lap_time_s', 'fuel_per_lap_l', 've_per_lap_percent',
                   'tank_capacity_l', 'reserve_laps'];
   const LABELS = {duration_minutes: 'Race duration (min)', race_laps: 'Race laps', lap_time_s: 'Lap time (s)',
                   fuel_per_lap_l: 'Fuel per lap (L)', ve_per_lap_percent: 'VE per lap (%)',
-                  tank_capacity_l: 'Tank capacity (L)', reserve_laps: 'Safety reserve (laps)'};
+                  tank_capacity_l: 'Tank capacity (L)', reserve_laps: 'Safety reserve (laps)', ve_capable: 'VE capability'};
   const ISSUES = {
     missing_race_length: 'Race duration or lap count is missing', missing_lap_time: 'Lap time is missing',
     missing_fuel_per_lap: 'Fuel per lap is missing', missing_ve_per_lap: 'VE per lap is missing for this VE car',
@@ -20,7 +22,9 @@ const PreRaceUI = (() => {
   const e = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const n = (value, digits = 1, unit = '') => Number.isFinite(value) ? value.toFixed(digits) + unit : '—';
   const key = slug => `stintara:prerace:v1:${slug}`;
-  const empty = () => ({v: 1, mode: 'time', values: {}, ve_capable: null, sources: {}, context: null});
+  const empty = () => ({v: 1, mode: 'time', values: {}, ve_capable: null, sources: {}, stamps: {}});
+  const stampOf = c => c && typeof c === 'object' ? {track_name: String(c.track_name ?? '').slice(0, 200), car_name: String(c.car_name ?? '').slice(0, 200)} : null;
+  const drafts = new Map();   // unsaved form state per driver slug, in memory only
 
   function read(storage, slug) {
     try {
@@ -32,15 +36,32 @@ const PreRaceUI = (() => {
       state.ve_capable = typeof raw.ve_capable === 'boolean' ? raw.ve_capable : null;
       for (const [f, s] of Object.entries(raw.sources || {}))
         if (['manual', 'observed', 'confirmed'].includes(s)) state.sources[f] = s;
-      const c = raw.context;
-      state.context = c && typeof c === 'object' ? {track_name: String(c.track_name ?? '').slice(0, 200), car_name: String(c.car_name ?? '').slice(0, 200)} : null;
+      // Older plans carried one plan-level stamp: it applies to every value that existed then.
+      const legacy = stampOf(raw.context);
+      for (const f of [...FIELDS, 've_capable']) {
+        const stamp = stampOf(raw.stamps?.[f]) || (legacy && (f === 've_capable' ? state.ve_capable !== null : f in state.values) ? legacy : null);
+        if (stamp) state.stamps[f] = stamp;
+      }
       return state;
     } catch { return empty(); }
   }
   function write(storage, slug, state) {
     try { if (!storage) return false; storage.setItem(key(slug), JSON.stringify(state)); return true; } catch { return false; }
   }
-  function clear(storage, slug) { try { storage?.removeItem(key(slug)); return true; } catch { return false; } }
+  function clear(storage, slug) { drafts.delete(slug); try { storage?.removeItem(key(slug)); return true; } catch { return false; } }
+
+  // Fields whose stamp (car/track) differs from the current context. Unknown on either side is not a difference.
+  function staleFields(state, context) {
+    const current = stampOf(context), stale = [];
+    if (!current) return stale;
+    for (const f of [...FIELDS, 've_capable']) {
+      const s = state.stamps?.[f];
+      if (!s || (f === 've_capable' ? state.ve_capable === null : !(f in state.values))) continue;
+      if ((s.track_name && current.track_name && s.track_name !== current.track_name)
+          || (s.car_name && current.car_name && s.car_name !== current.car_name)) stale.push(f);
+    }
+    return stale;
+  }
 
   // Only the length field of the selected mode is sent, so the UI itself never produces contradictory input.
   function query(state) {
@@ -61,14 +82,6 @@ const PreRaceUI = (() => {
     if (data?.driver?.slug !== slug) throw new Error('pre-race plan belongs to another driver');
     return data;
   }
-  // A saved plan is never re-bound to a session by track or time; a differing context is only reported.
-  function contextWarning(state, context) {
-    if (!state.context || !context) return null;
-    const diff = [];
-    if (state.context.track_name && context.track_name && state.context.track_name !== context.track_name) diff.push(`track ${state.context.track_name} → ${context.track_name}`);
-    if (state.context.car_name && context.car_name && state.context.car_name !== context.car_name) diff.push(`car ${state.context.car_name} → ${context.car_name}`);
-    return diff.length ? `Plan was made for a different context (${diff.join(', ')}). Check the inputs.` : null;
-  }
   const lengthText = plan => {
     const d = plan.distance;
     return d?.kind === 'timed' ? `${n(d.duration_minutes, 0)} min · timed` : d?.kind === 'laps' ? `${d.race_laps} laps` : '—';
@@ -86,8 +99,8 @@ const PreRaceUI = (() => {
     if (observed.length) parts.push(`Adopted from observation: ${observed.length}`);
     const lines = parts.length ? [parts.join(' · ')] : [];
     for (const i of plan.issues || []) lines.push(`${ISSUES[i.code] || i.code}${i.field && i.code === 'invalid_value' ? `: ${LABELS[i.field] || i.field}` : ''}`);
-    const warning = contextWarning(state, context);
-    if (warning) lines.push(warning);
+    const stale = staleFields(state, context);
+    if (stale.length) lines.push(`Not verified for this car/track: ${stale.map(f => LABELS[f]).join(', ')}. Confirm in the Engineer planner.`);
     return lines;
   }
   const startText = plan => {
@@ -101,7 +114,8 @@ const PreRaceUI = (() => {
     const plan = resp.plan, hasInput = Object.keys(state.values).length > 0 || state.ve_capable !== null;
     const link = engineerHref ? `<a href="${e(engineerHref)}">Open planner →</a>` : '';
     if (!hasInput) return `<section class="panel pr-panel" aria-label="Race prep"><h2>Race prep</h2><p class="muted">No race plan. Enter race length, pace and consumption in the Engineer pre-race planner. ${link}</p></section>`;
-    const cls = plan.status === 'ready' ? 'pr-ok' : plan.status === 'ready_capacity_unchecked' ? 'pr-warn' : 'pr-bad';
+    const stale = staleFields(state, resp.context).length > 0;
+    const cls = plan.status === 'ready' && !stale ? 'pr-ok' : plan.status === 'ready' || plan.status === 'ready_capacity_unchecked' ? 'pr-warn' : 'pr-bad';
     const lines = quality(plan, state, resp.context);
     return `<section class="panel pr-panel" aria-label="Race prep"><h2>Race prep <small class="muted">· estimate</small></h2>
       <div class="pr-grid"><div><div class="muted">Race</div><div class="value">${e(lengthText(plan))}</div></div>
@@ -113,7 +127,7 @@ const PreRaceUI = (() => {
       ${lines.length ? `<ul class="pr-notes muted">${lines.map(l => `<li>${e(l)}</li>`).join('')}</ul>` : ''}${link}</section>`;
   }
 
-  function suggestion(field, ev, state) {
+  function suggestion(field, ev, sessionId) {
     if (!ev) return '';
     const map = {
       lap_time_s: [ev.lap_time?.value, 3, `median of ${ev.lap_time?.sample_count} clean laps`],
@@ -125,35 +139,45 @@ const PreRaceUI = (() => {
     }[field];
     if (!map || !Number.isFinite(map[0])) return '';
     const caveat = ev.representative_of_race === true || field === 'tank_capacity_l' || field.startsWith('race') || field === 'duration_minutes' ? '' : ` · ${e(ev.session_type)} session, not race-representative`;
-    return `<span class="muted pr-hint">Observed ${e(n(map[0], map[1]))} (${e(map[2])}${caveat}) <button type="button" data-adopt="${e(field)}" data-value="${e(map[0].toFixed(map[1]))}">Use</button></span>`;
+    return `<span class="muted pr-hint">Observed ${e(n(map[0], map[1]))} (${e(map[2])}${caveat}) <button type="button" data-adopt="${e(field)}" data-value="${e(map[0].toFixed(map[1]))}" data-session="${e(sessionId)}">Use</button></span>`;
   }
-  const input = (field, state, ev) => {
-    const v = state.values[field], src = state.sources[field];
-    return `<div class="pr-field"><label for="pr-${field}">${e(LABELS[field])}${src ? ` <small class="muted">· ${e(src)}</small>` : ''}</label>
-      <input id="pr-${field}" data-field="${field}" inputmode="decimal" autocomplete="off" value="${Number.isFinite(v) ? e(v) : ''}">${suggestion(field, ev, state)}</div>`;
-  };
-  // Engineer: complete planner.
-  function engineer(resp, state) {
-    const plan = resp.plan, ev = resp.evidence, laps = state.mode === 'laps';
-    const veChoice = state.ve_capable === null ? 'unknown' : state.ve_capable ? 'yes' : 'no';
-    const veEvidence = typeof ev?.ve_capable === 'boolean' && ev.ve_capable !== state.ve_capable
-      ? `<span class="muted pr-hint">Telemetry says ${ev.ve_capable ? 'VE car' : 'no VE'} <button type="button" data-adopt-ve="${ev.ve_capable}">Use</button></span>` : '';
-    const rules = ev ? (ev.race_rules?.available ? `Race rules confirmed: ${ev.race_rules.race_laps ? `${ev.race_rules.race_laps} laps` : `${n(ev.race_rules.duration_minutes, 1)} min`}`
-      : `Race length: not available${ev.session_type === 'Race' ? '' : ' — the upcoming race is not described by the current session; enter it manually'}`) : 'No live session of this driver: manual inputs only';
+  // Engineer: complete planner. `opts`: {sessionId, context, draft}. The form shows the draft over the saved state.
+  function engineer(resp, state, opts = {}) {
+    const plan = resp.plan, draft = opts.draft || {text: {}, adopted: {}};
+    const evidenceSession = resp.context?.session_id ?? null;
+    const evidenceOk = !opts.sessionId || (evidenceSession !== null && evidenceSession === opts.sessionId);
+    const ev = evidenceOk ? resp.evidence : null;
+    const mode = draft.mode ?? state.mode, laps = mode === 'laps';
+    const veChoice = draft.ve ?? (state.ve_capable === null ? 'unknown' : state.ve_capable ? 'yes' : 'no');
+    const stale = staleFields(state, opts.context);
+    const input = field => {
+      const unsaved = Object.hasOwn(draft.text, field), v = unsaved ? draft.text[field] : state.values[field];
+      const src = draft.adopted[field]?.source ? `${draft.adopted[field].source}, unsaved` : unsaved ? 'manual, unsaved' : state.sources[field];
+      const old = !unsaved && stale.includes(field) ? ' <small class="pr-bad">· other car/track</small>' : '';
+      const confirm = old ? ` <button type="button" data-confirm="${field}">Still valid</button>` : '';
+      return `<div class="pr-field"><label for="pr-${field}">${e(LABELS[field])}${src ? ` <small class="muted">· ${e(src)}</small>` : ''}${old}</label>
+        <input id="pr-${field}" data-field="${field}" inputmode="decimal" autocomplete="off" value="${unsaved ? e(v) : Number.isFinite(v) ? e(v) : ''}">${confirm}${suggestion(field, ev, evidenceSession)}</div>`;
+    };
+    const veEvidence = typeof ev?.ve_capable === 'boolean' && (ev.ve_capable ? 'yes' : 'no') !== veChoice
+      ? `<span class="muted pr-hint">Telemetry says ${ev.ve_capable ? 'VE car' : 'no VE'} <button type="button" data-adopt-ve="${ev.ve_capable}" data-session="${e(evidenceSession)}">Use</button></span>` : '';
+    const veStale = !Object.hasOwn(draft, 've') && stale.includes('ve_capable') ? ' <small class="pr-bad">· other car/track</small> <button type="button" data-confirm="ve_capable">Still valid</button>' : '';
+    const rules = !resp.evidence ? 'No live session of this driver: manual inputs only'
+      : !evidenceOk ? 'Suggestions belong to another session of this driver and are not applicable here'
+      : ev.race_rules?.available ? `Race rules confirmed: ${ev.race_rules.race_laps ? `${ev.race_rules.race_laps} laps` : `${n(ev.race_rules.duration_minutes, 1)} min`}`
+      : `Race length: not available${ev.session_type === 'Race' ? '' : ' — the upcoming race is not described by the current session; enter it manually'}`;
     const fuel = plan.fuel, energy = plan.energy;
-    const lines = quality(plan, state, resp.context);
-    const cls = plan.status === 'ready' ? 'pr-ok' : plan.status === 'ready_capacity_unchecked' ? 'pr-warn' : 'pr-bad';
+    const lines = quality(plan, state, opts.context);
+    const cls = plan.status === 'ready' && !stale.length ? 'pr-ok' : plan.status === 'ready' || plan.status === 'ready_capacity_unchecked' ? 'pr-warn' : 'pr-bad';
     return `<form id="pr-form" class="pr-form" novalidate>
       <p class="muted">${e(rules)}</p>
       <fieldset class="pr-mode"><legend>Race length</legend>
         <label><input type="radio" name="pr-mode" value="time" ${laps ? '' : 'checked'}> Timed</label>
         <label><input type="radio" name="pr-mode" value="laps" ${laps ? 'checked' : ''}> Lap limit</label></fieldset>
-      ${input(laps ? 'race_laps' : 'duration_minutes', state, ev)}${laps ? '' : input('lap_time_s', state, ev)}${laps ? input('lap_time_s', state, ev) : ''}
-      ${input('fuel_per_lap_l', state, ev)}
-      <div class="pr-field"><label for="pr-ve">Virtual Energy car</label><select id="pr-ve"><option value="unknown" ${veChoice === 'unknown' ? 'selected' : ''}>Unknown</option>
+      ${input(laps ? 'race_laps' : 'duration_minutes')}${input('lap_time_s')}${input('fuel_per_lap_l')}
+      <div class="pr-field"><label for="pr-ve">Virtual Energy car${veStale}</label><select id="pr-ve"><option value="unknown" ${veChoice === 'unknown' ? 'selected' : ''}>Unknown</option>
         <option value="yes" ${veChoice === 'yes' ? 'selected' : ''}>Yes</option><option value="no" ${veChoice === 'no' ? 'selected' : ''}>No</option></select>${veEvidence}</div>
-      ${state.ve_capable === true ? input('ve_per_lap_percent', state, ev) : ''}
-      ${input('tank_capacity_l', state, ev)}${input('reserve_laps', state, ev)}
+      ${veChoice === 'yes' ? input('ve_per_lap_percent') : ''}
+      ${input('tank_capacity_l')}${input('reserve_laps')}
       <div class="pr-actions"><button type="submit">Calculate</button><button type="button" id="pr-clear">Clear plan</button><span id="pr-feedback" class="muted" role="status"></span></div>
       <p class="muted">Manual planning values. Nothing is stored on the server and LMU pit settings are not changed.</p></form>
     <div class="pr-result" aria-label="Pre-race result">
@@ -169,50 +193,80 @@ const PreRaceUI = (() => {
       <p class="muted">Estimate, not a guarantee: formation, out-lap and in-lap are covered only by the reserve. Pit-stop planning stays in the live Strategy below.</p></div>`;
   }
 
-  // Wires one container. `ctx.slug()` names the driver, `ctx.context()` returns the latest session context.
+  const newDraft = () => ({text: {}, adopted: {}});
+  // Saved state with the draft applied. Only values the user changed or adopted get a new origin and stamp;
+  // untouched values keep theirs. Returns {state} or {error}.
+  function applyDraft(saved, draft, context) {
+    const state = {...saved, values: {...saved.values}, sources: {...saved.sources}, stamps: {...saved.stamps}};
+    const stamp = stampOf(context);
+    const touch = (f, source, at) => { state.sources[f] = source; const s = stampOf(at) || stamp; if (s) state.stamps[f] = s; else delete state.stamps[f]; };
+    if (draft.mode) state.mode = draft.mode;
+    for (const [f, raw] of Object.entries(draft.text)) {
+      const text = String(raw).trim().replace(',', '.');
+      if (text === '') { delete state.values[f]; delete state.sources[f]; delete state.stamps[f]; continue; }
+      const value = Number(text);
+      if (!Number.isFinite(value)) return {error: `${LABELS[f]}: not a number`};
+      const adopted = draft.adopted[f];
+      if (adopted || state.values[f] !== value) { state.values[f] = value; touch(f, adopted?.source || 'manual', adopted?.context); }
+    }
+    if (Object.hasOwn(draft, 've')) {
+      const capable = draft.ve === 'yes' ? true : draft.ve === 'no' ? false : null;
+      if (capable !== state.ve_capable || draft.adopted.ve_capable) { state.ve_capable = capable; touch('ve_capable', draft.adopted.ve_capable?.source || 'manual', draft.adopted.ve_capable?.context); }
+      if (capable !== true) { delete state.values.ve_per_lap_percent; delete state.sources.ve_per_lap_percent; delete state.stamps.ve_per_lap_percent; }
+    }
+    return {state};
+  }
+
+  // Wires one container. ctx: storage, slug(), context() (current car/track), sessionId() (viewed session),
+  // refresh(force) (reload from the server), rerender() (redraw from cached data, no request).
   function bind(box, ctx) {
-    const rerun = () => ctx.refresh(true);
+    const draftOf = slug => { if (!drafts.has(slug)) drafts.set(slug, newDraft()); return drafts.get(slug); };
+    box.addEventListener('input', event => {
+      const slug = ctx.slug(), f = event.target?.dataset?.field; if (!slug || !f) return;
+      const d = draftOf(slug); d.text[f] = event.target.value; delete d.adopted[f];
+    });
+    box.addEventListener('change', event => {
+      const slug = ctx.slug(), t = event.target; if (!slug || !t) return;
+      const d = draftOf(slug);
+      if (t.id === 'pr-ve') { d.ve = t.value; delete d.adopted.ve_capable; ctx.rerender(); }
+      else if (t.name === 'pr-mode') { d.mode = t.value === 'laps' ? 'laps' : 'time'; ctx.rerender(); }
+    });
     box.addEventListener('submit', event => {
       event.preventDefault();
       const slug = ctx.slug(); if (!slug) return;
-      const state = read(ctx.storage, slug), feedback = box.querySelector('#pr-feedback');
-      state.mode = box.querySelector('input[name="pr-mode"]:checked')?.value === 'laps' ? 'laps' : 'time';
-      for (const field of box.querySelectorAll('[data-field]')) {
-        const f = field.dataset.field, text = field.value.trim().replace(',', '.');
-        if (text === '') { delete state.values[f]; delete state.sources[f]; continue; }
-        const value = Number(text);
-        if (!Number.isFinite(value)) { if (feedback) feedback.textContent = `${LABELS[f]}: not a number`; return; }
-        if (state.values[f] !== value) state.sources[f] = 'manual';
-        state.values[f] = value;
-      }
-      const ve = box.querySelector('#pr-ve')?.value;
-      const capable = ve === 'yes' ? true : ve === 'no' ? false : null;
-      if (capable !== state.ve_capable) state.sources.ve_capable = 'manual';
-      state.ve_capable = capable;
-      if (capable !== true) { delete state.values.ve_per_lap_percent; delete state.sources.ve_per_lap_percent; }
-      const context = ctx.context();
-      state.context = context ? {track_name: context.track_name || '', car_name: context.car_name || ''} : state.context;
-      if (!write(ctx.storage, slug, state) && feedback) feedback.textContent = 'Browser storage unavailable: plan not saved';
-      rerun();
+      const feedback = box.querySelector('#pr-feedback'), d = draftOf(slug);
+      const done = applyDraft(read(ctx.storage, slug), d, ctx.context());
+      if (done.error) { if (feedback) feedback.textContent = done.error; return; }
+      if (!write(ctx.storage, slug, done.state)) { if (feedback) feedback.textContent = 'Browser storage unavailable: plan not saved'; return; }
+      drafts.set(slug, newDraft());
+      ctx.refresh(true);
     });
     box.addEventListener('click', event => {
-      const target = event.target, slug = ctx.slug(); if (!slug || !target?.dataset) return;
-      const state = read(ctx.storage, slug);
-      if (target.id === 'pr-clear') { clear(ctx.storage, slug); rerun(); return; }
-      if (target.dataset.adopt) {
-        const f = target.dataset.adopt, value = Number(target.dataset.value);
-        if (!Number.isFinite(value)) return;
-        state.values[f] = value;
-        state.sources[f] = f === 'duration_minutes' || f === 'race_laps' || f === 'tank_capacity_l' ? 'confirmed' : 'observed';
-        if (f === 'race_laps') state.mode = 'laps'; else if (f === 'duration_minutes') state.mode = 'time';
-      } else if (target.dataset.adoptVe) {
-        state.ve_capable = target.dataset.adoptVe === 'true'; state.sources.ve_capable = 'observed';
-      } else return;
-      const context = ctx.context();
-      if (context) state.context = {track_name: context.track_name || '', car_name: context.car_name || ''};
-      write(ctx.storage, slug, state);
-      rerun();
+      const t = event.target, slug = ctx.slug(); if (!slug || !t?.dataset) return;
+      if (t.id === 'pr-clear') { clear(ctx.storage, slug); ctx.refresh(true); return; }
+      if (t.dataset.confirm) {            // explicit re-confirmation: re-stamp only this value for the current context
+        const state = read(ctx.storage, slug), s = stampOf(ctx.context());
+        if (s && (t.dataset.confirm === 've_capable' || t.dataset.confirm in state.values)) { state.stamps[t.dataset.confirm] = s; write(ctx.storage, slug, state); }
+        ctx.refresh(true); return;
+      }
+      const adoptsValue = Boolean(t.dataset.adopt), adoptsVe = t.dataset.adoptVe !== undefined;
+      if (!adoptsValue && !adoptsVe) return;
+      // Suggestions apply only to the session being viewed; a button from another session's answer is ignored.
+      if (!ctx.sessionId() || t.dataset.session !== ctx.sessionId()) { ctx.refresh(true); return; }
+      const d = draftOf(slug), context = stampOf(ctx.context());
+      if (adoptsValue) {
+        const f = t.dataset.adopt, value = Number(t.dataset.value);
+        if (!FIELDS.includes(f) || !Number.isFinite(value)) return;
+        // Only this field changes; everything else already typed stays in the draft untouched.
+        d.text[f] = t.dataset.value;
+        d.adopted[f] = {source: ['duration_minutes', 'race_laps', 'tank_capacity_l'].includes(f) ? 'confirmed' : 'observed', context};
+        if (f === 'race_laps') d.mode = 'laps'; else if (f === 'duration_minutes') d.mode = 'time';
+      } else {
+        d.ve = t.dataset.adoptVe === 'true' ? 'yes' : 'no'; d.adopted.ve_capable = {source: 'observed', context};
+      }
+      ctx.rerender();
     });
   }
-  return {read, write, clear, query, load, summary, engineer, bind, contextWarning, FIELDS};
+  const working = slug => drafts.get(slug) || newDraft();
+  return {read, write, clear, query, load, summary, engineer, bind, staleFields, applyDraft, working, FIELDS};
 })();

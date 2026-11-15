@@ -413,7 +413,7 @@ async function verifyPrerace(channel) {
     await page.route('**/*',route=>{
       const url=route.request().url();
       if(!url.includes('/api/')) return route.fulfill({contentType:'text/html',body:html});
-      if(url.includes('/prerace')) return route.fulfill({json:{driver:{slug:'synthetic'},plan,evidence,context:{track_name:'Synthetic Circuit',car_name:'Synthetic Car'}}});
+      if(url.includes('/prerace')) return route.fulfill({json:{driver:{slug:'synthetic'},plan,evidence,context:{session_id:demo.data.session.id,track_name:'Synthetic Circuit',car_name:'Synthetic Car'}}});
       return route.fulfill({json:url.includes('/strategy')?demo.strategy:demo.data});
     });
     await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
@@ -450,7 +450,11 @@ async function verifyPrerace(channel) {
     assert.equal(await page.locator('#pr-duration_minutes').inputValue(),'45','typed value is not overwritten by refresh');
     await page.locator('button[data-adopt="lap_time_s"]').click();
     await page.waitForFunction(()=>/observed/.test(document.querySelector('label[for="pr-lap_time_s"]')?.textContent||''),null,{timeout:4000});
-    assert.equal(await page.locator('#pr-lap_time_s').inputValue(),'101.2');
+    assert.equal(await page.locator('#pr-lap_time_s').inputValue(),'101.200');
+    assert.equal(await page.locator('#pr-duration_minutes').inputValue(),'45','Use keeps the other unsaved input');
+    await page.locator('#pr-form button[type=submit]').click();
+    await page.waitForFunction(()=>/observed/.test(document.querySelector('label[for="pr-lap_time_s"]')?.textContent||'')&&!/unsaved/.test(document.querySelector('label[for="pr-lap_time_s"]').textContent),null,{timeout:4000});
+    assert.equal(await page.locator('#pr-duration_minutes').inputValue(),'45','saved value shown after Calculate');
     assert.match(await page.locator('label[for="pr-lap_time_s"]').innerText(),/observed/);
     assert.deepEqual(problems,[],'no JavaScript errors');
     console.log('engineer pre-race gate passed');

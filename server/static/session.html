@@ -807,7 +807,15 @@ let fuelRequest = 0;
 let fuelParticipant = null;
 let planStorage = null;
 try { planStorage = typeof localStorage==='undefined'?null:localStorage; } catch { /* Storage may be blocked by browser policy. */ }
-let preraceKey = null, preraceAt = 0, preraceRun = 0, preraceBound = false;
+let preraceKey = null, preraceAt = 0, preraceRun = 0, preraceBound = false, preraceResp = null;
+const preraceContext = () => ({track_name: latestData?.session?.track_name, car_name: participantById(latestData?.participants || [], focusId)?.car_name});
+function renderPrerace() {
+  const box = document.querySelector('#prerace');
+  if (!preraceResp || !preraceKey || !box) return;
+  box.className = '';
+  box.innerHTML = PreRaceUI.engineer(preraceResp, PreRaceUI.read(planStorage, preraceKey),
+    {sessionId, context: preraceContext(), draft: PreRaceUI.working(preraceKey)});
+}
 async function refreshPrerace(force = false) {
   if (typeof PreRaceUI === 'undefined') return;
   try {
@@ -817,19 +825,21 @@ async function refreshPrerace(force = false) {
     const me = latestData && focusId ? participantById(latestData.participants, focusId) : null;
     const slug = me?.driver_slug || null;
     if (!preraceBound) {
-      PreRaceUI.bind(box, {storage: planStorage, slug: () => preraceKey, refresh: refreshPrerace,
-        context: () => ({track_name: latestData?.session?.track_name, car_name: participantById(latestData?.participants || [], focusId)?.car_name})});
+      PreRaceUI.bind(box, {storage: planStorage, slug: () => preraceKey, refresh: refreshPrerace, rerender: renderPrerace,
+        context: preraceContext, sessionId: () => sessionId});
       preraceBound = true;
     }
-    if (!slug) { preraceKey = null; ++preraceRun; box.className = 'muted'; box.textContent = 'Choose a registered driver as focus to plan the race.'; return; }
+    if (!slug) { preraceKey = null; preraceResp = null; ++preraceRun; box.className = 'muted'; box.textContent = 'Choose a registered driver as focus to plan the race.'; return; }
     if (!force && slug === preraceKey && Date.now() - preraceAt < 5000) return;
     if (!force && box.contains(document.activeElement)) return;   // never overwrite what is being typed
+    if (slug !== preraceKey) preraceResp = null;
     preraceKey = slug; preraceAt = Date.now();
     const run = ++preraceRun, state = PreRaceUI.read(planStorage, slug);
     const data = await PreRaceUI.load(slug, state, fetch);
     if (run !== preraceRun || preraceKey !== slug) return;
     if (!force && box.contains(document.activeElement)) return;   // typing started while the request was in flight
-    box.className = ''; box.innerHTML = PreRaceUI.engineer({...data, context: data.context}, state);
+    preraceResp = data;
+    renderPrerace();
   } catch { /* the planner must never disturb the live view; the next tick retries */ }
 }
 function setupPrerace() {

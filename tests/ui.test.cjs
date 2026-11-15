@@ -1852,9 +1852,9 @@ test('driver summary escapes content, hides a recommendation it does not have an
   const empty = ui.summary({plan: planOf({status: 'incomplete', start: null}), context: null}, ui.read(null, 'x'), '/sessions/s/live#prerace');
   assert.match(empty, /No race plan/); assert.match(empty, /Open planner/);
   const state = {v: 1, mode: 'time', values: {duration_minutes: 60}, ve_capable: false, sources: {duration_minutes: 'manual'},
-    context: {track_name: 'Spa', car_name: 'Car A'}};
+    stamps: {duration_minutes: {track_name: 'Spa', car_name: 'Car A'}}};
   const html = ui.summary({plan: planOf(), context: {track_name: '<img onerror=x>', car_name: 'Car A'}}, state, null);
-  assert.match(html, /99\.0 L/); assert.match(html, /30–32 laps/); assert.match(html, /different context/);
+  assert.match(html, /99\.0 L/); assert.match(html, /30–32 laps/); assert.match(html, /Not verified for this car\/track/);
   assert.doesNotMatch(html, /<img/);
   const blocked = ui.summary({plan: planOf({status: 'incomplete', start: null, issues: [{code: 've_capability_unknown', field: 've_capable'}]}), context: null}, state, null);
   assert.doesNotMatch(blocked, /99\.0 L/); assert.match(blocked, /Unknown whether this car uses Virtual Energy/);
@@ -1862,46 +1862,156 @@ test('driver summary escapes content, hides a recommendation it does not have an
   assert.match(tank, /More than one load/); assert.match(tank, /does not cover the race/);
 });
 
+const evidenceOf = (over = {}) => ({session_type: 'Qualify', representative_of_race: null, race_rules: {available: false},
+  lap_time: {value: 101.234, sample_count: 5}, fuel_per_lap: {value: 2.5, sample_count: 4},
+  ve_per_lap_percent: {value: null}, ve_capable: true, tank_capacity_l: 90, ...over});
+const SPA = {track_name: 'Spa', car_name: 'Car A'};
+const respOf = (sessionId, over = {}) => ({plan: planOf({status: 'incomplete', start: null, fuel: null}), evidence: evidenceOf(),
+  context: {session_id: sessionId, ...SPA}, ...over});
+
 test('engineer planner offers observed values as suggestions and marks qualifying data as not race-representative', () => {
   const ui = preraceUI();
-  const evidence = {session_type: 'Qualify', representative_of_race: null, race_rules: {available: false},
-    lap_time: {value: 101.234, sample_count: 5}, fuel_per_lap: {value: 2.5, sample_count: 4},
-    ve_per_lap_percent: {value: null}, ve_capable: true, tank_capacity_l: 90};
-  const html = ui.engineer({plan: planOf({status: 'incomplete', start: null, fuel: null}), evidence, context: null}, ui.read(null, 'x'));
+  const html = ui.engineer(respOf('S1'), ui.read(null, 'x'), {sessionId: 'S1', context: SPA});
   assert.match(html, /not available/); assert.match(html, /enter it manually/);
-  assert.match(html, /data-adopt="lap_time_s" data-value="101.234"/);
+  assert.match(html, /data-adopt="lap_time_s" data-value="101.234" data-session="S1"/);
   assert.match(html, /Qualify session, not race-representative/);
   assert.match(html, /data-adopt-ve="true"/);
   assert.match(html, /No recommendation: data missing/);
   assert.doesNotMatch(html, /99\.0 L/);
 });
 
-test('engineer actions save manual and adopted values with their origin and never invent values', () => {
-  const ui = preraceUI(), store = fakeStorage(), handlers = {}, fields = [];
-  const feedback = {textContent: ''};
-  const field = (name, value) => { const f = {dataset: {field: name}, value}; fields.push(f); return f; };
-  const box = {addEventListener: (type, fn) => { handlers[type] = fn; },
-    querySelector: s => s === 'input[name="pr-mode"]:checked' ? {value: 'time'} : s === '#pr-ve' ? {value: 'no'} : s === '#pr-feedback' ? feedback : null,
-    querySelectorAll: () => fields};
-  let refreshed = 0;
-  ui.bind(box, {storage: store, slug: () => 'one', refresh: () => { refreshed++; }, context: () => ({track_name: 'Spa', car_name: 'Car'})});
-  field('duration_minutes', '45'); field('lap_time_s', '118,5'); field('fuel_per_lap_l', '');
-  handlers.submit({preventDefault() {}});
-  let saved = ui.read(store, 'one');
-  assert.deepEqual({...saved.values}, {duration_minutes: 45, lap_time_s: 118.5});
-  assert.deepEqual({...saved.sources}, {duration_minutes: 'manual', lap_time_s: 'manual', ve_capable: 'manual'});
-  assert.equal(saved.ve_capable, false); assert.deepEqual({...saved.context}, {track_name: 'Spa', car_name: 'Car'});
-  handlers.click({target: {dataset: {adopt: 'fuel_per_lap_l', value: '2.50'}}});
-  saved = ui.read(store, 'one');
+test('evidence of another session is hidden and cannot be adopted (two splits, driver moved on)', () => {
+  const ui = preraceUI();
+  // The page shows session A; the driver's live session is now B.
+  const html = ui.engineer(respOf('SESSION-B'), ui.read(null, 'x'), {sessionId: 'SESSION-A', context: SPA});
+  assert.match(html, /another session of this driver and are not applicable/);
+  assert.doesNotMatch(html, /data-adopt/); assert.doesNotMatch(html, /Observed/);
+  // A response without any session identity is not trusted either.
+  assert.doesNotMatch(ui.engineer(respOf(undefined, {context: {}}), ui.read(null, 'x'), {sessionId: 'SESSION-A', context: SPA}), /data-adopt/);
+  // Qualify -> Race of the same driver is a different session: the Qualifying page gets no race evidence.
+  assert.doesNotMatch(ui.engineer(respOf('RACE'), ui.read(null, 'x'), {sessionId: 'QUALI', context: SPA}), /data-adopt/);
+  assert.match(ui.engineer(respOf('RACE'), ui.read(null, 'x'), {sessionId: 'RACE', context: SPA}), /data-adopt="fuel_per_lap_l"/);
+});
+
+function harness(context = SPA, sessionId = 'S1') {
+  const ui = preraceUI(), store = fakeStorage(), handlers = {}, fields = [], feedback = {textContent: ''};
+  let current = context, rerendered = 0, refreshed = 0;
+  const box = {addEventListener: (type, fn) => { handlers[type] = fn; }, querySelector: s => s === '#pr-feedback' ? feedback : null};
+  ui.bind(box, {storage: store, slug: () => 'one', refresh: () => { refreshed++; }, rerender: () => { rerendered++; },
+    context: () => current, sessionId: () => sessionId});
+  const type = (f, value) => handlers.input({target: {dataset: {field: f}, value}});
+  const adopt = (f, value, session = sessionId) => handlers.click({target: {dataset: {adopt: f, value, session}}});
+  const submit = () => handlers.submit({preventDefault() {}});
+  return {ui, store, handlers, feedback, type, adopt, submit, setContext: c => { current = c; },
+    counts: () => ({rerendered, refreshed})};
+}
+
+test('Use changes only the chosen value; unsaved inputs survive repeated Use and Calculate', () => {
+  const h = harness();
+  h.type('duration_minutes', '45'); h.type('fuel_per_lap_l', '3,1'); h.type('reserve_laps', '2');
+  h.adopt('lap_time_s', '101.234');
+  assert.deepEqual({...h.ui.working('one').text}, {duration_minutes: '45', fuel_per_lap_l: '3,1', reserve_laps: '2', lap_time_s: '101.234'});
+  assert.deepEqual({...h.ui.read(h.store, 'one').values}, {});               // Use alone saves nothing
+  h.adopt('tank_capacity_l', '90.0'); h.adopt('lap_time_s', '101.234');       // repeated adopt, still no loss
+  assert.equal(h.ui.working('one').text.duration_minutes, '45');
+  // The rendered form shows every unsaved value, not only the adopted one.
+  const html = h.ui.engineer(respOf('S1'), h.ui.read(h.store, 'one'), {sessionId: 'S1', context: SPA, draft: h.ui.working('one')});
+  assert.match(html, /id="pr-duration_minutes"[^>]*value="45"/); assert.match(html, /id="pr-fuel_per_lap_l"[^>]*value="3,1"/);
+  assert.match(html, /id="pr-lap_time_s"[^>]*value="101.234"/); assert.match(html, /observed, unsaved/);
+  h.submit();
+  let saved = h.ui.read(h.store, 'one');
+  assert.deepEqual({...saved.values}, {duration_minutes: 45, fuel_per_lap_l: 3.1, reserve_laps: 2, lap_time_s: 101.234, tank_capacity_l: 90});
+  assert.deepEqual({...saved.sources}, {duration_minutes: 'manual', fuel_per_lap_l: 'manual', reserve_laps: 'manual', lap_time_s: 'observed', tank_capacity_l: 'confirmed'});
+  assert.deepEqual({...h.ui.working('one').text}, {});                         // draft consumed
+  // A later adopt/Calculate round leaves the already saved values and their origin alone.
+  h.adopt('fuel_per_lap_l', '2.50'); h.submit();
+  saved = h.ui.read(h.store, 'one');
   assert.equal(saved.values.fuel_per_lap_l, 2.5); assert.equal(saved.sources.fuel_per_lap_l, 'observed');
-  handlers.click({target: {dataset: {adopt: 'fuel_per_lap_l', value: 'NaN'}}});
-  assert.equal(ui.read(store, 'one').values.fuel_per_lap_l, 2.5);            // a non-number is never stored
-  fields[0].value = 'abc'; handlers.submit({preventDefault() {}});
-  assert.match(feedback.textContent, /not a number/); assert.equal(ui.read(store, 'one').values.duration_minutes, 45);
-  assert.equal(ui.read(store, 'two').values.duration_minutes, undefined);    // other drivers are untouched
-  handlers.click({target: {id: 'pr-clear', dataset: {}}});
-  assert.deepEqual({...ui.read(store, 'one').values}, {});
-  assert.ok(refreshed >= 3);
+  assert.equal(saved.values.duration_minutes, 45); assert.equal(saved.sources.duration_minutes, 'manual');
+  assert.equal(saved.sources.lap_time_s, 'observed');
+});
+
+test('invalid text is rejected on Calculate without losing or saving anything', () => {
+  const h = harness();
+  h.type('duration_minutes', 'abc'); h.type('fuel_per_lap_l', '3');
+  h.submit();
+  assert.match(h.feedback.textContent, /not a number/);
+  assert.deepEqual({...h.ui.read(h.store, 'one').values}, {});
+  assert.deepEqual({...h.ui.working('one').text}, {duration_minutes: 'abc', fuel_per_lap_l: '3'});
+  h.adopt('lap_time_s', 'NaN');
+  assert.equal(h.ui.working('one').text.lap_time_s, undefined);                // a non-number is never adopted
+});
+
+test('Calculate and Use keep the car/track stamp of every untouched value (partial adoption)', () => {
+  const h = harness({track_name: 'Spa', car_name: 'Car A'});
+  h.type('fuel_per_lap_l', '3'); h.type('tank_capacity_l', '100'); h.submit();
+  h.setContext({track_name: 'Monza', car_name: 'Car B'});                      // the driver now sits in another car/track
+  h.adopt('lap_time_s', '90.5'); h.type('reserve_laps', '2'); h.submit();
+  const saved = h.ui.read(h.store, 'one');
+  assert.deepEqual({...saved.stamps.fuel_per_lap_l}, {track_name: 'Spa', car_name: 'Car A'});   // not overwritten
+  assert.deepEqual({...saved.stamps.tank_capacity_l}, {track_name: 'Spa', car_name: 'Car A'});
+  assert.deepEqual({...saved.stamps.lap_time_s}, {track_name: 'Monza', car_name: 'Car B'});    // only the new values
+  assert.deepEqual({...saved.stamps.reserve_laps}, {track_name: 'Monza', car_name: 'Car B'});
+  assert.deepEqual([...h.ui.staleFields(saved, {track_name: 'Monza', car_name: 'Car B'})].sort(), ['fuel_per_lap_l', 'tank_capacity_l']);
+  // Re-typing the identical number is not a change: origin and stamp stay.
+  h.type('fuel_per_lap_l', '3'); h.submit();
+  assert.deepEqual({...h.ui.read(h.store, 'one').stamps.fuel_per_lap_l}, {track_name: 'Spa', car_name: 'Car A'});
+});
+
+test('values for another car or track are flagged, never shown as verified, and can be confirmed explicitly', () => {
+  const h = harness();
+  h.type('duration_minutes', '60'); h.type('fuel_per_lap_l', '3'); h.submit();
+  const state = h.ui.read(h.store, 'one');
+  const planStale = respOf('S1', {plan: planOf(), context: {session_id: 'S1', track_name: 'Spa', car_name: 'Car B'}});
+  for (const [other, label] of [[{track_name: 'Spa', car_name: 'Car B'}, 'car'], [{track_name: 'Monza', car_name: 'Car A'}, 'track']]) {
+    assert.deepEqual([...h.ui.staleFields(state, other)].sort(), ['duration_minutes', 'fuel_per_lap_l'], label);
+    const html = h.ui.engineer(planStale, state, {sessionId: 'S1', context: other, draft: h.ui.working('one')});
+    assert.match(html, /other car\/track/); assert.match(html, /data-confirm="fuel_per_lap_l"/);
+    assert.match(html, /Not verified for this car\/track/); assert.doesNotMatch(html, /class="pr-ok"/);
+    const card = h.ui.summary({...planStale, context: other}, state, null);
+    assert.match(card, /Not verified for this car\/track/); assert.doesNotMatch(card, /value pr-ok/);
+  }
+  // Same car and track (Qualifying -> Race): nothing is flagged.
+  assert.deepEqual([...h.ui.staleFields(state, SPA)], []);
+  assert.deepEqual([...h.ui.staleFields(state, null)], []);
+  // Explicit confirmation re-stamps just that value.
+  h.setContext({track_name: 'Monza', car_name: 'Car A'});
+  h.handlers.click({target: {dataset: {confirm: 'fuel_per_lap_l'}}});
+  const confirmed = h.ui.read(h.store, 'one');
+  assert.deepEqual([...h.ui.staleFields(confirmed, {track_name: 'Monza', car_name: 'Car A'})], ['duration_minutes']);
+});
+
+test('legacy plan-level context still marks its values and old data stays readable', () => {
+  const ui = preraceUI(), store = fakeStorage({'stintara:prerace:v1:one': JSON.stringify({v: 1, mode: 'time',
+    values: {duration_minutes: 60}, ve_capable: null, sources: {duration_minutes: 'manual'}, context: SPA})});
+  const state = ui.read(store, 'one');
+  assert.deepEqual({...state.stamps.duration_minutes}, SPA);
+  assert.deepEqual([...ui.staleFields(state, {track_name: 'Imola', car_name: 'Car A'})], ['duration_minutes']);
+});
+
+test('Use ignores a suggestion that belongs to another session than the one viewed', () => {
+  const h = harness(SPA, 'SESSION-A');
+  h.adopt('fuel_per_lap_l', '2.5', 'SESSION-B');
+  assert.equal(h.ui.working('one').text.fuel_per_lap_l, undefined);
+  assert.equal(h.counts().refreshed, 1);                                       // reloads instead of adopting
+  h.adopt('fuel_per_lap_l', '2.5', 'SESSION-A');
+  assert.equal(h.ui.working('one').text.fuel_per_lap_l, '2.5');
+});
+
+test('adopting race rules switches the mode in the draft and VE adoption keeps other inputs', () => {
+  const h = harness();
+  h.type('fuel_per_lap_l', '3');
+  h.adopt('race_laps', '30');
+  assert.equal(h.ui.working('one').mode, 'laps');
+  h.handlers.click({target: {dataset: {adoptVe: 'true', session: 'S1'}}});
+  assert.equal(h.ui.working('one').ve, 'yes'); assert.equal(h.ui.working('one').text.fuel_per_lap_l, '3');
+  h.submit();
+  const saved = h.ui.read(h.store, 'one');
+  assert.equal(saved.mode, 'laps'); assert.equal(saved.values.race_laps, 30); assert.equal(saved.sources.race_laps, 'confirmed');
+  assert.equal(saved.ve_capable, true); assert.equal(saved.sources.ve_capable, 'observed');
+  h.handlers.click({target: {id: 'pr-clear', dataset: {}}});
+  assert.deepEqual({...h.ui.read(h.store, 'one').values}, {});
+  assert.deepEqual({...h.ui.working('one').text}, {});
 });
 
 test('driver live shows the race prep summary and keeps rendering when the plan endpoint fails', async () => {
