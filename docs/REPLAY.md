@@ -29,7 +29,7 @@ From the activated development environment, with LMU and Pitwall running:
 
 ```powershell
 python -m tools.replay.capture --track spa --event daily --driver-alias driver-a
-.	ools\capture.ps1 -Track spa -Event daily -DriverAlias driver-a   # same tool, Windows starter
+.\tools\capture.ps1 -Track spa -Event daily -DriverAlias driver-a   # same tool, Windows starter
 ```
 
 All labels are optional. Start before qualifying and press Ctrl+C after the race ends; one file may span practice, qualifying, race and session changes, so name and metadata make no session claim. For a short Pitwall reconnect, restart the command: it creates the next file and never overwrites.
