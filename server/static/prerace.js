@@ -51,12 +51,21 @@ const PreRaceUI = (() => {
   function clear(storage, slug) { drafts.delete(slug); try { storage?.removeItem(key(slug)); return true; } catch { return false; } }
 
   // Fields whose stamp (car/track) differs from the current context. Unknown on either side is not a difference.
-  function staleFields(state, context) {
-    const current = stampOf(context), stale = [];
+  // The single definition of which fields are part of the plan: the race-length field of the chosen mode and,
+  // only for a VE car, the VE consumption. `draft` (optional) is the unsaved form state: the Engineer form uses
+  // it, the calculation query and Driver Live pass none and therefore use the saved state only.
+  function activeFields(state, draft) {
+    const laps = (draft?.mode ?? state.mode) === 'laps';
+    const ve = draft && Object.hasOwn(draft, 've') ? draft.ve === 'yes' : state.ve_capable === true;
+    return new Set(FIELDS.filter(f => f === (laps ? 'duration_minutes' : 'race_laps') ? false : f === 've_per_lap_percent' ? ve : true)
+      .concat('ve_capable'));
+  }
+  function staleFields(state, context, draft) {
+    const current = stampOf(context), stale = [], active = activeFields(state, draft);
     if (!current) return stale;
     for (const f of [...FIELDS, 've_capable']) {
       const s = state.stamps?.[f];
-      if ((f === (state.mode === 'laps' ? 'duration_minutes' : 'race_laps')) || (f === 've_per_lap_percent' && state.ve_capable !== true)) continue;   // hidden: not part of the plan
+      if (!active.has(f)) continue;                      // hidden: not part of the plan
       if (!s || (f === 've_capable' ? state.ve_capable === null : !(f in state.values))) continue;
       if ((s.track_name && current.track_name && s.track_name !== current.track_name)
           || (s.car_name && current.car_name && s.car_name !== current.car_name)) stale.push(f);
@@ -66,9 +75,9 @@ const PreRaceUI = (() => {
 
   // Only the length field of the selected mode is sent, so the UI itself never produces contradictory input.
   function query(state) {
-    const p = new URLSearchParams(), skip = state.mode === 'laps' ? 'duration_minutes' : 'race_laps', used = [];
+    const p = new URLSearchParams(), active = activeFields(state), used = [];
     for (const f of FIELDS) {
-      if (f === skip || (f === 've_per_lap_percent' && state.ve_capable !== true) || !Number.isFinite(state.values[f])) continue;
+      if (!active.has(f) || !Number.isFinite(state.values[f])) continue;
       p.set(f, String(state.values[f]));
       used.push(`${f}:${state.sources[f] || 'manual'}`);
     }
@@ -148,9 +157,9 @@ const PreRaceUI = (() => {
     const evidenceSession = resp.context?.session_id ?? null;
     const evidenceOk = !opts.sessionId || (evidenceSession !== null && evidenceSession === opts.sessionId);
     const ev = evidenceOk ? resp.evidence : null;
-    const mode = draft.mode ?? state.mode, laps = mode === 'laps';
+    const active = activeFields(state, draft), laps = active.has('race_laps');
     const veChoice = draft.ve ?? (state.ve_capable === null ? 'unknown' : state.ve_capable ? 'yes' : 'no');
-    const stale = staleFields(state, opts.context);
+    const stale = staleFields(state, opts.context, draft), staleSaved = staleFields(state, opts.context);   // form: draft; result: saved plan
     const input = field => {
       const unsaved = Object.hasOwn(draft.text, field), v = unsaved ? draft.text[field] : state.values[field];
       const src = draft.adopted[field]?.source ? `${draft.adopted[field].source}, unsaved` : unsaved ? 'manual, unsaved' : state.sources[field];
@@ -168,7 +177,7 @@ const PreRaceUI = (() => {
       : `Race length: not available${ev.session_type === 'Race' ? '' : ' — the upcoming race is not described by the current session; enter it manually'}`;
     const fuel = plan.fuel, energy = plan.energy;
     const lines = quality(plan, state, opts.context);
-    const cls = plan.status === 'ready' && !stale.length ? 'pr-ok' : plan.status === 'ready' || plan.status === 'ready_capacity_unchecked' ? 'pr-warn' : 'pr-bad';
+    const cls = plan.status === 'ready' && !staleSaved.length ? 'pr-ok' : plan.status === 'ready' || plan.status === 'ready_capacity_unchecked' ? 'pr-warn' : 'pr-bad';
     return `<form id="pr-form" class="pr-form" novalidate>
       <p class="muted">${e(rules)}</p>
       <fieldset class="pr-mode"><legend>Race length</legend>
@@ -177,7 +186,7 @@ const PreRaceUI = (() => {
       ${input(laps ? 'race_laps' : 'duration_minutes')}${input('lap_time_s')}${input('fuel_per_lap_l')}
       <div class="pr-field"><label for="pr-ve">Virtual Energy car${veStale}</label><select id="pr-ve"><option value="unknown" ${veChoice === 'unknown' ? 'selected' : ''}>Unknown</option>
         <option value="yes" ${veChoice === 'yes' ? 'selected' : ''}>Yes</option><option value="no" ${veChoice === 'no' ? 'selected' : ''}>No</option></select>${veEvidence}</div>
-      ${veChoice === 'yes' ? input('ve_per_lap_percent') : ''}
+      ${active.has('ve_per_lap_percent') ? input('ve_per_lap_percent') : ''}
       ${input('tank_capacity_l')}${input('reserve_laps')}
       <div class="pr-actions"><button type="submit">Calculate</button><button type="button" id="pr-clear">Clear plan</button><span id="pr-feedback" class="muted" role="status"></span></div>
       <p class="muted">Manual planning values. Nothing is stored on the server and LMU pit settings are not changed.</p></form>
@@ -204,8 +213,7 @@ const PreRaceUI = (() => {
     if (draft.mode) state.mode = draft.mode;
     // Fields hidden by the chosen race-length mode or by "no VE" are neither validated nor saved; their draft
     // text is kept (see `inactive`) so switching back restores it.
-    const veOn = Object.hasOwn(draft, 've') ? draft.ve === 'yes' : saved.ve_capable === true;
-    const inactive = new Set([state.mode === 'laps' ? 'duration_minutes' : 'race_laps', ...(veOn ? [] : ['ve_per_lap_percent'])]);
+    const active = activeFields(saved, draft), inactive = new Set(FIELDS.filter(f => !active.has(f)));
     for (const [f, raw] of Object.entries(draft.text)) {
       if (inactive.has(f)) continue;
       const text = String(raw).trim().replace(',', '.');
@@ -275,5 +283,5 @@ const PreRaceUI = (() => {
     });
   }
   const working = slug => drafts.get(slug) || newDraft();
-  return {read, write, clear, query, load, summary, engineer, bind, staleFields, applyDraft, working, FIELDS};
+  return {read, write, clear, query, load, summary, engineer, bind, staleFields, activeFields, applyDraft, working, FIELDS};
 })();

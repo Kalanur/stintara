@@ -2085,6 +2085,58 @@ test('state matrix: manual value survives Use of another field; Still valid conf
   assert.deepEqual([...h.ui.staleFields(saved, {track_name: 'Monza', car_name: 'Car B'})], ['duration_minutes']);
 });
 
+test('one activity definition: form uses the draft, query and Driver Live the saved state (full matrix)', () => {
+  const ui = preraceUI();
+  const OTHER = {track_name: 'Monza', car_name: 'Car B'};
+  const stamps = Object.fromEntries(ui.FIELDS.concat('ve_capable').map(f => [f, SPA]));
+  const values = {duration_minutes: 60, race_laps: 20, lap_time_s: 120, fuel_per_lap_l: 3, ve_per_lap_percent: 2.5, tank_capacity_l: 100, reserve_laps: 1};
+  for (const savedMode of ['time', 'laps']) for (const savedVe of [true, false, null]) {
+    const state = {v: 1, mode: savedMode, values, sources: {}, stamps, ve_capable: savedVe};
+    for (const draft of [undefined, {text: {}, adopted: {}}, {text: {}, adopted: {}, mode: 'time'}, {text: {}, adopted: {}, mode: 'laps'},
+      {text: {}, adopted: {}, ve: 'yes'}, {text: {}, adopted: {}, ve: 'no'}, {text: {}, adopted: {}, ve: 'unknown', mode: 'laps'}]) {
+      const mode = draft?.mode ?? savedMode, ve = draft && 've' in draft ? draft.ve === 'yes' : savedVe === true;
+      const active = ui.activeFields(state, draft), label = JSON.stringify({savedMode, savedVe, draft});
+      assert.equal(active.has('race_laps'), mode === 'laps', label); assert.equal(active.has('duration_minutes'), mode !== 'laps', label);
+      assert.equal(active.has('ve_per_lap_percent'), ve, label);
+      // Warnings follow exactly the active (visible) fields of the same state.
+      const stale = [...ui.staleFields(state, OTHER, draft)];
+      assert.deepEqual(stale.filter(f => !active.has(f)), [], label);
+      for (const f of active) if (f in values) assert.ok(stale.includes(f), `${f} ${label}`);
+      // Rendered form: a field is shown iff active, and a shown saved value carries the warning.
+      const html = ui.engineer(respOf('S1', {plan: planOf()}), state, {sessionId: 'S1', context: OTHER, draft: draft ? {...draft} : ui.working('none')});
+      for (const f of ['duration_minutes', 'race_laps', 've_per_lap_percent'])
+        assert.equal(html.includes(`id="pr-${f}"`), active.has(f), `${f} ${label}`);
+      if (active.has('ve_per_lap_percent')) assert.match(html, /id="pr-ve_per_lap_percent"/);
+    }
+    // The calculation query sees only the saved state, never a draft.
+    const q = new URLSearchParams(ui.query(state));
+    assert.equal(q.get('race_laps') !== null, savedMode === 'laps'); assert.equal(q.get('duration_minutes') !== null, savedMode !== 'laps');
+    assert.equal(q.get('ve_per_lap_percent') !== null, savedVe === true);
+    assert.doesNotMatch(q.get('sources'), savedVe === true ? /^$/ : /ve_per_lap_percent/);
+  }
+});
+
+test('Codex repro: restored VE value is flagged immediately after switching to Yes without Calculate', () => {
+  const h = harness();
+  const ve = v => h.handlers.change({target: {id: 'pr-ve', value: v}});
+  h.type('duration_minutes', '60'); h.type('lap_time_s', '120'); h.type('fuel_per_lap_l', '3');
+  ve('yes'); h.type('ve_per_lap_percent', '2.5'); h.submit();            // saved for Spa / Car A
+  const other = {track_name: 'Monza', car_name: 'Car B'};
+  h.setContext(other); ve('no'); h.submit(); ve('yes');                    // no Calculate after switching back
+  let html = h.ui.engineer(respOf('S1', {plan: planOf()}), h.ui.read(h.store, 'one'), {sessionId: 'S1', context: other, draft: h.ui.working('one')});
+  assert.match(html, /id="pr-ve_per_lap_percent"[^>]*value="2.5"/);
+  assert.match(html, /for="pr-ve_per_lap_percent">[^<]*<small class="muted">· manual<\/small> <small class="pr-bad">· other car\/track<\/small>/);
+  assert.match(html, /data-confirm="ve_per_lap_percent"/);
+  // Same for the race-length mode: switching back exposes the kept value with its warning, before any Calculate.
+  h.handlers.change({target: {name: 'pr-mode', value: 'laps'}}); h.type('race_laps', '20'); h.submit();
+  h.handlers.change({target: {name: 'pr-mode', value: 'time'}});
+  html = h.ui.engineer(respOf('S1', {plan: planOf()}), h.ui.read(h.store, 'one'), {sessionId: 'S1', context: other, draft: h.ui.working('one')});
+  assert.match(html, /data-confirm="duration_minutes"/);
+  // Driver Live (saved state only, no draft): hidden VE value is neither shown as stale nor queried.
+  const saved = h.ui.read(h.store, 'one');
+  assert.deepEqual([...h.ui.staleFields(saved, other)].includes('ve_per_lap_percent'), saved.ve_capable === true);
+});
+
 test('Use ignores a suggestion that belongs to another session than the one viewed', () => {
   const h = harness(SPA, 'SESSION-A');
   h.adopt('fuel_per_lap_l', '2.5', 'SESSION-B');
