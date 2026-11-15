@@ -67,7 +67,7 @@ def test_focus_block_for_the_unique_own_participant():
     assert f["last_lap"] == {"lap_number": 5, "lap_time": 90.0, "sector1": 30.0, "sector2": 31.0, "sector3": None}
     assert (f["last_lap_number"], f["last_lap_time"]) == (5, 90.0)
     assert (f["pitstops"], f["last_pit_lap"], f["player_sector"]) == (1, 3, 2)
-    assert f["gap_to_leader"] == 8.0 and f["interval"] == 8.0
+    assert f["gap_to_leader"] == 8.0 and f["interval"] == 8.0 and f["interval_reason"] is None
     assert [p["gap_to_leader"] for p in people] == [0.0, 8.0, 12.0], "existing participant fields stay untouched"
 
 
@@ -192,3 +192,12 @@ async def test_last_pit_lap_is_the_first_stored_checkpoint_after_a_counter_incre
         # A counter already above zero at the first stored checkpoint has no earlier baseline and is not a detection.
         assert await last_pit({3: 1, 4: 1}) is None
         assert await last_pit({1: 0, 2: 0}) is None
+
+
+def test_focus_lapped_interval_is_unknown_with_reason():
+    """#68: two lapped cars (provider time 0.0) must not produce a 0.0 s interval in Driver Live."""
+    people = [participant("a", 1), participant("b", 2, total_laps=4, laps_behind_leader=1, gap_to_leader=0.0),
+              participant("c", 3, is_stintara_driver=True, total_laps=4, laps_behind_leader=1, gap_to_leader=0.0)]
+    f = focus_block("one", SESSION, people, None, [], 100.0)
+    assert f["interval"] is None and f["interval_reason"] == "lapped"
+    assert f["gap_to_leader"] is None and f["gap_laps"] == 1

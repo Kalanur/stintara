@@ -320,9 +320,32 @@ test('driver focus never invents values: unknowns stay a dash and no sector is h
   assert.match(html, /Stops —/);
   assert.equal((html.match(/<div class="big">—<\/div>/g) || []).length >= 8, true);
   // Lapped: laps replace the time gap, and a stop count of zero reports no last stop.
-  const lapped = (await render('live.html', focusFixture({...baseFocus,gap_laps:2,gap_to_leader:null,interval:null,pitstops:0,last_pit_lap:3}))).innerHTML;
+  const lapped = (await render('live.html', focusFixture({...baseFocus,gap_laps:2,gap_to_leader:null,interval:null,interval_reason:'lapped',pitstops:0,last_pit_lap:3}))).innerHTML;
   assert.match(lapped, /Gap 2 L/);
   assert.match(lapped, /0 stops(?! ·)/);
+  // #68: lapped interval stays a dash and says why; no other unknown reason changes the caption.
+  assert.match(lapped, /lapped: not computable/);
+  const other = (await render('live.html', focusFixture({...baseFocus,interval:null,interval_reason:'gap'}))).innerHTML;
+  assert.doesNotMatch(other, /lapped: not computable/);
+  assert.doesNotMatch(lapped, /NaN|undefined|null/);
+});
+
+test('lapped full-field interval is a dash with a visible reason and never a fabricated time', async () => {
+  const field=syntheticField(3).map((p,i)=>({...p,position:i+1,total_laps:i?4:5,laps_behind_leader:i?1:0,
+    gap_laps:i?1:null,gap_to_leader:i?null:0,interval:null,interval_preceding_id:null,
+    interval_reason:['leader','lapped','<lapped>'][i]}));
+  const page=await sessionHarness({...sessionData(field),session:{session_type:'Race',track_name:'Synthetic Circuit'}});
+  const html=page.root.innerHTML, h=helpers();
+  assert.match(html,/<td class="num" aria-describedby="interval-help">— <span class="why">lapped<\/span><\/td>/);
+  assert.doesNotMatch(html,/title="[^"]*[Ll]apped|NaN|undefined|&lt;lapped/);
+  assert.match(html,/id="interval-help"/); assert.match(html,/no reliable interval|cannot compute a reliable interval/);
+  assert.doesNotMatch(html,/LMU (reports|gives) no time/);
+  assert.equal(h.intervalText({gap_laps:1,gap_to_leader:null,interval:0,interval_reason:'lapped'},true),'—');
+  const why=(r,race=true,extra={})=>h.intervalReason({interval:null,interval_reason:r,...extra},race);
+  assert.deepEqual(['lapped','laps','gap','position'].map(r=>why(r)),['lapped','laps differ','no gap','no pos']);
+  assert.equal(why('leader'),''); assert.equal(why('not_race'),''); assert.equal(why('unknown-code'),''); assert.equal(why(null),'');
+  assert.equal(why('lapped',false),''); assert.equal(why('lapped',true,{interval:.5,gap_to_leader:3,gap_laps:null}),'');
+  assert.equal(h.intervalCell({interval:null,interval_reason:'<x>'},true),'—');
 });
 
 test('driver focus: FIN, DNF, DSQ and PIT badges, no current sector outside live scoring', async () => {

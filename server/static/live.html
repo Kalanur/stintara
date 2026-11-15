@@ -116,6 +116,8 @@ function gapText(f) {
   return Number.isFinite(f.gap_to_leader) && f.gap_to_leader >= 0 ? (f.position === 1 ? 'Leader' : seconds(f.gap_to_leader)) : '—';
 }
 const intervalText = f => !int(f.gap_laps, 1) && Number.isFinite(f.interval) && f.interval >= 0 ? seconds(f.interval) : '—';
+const intervalNote = f => intervalText(f) === '—' && f.interval_reason === 'lapped'
+  ? 'lapped: not computable' : 'to car ahead';
 function stopsText(f) {
   const stops = int(f.pitstops);
   if (stops === null) return 'Stops —';
@@ -142,7 +144,7 @@ function focusStrip(d, me) {
     ${stale ? '<div class="notice" role="status">Live scoring is stale or unavailable — values may be outdated.</div>' : ''}
     <div class="card"><div class="label">Status</div><div>${statusBadge(statusOf(d.focus, me))}</div><div class="small">${esc(stopsText(f))}</div></div>
     <div class="card"><div class="label">Position</div><div class="big">${int(f.position, 1) === null ? '—' : 'P' + f.position}</div><div class="small">Gap ${esc(gapText(f))}</div></div>
-    <div class="card"><div class="label">Interval</div><div class="big">${esc(intervalText(f))}</div><div class="small">to car ahead</div></div>
+    <div class="card"><div class="label">Interval</div><div class="big">${esc(intervalText(f))}</div><div class="small">${esc(intervalNote(f))}</div></div>
     <div class="card"><div class="label">Lap</div><div class="big">${lapNo === null ? '—' : lapNo}</div><div class="small">${done === null ? '—' : done} completed</div></div>
     <div class="card"><div class="label">Last lap</div><div class="big">${fmt(f.last_lap_time)}</div><div class="small">${lastNo === null ? '—' : 'L' + lastNo}</div></div>
     <div class="card"><div class="label">Best lap</div><div class="big">${fmt(f.best_lap_time)}</div><div class="small">&nbsp;</div></div>

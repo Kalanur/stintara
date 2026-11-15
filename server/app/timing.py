@@ -41,15 +41,34 @@ def race_gap(participant, race):
     return (gap if nonnegative(gap) else None), None
 
 
-def preceding_interval(previous, current):
-    if (not previous or current["position"] != previous["position"] + 1
-            or not lap_count(current.get("total_laps"))
-            or not lap_count(previous.get("total_laps"))
-            or current["total_laps"] != previous["total_laps"]
-            or current.get("laps_behind_leader") != 0 or previous.get("laps_behind_leader") != 0
-            or not nonnegative(current.get("gap_to_leader"))
+def interval_unavailable(previous, current):
+    """Why the position interval of ``current`` to ``previous`` (the unique P-1) is not known; None if it is.
+
+    Observed in three private LMU captures (not a provider guarantee): ``mTimeBehindLeader`` was exactly 0 for
+    every car with a positive lap deficit, so two lapped cars gave no subtractable leader gap and a difference
+    would be a fabricated 0.0 s. A positive deficit therefore withholds the interval whatever time is supplied.
+    Subtraction is only valid between two lead-lap cars with equal completed laps and nondecreasing
+    nonnegative gaps taken from the same scoring packet. Reasons: "position" (no unique adjacent previous),
+    "lapped" (a positive lap deficit: no reliable interval can be computed from the current scoring data), "laps" (completed laps unknown or
+    different), "gap" (deficit/gap invalid, negative or not nondecreasing).
+    """
+    if not previous or current["position"] != previous["position"] + 1:
+        return "position"
+    deficits = (previous.get("laps_behind_leader"), current.get("laps_behind_leader"))
+    if any(lap_count(d) and d > 0 for d in deficits):
+        return "lapped"
+    if (not lap_count(current.get("total_laps")) or not lap_count(previous.get("total_laps"))
+            or current["total_laps"] != previous["total_laps"]):
+        return "laps"
+    if (deficits != (0, 0) or not nonnegative(current.get("gap_to_leader"))
             or not nonnegative(previous.get("gap_to_leader"))
             or current["gap_to_leader"] < previous["gap_to_leader"]):
+        return "gap"
+    return None
+
+
+def preceding_interval(previous, current):
+    if interval_unavailable(previous, current) is not None:
         return None
     return current["gap_to_leader"] - previous["gap_to_leader"]
 
@@ -87,16 +106,19 @@ def project_timing(participants, session_type):
     race = session_type == "Race"
     for p in participants:
         p["gap_to_leader"], p["gap_laps"] = race_gap(p, race)
-        p.update(interval=None, interval_preceding_id=None)
+        p.update(interval=None, interval_preceding_id=None, interval_reason="not_race")
         for sector in ("sector1", "sector2", "sector3"):
             value = p.get(sector)
             p[sector] = value if nonnegative(value) and value > 0 else None
     if race:
+        for p in participants:
+            p["interval_reason"] = "position"
         for pos, p in unique.items():
             previous = unique.get(pos-1)
-            interval = preceding_interval(previous, p)
-            if interval is not None:
-                p.update(interval=interval, interval_preceding_id=previous["id"])
+            reason = "leader" if pos == 1 else interval_unavailable(previous, p)
+            p["interval_reason"] = reason
+            if reason is None:
+                p.update(interval=p["gap_to_leader"] - previous["gap_to_leader"], interval_preceding_id=previous["id"])
     classify_lap_times(participants)
 
 
