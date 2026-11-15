@@ -1989,6 +1989,42 @@ test('legacy plan-level context still marks its values and old data stays readab
   assert.deepEqual([...ui.staleFields(state, {track_name: 'Imola', car_name: 'Car A'})], ['duration_minutes']);
 });
 
+test('hidden fields never block Calculate; their draft text survives for switching back', () => {
+  const h = harness();
+  const change = (t) => h.handlers.change({target: t});
+  // Invalid duration, then Lap limit with valid inputs.
+  h.type('duration_minutes', 'abc'); change({name: 'pr-mode', value: 'laps'});
+  h.type('race_laps', '30'); h.type('lap_time_s', '120'); h.type('fuel_per_lap_l', '3');
+  h.submit();
+  let saved = h.ui.read(h.store, 'one');
+  assert.equal(h.feedback.textContent, '');
+  assert.equal(saved.mode, 'laps'); assert.equal(saved.values.race_laps, 30);
+  assert.equal(saved.values.duration_minutes, undefined); assert.equal(saved.sources.duration_minutes, undefined);
+  assert.equal(h.ui.working('one').text.duration_minutes, 'abc');              // kept for switching back
+  // Switching back makes it active again: now it blocks and nothing is lost.
+  change({name: 'pr-mode', value: 'time'}); h.submit();
+  assert.match(h.feedback.textContent, /not a number/);
+  assert.equal(h.ui.read(h.store, 'one').mode, 'laps');
+  // Invalid VE consumption with VE switched to No.
+  const g = harness();
+  g.type('duration_minutes', '60'); g.type('lap_time_s', '120'); g.type('fuel_per_lap_l', '3');
+  g.handlers.change({target: {id: 'pr-ve', value: 'yes'}}); g.type('ve_per_lap_percent', 'abc');
+  g.handlers.change({target: {id: 'pr-ve', value: 'no'}});
+  g.submit();
+  saved = g.ui.read(g.store, 'one');
+  assert.equal(g.feedback.textContent, ''); assert.equal(saved.ve_capable, false);
+  assert.equal(saved.values.ve_per_lap_percent, undefined); assert.equal(saved.sources.ve_per_lap_percent, undefined);
+  // An invalid value in an ACTIVE field still blocks and loses nothing.
+  const k = harness(); k.type('duration_minutes', 'abc'); k.submit();
+  assert.match(k.feedback.textContent, /not a number/); assert.equal(k.ui.working('one').text.duration_minutes, 'abc');
+  // A hidden invalid draft leaves the saved value, origin and stamp of that field alone.
+  const m = harness(); m.type('duration_minutes', '45'); m.submit();
+  m.handlers.change({target: {name: 'pr-mode', value: 'laps'}}); m.type('duration_minutes', 'zzz'); m.type('race_laps', '20'); m.submit();
+  saved = m.ui.read(m.store, 'one');
+  assert.equal(saved.values.duration_minutes, 45); assert.equal(saved.sources.duration_minutes, 'manual');
+  assert.deepEqual({...saved.stamps.duration_minutes}, SPA);
+});
+
 test('Use ignores a suggestion that belongs to another session than the one viewed', () => {
   const h = harness(SPA, 'SESSION-A');
   h.adopt('fuel_per_lap_l', '2.5', 'SESSION-B');

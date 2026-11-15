@@ -201,7 +201,12 @@ const PreRaceUI = (() => {
     const stamp = stampOf(context);
     const touch = (f, source, at) => { state.sources[f] = source; const s = stampOf(at) || stamp; if (s) state.stamps[f] = s; else delete state.stamps[f]; };
     if (draft.mode) state.mode = draft.mode;
+    // Fields hidden by the chosen race-length mode or by "no VE" are neither validated nor saved; their draft
+    // text is kept (see `inactive`) so switching back restores it.
+    const veOn = Object.hasOwn(draft, 've') ? draft.ve === 'yes' : saved.ve_capable === true;
+    const inactive = new Set([state.mode === 'laps' ? 'duration_minutes' : 'race_laps', ...(veOn ? [] : ['ve_per_lap_percent'])]);
     for (const [f, raw] of Object.entries(draft.text)) {
+      if (inactive.has(f)) continue;
       const text = String(raw).trim().replace(',', '.');
       if (text === '') { delete state.values[f]; delete state.sources[f]; delete state.stamps[f]; continue; }
       const value = Number(text);
@@ -214,7 +219,7 @@ const PreRaceUI = (() => {
       if (capable !== state.ve_capable || draft.adopted.ve_capable) { state.ve_capable = capable; touch('ve_capable', draft.adopted.ve_capable?.source || 'manual', draft.adopted.ve_capable?.context); }
       if (capable !== true) { delete state.values.ve_per_lap_percent; delete state.sources.ve_per_lap_percent; delete state.stamps.ve_per_lap_percent; }
     }
-    return {state};
+    return {state, inactive};
   }
 
   // Wires one container. ctx: storage, slug(), context() (current car/track), sessionId() (viewed session),
@@ -238,7 +243,9 @@ const PreRaceUI = (() => {
       const done = applyDraft(read(ctx.storage, slug), d, ctx.context());
       if (done.error) { if (feedback) feedback.textContent = done.error; return; }
       if (!write(ctx.storage, slug, done.state)) { if (feedback) feedback.textContent = 'Browser storage unavailable: plan not saved'; return; }
-      drafts.set(slug, newDraft());
+      const next = newDraft();
+      for (const f of done.inactive) if (Object.hasOwn(d.text, f)) next.text[f] = d.text[f];
+      drafts.set(slug, next);
       ctx.refresh(true);
     });
     box.addEventListener('click', event => {
