@@ -42,17 +42,31 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
-def create_unique(directory, started, track=None, event=None, driver_alias=None, limit=999):
-    """Exclusively create the next free capture file; returns (path, open text stream).
+def metadata_path(path):
+    return path.with_name(path.stem + ".meta.json")
 
-    Collisions (same second, concurrent recorders) advance the index; existing files are never opened for write.
+
+def create_unique(directory, started, track=None, event=None, driver_alias=None, limit=999):
+    """Reserve the next free capture file and its sidecar name as one pair; returns (path, open text stream).
+
+    The sidecar placeholder is created exclusively first, then the capture file. A collision on either
+    name advances the index, and a failed reservation removes only the placeholder this call created.
+    No decision relies on a prior exists() check; existing files are never opened for writing.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     for index in range(1, limit + 1):
         path = directory / capture_name(started, track, event, driver_alias, index)
+        sidecar = metadata_path(path)
+        try:
+            sidecar.open("x", encoding="utf-8").close()
+        except FileExistsError:
+            continue
         try:
             return path, path.open("x", encoding="utf-8", newline="\n")
         except FileExistsError:
-            continue
+            sidecar.unlink(missing_ok=True)  # our own placeholder
+        except BaseException:
+            sidecar.unlink(missing_ok=True)
+            raise
     raise FileExistsError("No free capture file name")

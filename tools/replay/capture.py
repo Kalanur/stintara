@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import tempfile
 from collections import Counter
 from pathlib import Path
 from time import monotonic
@@ -18,7 +19,7 @@ from agent.pitwall import MESSAGE_TYPES
 from . import common
 from .common import Parser, output_location, run_cli
 from .format import decode, encode, header, validate_record
-from .naming import DEFAULT_DIRECTORY, create_unique, utc_now
+from .naming import DEFAULT_DIRECTORY, create_unique, metadata_path, utc_now
 
 STATUS_INTERVAL = 10.0
 # Regular ends vs. captures that may be truncated or damaged.
@@ -61,18 +62,22 @@ def file_digest(path):
     return size, digest.hexdigest()
 
 
-def metadata_path(path):
-    return path.with_name(path.stem + ".meta.json")
-
-
 def write_metadata(path, document):
-    """Replace the private sidecar atomically; a hard crash leaves the non-final `recording` state."""
+    """Replace the sidecar atomically via a unique, exclusively created temporary file.
+
+    mkstemp uses a random name with O_EXCL, so a pre-planted file or symlink is never followed or written.
+    os.replace swaps the directory entry itself (a symlink at the target is replaced, not followed).
+    """
     target = metadata_path(path)
-    temporary = target.with_name(target.name + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-        json.dump(document, stream, allow_nan=False, indent=2)
-        stream.write("\n")
-    os.replace(temporary, target)
+    descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(document, stream, allow_nan=False, indent=2)
+            stream.write("\n")
+        os.replace(name, target)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
 
 
 def classify(error):
@@ -132,20 +137,22 @@ async def capture(url, output=None, *, directory=None, track=None, event=None, d
                                 note="user-supplied organisational labels, not verified LMU metadata"))
         begin, status = monotonic(), "error"
         with stream:
-            stream.write(encode(header("real")))
-            stream.flush()
-            if automatic:
-                write_metadata(path, meta)
-            print(f"Connected to Pitwall. Recording to {path}\nStop with Ctrl+C.", flush=True)
-            watcher = asyncio.ensure_future(ticker(stats, path, interval))
+            watcher = None
             try:
+                stream.write(encode(header("real")))
+                stream.flush()
+                if automatic:
+                    write_metadata(path, meta)
+                print(f"Connected to Pitwall. Recording to {path}\nStop with Ctrl+C.", flush=True)
+                watcher = asyncio.ensure_future(ticker(stats, path, interval))
                 await record(socket, stream, stats=stats)
                 status = "pitwall_closed"
             except BaseException as error:
                 status = classify(error)
                 raise
             finally:
-                watcher.cancel()
+                if watcher:
+                    watcher.cancel()
                 finish(path, stream, meta, stats, monotonic() - begin, status, automatic)
     return path, status
 

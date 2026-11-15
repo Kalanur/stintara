@@ -10,7 +10,7 @@ import pytest
 import websockets
 
 from tools.replay import common
-from tools.replay.capture import capture, file_digest, metadata_path
+from tools.replay.capture import capture, file_digest, metadata_path, write_metadata
 from tools.replay.format import header, load
 from tools.replay.inspect import inspect
 from tools.replay.inspector import inspect_stream
@@ -50,7 +50,7 @@ def test_repeated_and_concurrent_starts_never_overwrite(tmp_path):
     first[1].close()
     second[1].close()
     assert first[0].name.endswith("_01.jsonl") and second[0].name.endswith("_02.jsonl")
-    assert len({p.name for p in tmp_path.iterdir()}) == 2
+    assert len({p.name for p in tmp_path.iterdir()}) == 4  # two capture/sidecar pairs
     with pytest.raises(FileExistsError):
         create_unique(tmp_path, T0, "spa", limit=2)
 
@@ -182,3 +182,149 @@ def test_windows_starter_forwards_arguments_with_spaces(tmp_path):
     args = log.read_text()
     assert "-m tools.replay.capture" in args and '"Spa Francorchamps"' in args and '"my dir"' in args
     assert "--event" not in args
+
+
+# --- #75 review: sidecar reservation and temporary-file safety ---------------------------------------------
+
+def sidecar_of(path):
+    return metadata_path(path)
+
+
+def test_planted_predictable_tmp_symlink_is_never_followed(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    path, stream = create_unique(tmp_path / "raw", T0)
+    stream.close()
+    for planted in (sidecar_of(path).with_name(sidecar_of(path).name + ".tmp"),):
+        try:
+            planted.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unavailable")
+    write_metadata(path, dict(status="recording"))
+    write_metadata(path, dict(status="done", sha256="x"))  # repeated update still works
+    assert outside.read_text() == "keep"
+    assert json.loads(sidecar_of(path).read_text())["status"] == "done"
+    assert sorted(p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")) == [
+        sidecar_of(path).name + ".tmp"]  # only the planted link remains; ours are cleaned up
+
+
+def test_sidecar_symlink_target_is_replaced_not_followed(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    path, stream = create_unique(tmp_path / "raw", T0)
+    stream.close()
+    sidecar_of(path).unlink()
+    try:
+        sidecar_of(path).symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    write_metadata(path, dict(status="x"))
+    assert outside.read_text() == "keep" and not sidecar_of(path).is_symlink()
+
+
+def test_failed_sidecar_update_leaves_external_files_and_no_temporary(tmp_path, monkeypatch):
+    path, stream = create_unique(tmp_path, T0)
+    stream.close()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+
+    def refuse(*args):
+        raise PermissionError
+
+    monkeypatch.setattr("tools.replay.capture.os.replace", refuse)
+    with pytest.raises(PermissionError):
+        write_metadata(path, dict(status="x"))
+    assert outside.read_text() == "keep"
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert sidecar_of(path).read_bytes() == b""  # reservation placeholder untouched
+
+
+def test_existing_sidecar_without_capture_forces_next_suffix(tmp_path):
+    first = tmp_path / capture_name(T0)
+    sidecar_of(first).write_text("precious")
+    path, stream = create_unique(tmp_path, T0)
+    stream.close()
+    assert path.name.endswith("_02.jsonl")
+    assert sidecar_of(first).read_text() == "precious" and not first.exists()
+    assert sidecar_of(path).exists()
+
+
+def test_existing_capture_without_sidecar_is_untouched_and_leaves_no_orphan(tmp_path):
+    first = tmp_path / capture_name(T0)
+    first.write_text("precious")
+    path, stream = create_unique(tmp_path, T0)
+    stream.close()
+    assert path.name.endswith("_02.jsonl") and first.read_text() == "precious"
+    assert not sidecar_of(first).exists()
+
+
+def test_failed_reservation_removes_only_its_own_placeholder(tmp_path, monkeypatch):
+    foreign = tmp_path / capture_name(T0)
+    sidecar_of(foreign).write_text("precious")
+    real_open = Path.open
+
+    def failing(self, *args, **kwargs):
+        if self.name.endswith(".jsonl"):
+            raise PermissionError
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failing)
+    with pytest.raises(PermissionError):
+        create_unique(tmp_path, T0)
+    monkeypatch.undo()
+    assert [p.name for p in tmp_path.iterdir()] == [sidecar_of(foreign).name]
+    assert sidecar_of(foreign).read_text() == "precious"
+
+
+def test_parallel_reservations_are_distinct_pairs(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(lambda _: create_unique(tmp_path, T0, "spa"), range(16)))
+    for _, stream in results:
+        stream.close()
+    names = {path.name for path, _ in results}
+    assert len(names) == 16
+    assert all(sidecar_of(path).exists() for path, _ in results)
+    assert len(list(tmp_path.iterdir())) == 32
+
+
+async def test_header_failure_leaves_visible_incomplete_state(private, monkeypatch):
+    from tools.replay import capture as module
+    _, rows = scenario()
+    server, url = await serve(rows)
+
+    def broken(*args):
+        raise OSError
+
+    monkeypatch.setattr(module, "header", broken)
+    async with server:
+        with pytest.raises(OSError):
+            await capture(url, track="spa")
+    path = next((private / "captures" / "raw").glob("*.jsonl"))
+    meta = json.loads(metadata_path(path).read_text())
+    assert meta["status"] == "error" and meta["regular_end"] is False and meta["messages"] == 0
+    assert not [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+async def test_concurrent_recorders_get_distinct_pairs(private, monkeypatch):
+    from tools.replay import capture as module
+    monkeypatch.setattr(module, "utc_now", lambda: T0)
+    _, rows = scenario()
+    server, url = await serve(rows)
+    async with server:
+        results = await asyncio.gather(capture(url), capture(url), capture(url))
+    paths = {path for path, _ in results}
+    assert len(paths) == 3
+    for path in paths:
+        assert json.loads(metadata_path(path).read_text())["regular_end"] is True
+
+
+def test_planted_regular_tmp_file_is_not_written(tmp_path):
+    """Runs without symlink privileges (Windows): the old predictable name must be left alone."""
+    path, stream = create_unique(tmp_path, T0)
+    stream.close()
+    planted = sidecar_of(path).with_name(sidecar_of(path).name + ".tmp")
+    planted.write_text("keep")
+    write_metadata(path, dict(status="x"))
+    assert planted.read_text() == "keep"
+    assert json.loads(sidecar_of(path).read_text()) == dict(status="x")
