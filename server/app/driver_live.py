@@ -93,6 +93,7 @@ def focus_block(slug, session, participants, history, states, now):
         "status": status_of(me),
         "position": me["position"] if type(me.get("position")) is int and me["position"] > 0 else None,
         "gap_to_leader": timed["gap_to_leader"], "gap_laps": timed["gap_laps"], "interval": timed["interval"],
+        "interval_reason": timed["interval_reason"],
         "completed_laps": me["total_laps"] if lap_count(me.get("total_laps")) else None,
         "current_lap": current_lap_of(me),
         "last_lap": last,   # complete triple (number, time, sectors) of the scoring's last lap, else None

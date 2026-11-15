@@ -320,9 +320,30 @@ test('driver focus never invents values: unknowns stay a dash and no sector is h
   assert.match(html, /Stops —/);
   assert.equal((html.match(/<div class="big">—<\/div>/g) || []).length >= 8, true);
   // Lapped: laps replace the time gap, and a stop count of zero reports no last stop.
-  const lapped = (await render('live.html', focusFixture({...baseFocus,gap_laps:2,gap_to_leader:null,interval:null,pitstops:0,last_pit_lap:3}))).innerHTML;
+  const lapped = (await render('live.html', focusFixture({...baseFocus,gap_laps:2,gap_to_leader:null,interval:null,interval_reason:'lapped',pitstops:0,last_pit_lap:3}))).innerHTML;
   assert.match(lapped, /Gap 2 L/);
   assert.match(lapped, /0 stops(?! ·)/);
+  // #68: lapped interval stays a dash and says why; no other unknown reason changes the caption.
+  assert.match(lapped, /lapped: no LMU time/);
+  const other = (await render('live.html', focusFixture({...baseFocus,interval:null,interval_reason:'gap'}))).innerHTML;
+  assert.doesNotMatch(other, /lapped: no LMU time/);
+  assert.doesNotMatch(lapped, /NaN|undefined|null/);
+});
+
+test('lapped full-field interval is a dash with a reason tooltip and never a fabricated time', async () => {
+  const field=syntheticField(3).map((p,i)=>({...p,position:i+1,total_laps:i?4:5,laps_behind_leader:i?1:0,
+    gap_laps:i?1:null,gap_to_leader:i?null:0,interval:null,interval_preceding_id:null,
+    interval_reason:['leader','lapped','<lapped>'][i]}));
+  const page=await sessionHarness({...sessionData(field),session:{session_type:'Race',track_name:'Synthetic Circuit'}});
+  const html=page.root.innerHTML, h=helpers();
+  assert.match(html,/title="LMU reports no time gap for lapped cars[^"]*">—<\/td>/);
+  assert.match(html,/title="Race leader: no car ahead">—<\/td>/);
+  assert.doesNotMatch(html,/NaN|undefined|&lt;lapped/);
+  assert.equal(h.intervalText({gap_laps:1,gap_to_leader:null,interval:0,interval_reason:'lapped'},true),'—');
+  assert.equal(h.intervalTitle({interval:null,interval_reason:'lapped'},false),'');
+  assert.match(h.intervalTitle({interval:null,interval_reason:'lapped'},true),/^ title="LMU/);
+  assert.equal(h.intervalTitle({interval:null,interval_reason:'unknown-code'},true),'');
+  assert.equal(h.intervalTitle({interval:.5,gap_to_leader:3,interval_reason:null},true),'');
 });
 
 test('driver focus: FIN, DNF, DSQ and PIT badges, no current sector outside live scoring', async () => {

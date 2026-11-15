@@ -128,3 +128,96 @@ def test_sector_invalid_values_not_reconstructed():
     rows[0].update(sector1=-1, sector2=float("inf"), sector3=0)
     project_timing(rows, "Race")
     assert all(rows[0][key] is None for key in ("sector1", "sector2", "sector3"))
+
+
+# --- Interval reliability (#68 / #10) ---------------------------------------------------------------------
+# Real private captures (three LMU races) show that LMU reports `mTimeBehindLeader == 0` for every car with a
+# positive lap deficit. Two lapped cars therefore carry no subtractable leader gap: any interval would be a
+# fabricated 0.0 s. These tests pin that the interval stays unknown and says why.
+
+def lapped_field():
+    """P1/P2 on the lead lap, P3..P5 one lap down (time reported as 0.0), P6 two laps down."""
+    spec = ((0, 0, 0.0), (0, 0, 11.2), (4, 1, 0.0), (4, 1, 0.0), (4, 1, 0.0), (3, 2, 0.0))
+    return [dict(id=uuid7(), local_vehicle_id=i, position=i, total_laps=laps, laps_behind_leader=deficit,
+                 gap_to_leader=gap) for i, (laps, deficit, gap) in enumerate(spec, 1)]
+
+
+def test_lapped_cars_with_equal_deficit_get_no_fabricated_interval():
+    rows = lapped_field()
+    project_timing(rows, "Race")
+    assert [p["gap_laps"] for p in rows] == [None, None, 1, 1, 1, 2]
+    assert [p["gap_to_leader"] for p in rows][:2] == [0.0, 11.2]
+    assert all(p["gap_to_leader"] is None for p in rows[2:])
+    assert [p["interval"] for p in rows][2:] == [None] * 4
+    assert all(p["interval_preceding_id"] is None for p in rows[2:])
+    assert [p["interval_reason"] for p in rows] == ["leader", None, "lapped", "lapped", "lapped", "lapped"]
+
+
+def test_first_lapped_car_behind_lead_lap_car_is_lapped_not_a_time():
+    rows = lapped_field()
+    project_timing(rows, "Race")
+    assert rows[1]["interval"] == pytest.approx(11.2) and rows[1]["interval_reason"] is None
+    assert rows[2]["interval"] is None and rows[2]["interval_reason"] == "lapped"
+
+
+@pytest.mark.parametrize("change, reason", [
+    (dict(position=7), "position"), (dict(position=2), "position"),
+    (dict(total_laps=4), "laps"), (dict(total_laps=None), "laps"),
+    (dict(laps_behind_leader=1), "lapped"), (dict(laps_behind_leader=None), "gap"),
+    (dict(laps_behind_leader=-1), "gap"), (dict(gap_to_leader=10), "gap"),
+    (dict(gap_to_leader=-3.2), "gap"), (dict(gap_to_leader=float("nan")), "gap"),
+    (dict(gap_to_leader=None), "gap")])
+def test_unknown_interval_carries_a_reason(change, reason):
+    rows = field()
+    rows[2].update(change)
+    project_timing(rows, "Race")
+    assert rows[2]["interval"] is None and rows[2]["interval_preceding_id"] is None
+    assert rows[2]["interval_reason"] == reason
+
+
+def test_negative_gap_behind_leader_is_unknown_never_absolute():
+    """#10: a car physically ahead of a pitting P1 reports a negative time; it is neither abs()ed nor subtracted."""
+    rows = field()
+    rows[1]["gap_to_leader"] = -4.4
+    project_timing(rows, "Race")
+    assert rows[1]["gap_to_leader"] is None
+    assert rows[1]["interval"] is None and rows[2]["interval"] is None
+    assert rows[1]["interval_reason"] == rows[2]["interval_reason"] == "gap"
+
+
+def test_non_monotonic_adjacent_gaps_stay_unknown():
+    rows = field()
+    rows[2]["gap_to_leader"] = 14.0   # behind P3 by position but with a smaller leader gap than P2 (14.3)
+    project_timing(rows, "Race")
+    assert rows[2]["interval"] is None and rows[2]["interval_reason"] == "gap"
+
+
+def test_leader_lap_interval_unchanged_and_reason_cleared():
+    rows = field()
+    project_timing(rows, "Race")
+    assert [p["interval_reason"] for p in rows] == ["leader", None, None, None]
+
+
+def test_duplicate_positions_have_no_interval_and_say_so():
+    rows = field()
+    rows[3]["position"] = 3
+    project_timing(rows, "Race")
+    assert rows[2]["interval"] is rows[3]["interval"] is None
+    assert rows[2]["interval_reason"] == rows[3]["interval_reason"] == "position"
+
+
+def test_nonrace_interval_reason():
+    rows = field()
+    project_timing(rows, "Qualifying")
+    assert all(p["interval_reason"] == "not_race" for p in rows)
+
+
+def test_spectator_projection_exposes_interval_reason_for_lapped_live_scoring():
+    sid, rows = uuid7(), lapped_field()
+    live = [dict(id=p["local_vehicle_id"], position=p["position"], total_laps=p["total_laps"],
+                 time_behind_leader=p["gap_to_leader"], laps_behind_leader=p["laps_behind_leader"]) for p in rows]
+    states = [dict(session_id=sid, last_scoring_at=99, scoring=dict(session_time=123, vehicles=live))]
+    out = {p["local_vehicle_id"]: p for p in main.spectator_participants(rows, sid, True, states, 100, "Race")}
+    assert out[2]["interval"] == pytest.approx(11.2) and out[2]["interval_reason"] is None
+    assert all(out[i]["interval"] is None and out[i]["interval_reason"] == "lapped" for i in (3, 4, 5, 6))
+    assert [out[i]["gap_laps"] for i in (3, 4, 5, 6)] == [1, 1, 1, 2]

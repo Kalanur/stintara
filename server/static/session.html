@@ -311,6 +311,14 @@ function intervalText(p, race) {
   return race && Number.isFinite(p.gap_to_leader) && p.gap_to_leader >= 0 && !p.gap_laps &&
     Number.isFinite(p.interval) && p.interval >= 0 ? seconds(p.interval) : '—';
 }
+const INTERVAL_REASON = {leader: 'Race leader: no car ahead',
+  lapped: 'LMU reports no time gap for lapped cars; only the lap deficit is known',
+  laps: 'Completed laps differ or are unknown', gap: 'Provider gap missing, negative or inconsistent',
+  position: 'No unique adjacent position'};
+function intervalTitle(p, race) {
+  return race && intervalText(p, race) === '—' && Object.hasOwn(INTERVAL_REASON, p.interval_reason)
+    ? ` title="${esc(INTERVAL_REASON[p.interval_reason])}"` : '';
+}
 function intervalToFocus(p, focus, race) {
   if (!race || !p || !focus || p.id === focus.id) return null;
   if (p.interval_preceding_id === focus.id && intervalText(p, race) !== '—') return p.interval;
@@ -946,7 +954,7 @@ function renderSession(d, resized = false) {
       <details class="table-help" id="full-help-details"><summary id="full-help-toggle" aria-label="About this table">Info</summary><div class="help-body" id="full-help">
       <p>Provider positions and lap times. Unknown values remain —.</p>
       <p><strong>S1–S3</strong> are the sectors of the last timed lap (the last lap with a valid lap time); after pit laps this can be older than Laps. Sectors are not coloured.</p>
-      <p><strong>Gap</strong> is leader-relative; <strong>Interval</strong> is to the preceding position and only shown when comparable.</p>
+      <p><strong>Gap</strong> is leader-relative; <strong>Interval</strong> is to the preceding position and only shown when comparable; LMU gives no time for lapped cars, so they show — (hover for the reason).</p>
       <p><strong>Colours:</strong> Best is purple only for the single fastest lap of the session; ordinary personal bests stay neutral. Last is purple if it is that session best, green if it equals the driver's own best, yellow if slower than it, uncoloured if unknown.</p>
       <p>Feed freshness does not establish race completion.</p></div></details></div>
       <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
@@ -957,7 +965,7 @@ function renderSession(d, resized = false) {
         const entry = vehicle.label && !(hideClass && vehicle.label === 'Class') ? `${vehicle.label}: ${vehicle.value}` : 'Entry: —';
         return `<tr class="${p.id === focusId ? 'focus' : ''}"><td>${esc(p.position)}</td><td class="driver-cell">${esc(p.display_name)}${p.id === focusId ? ' · Focus' : ''}${p.driver_slug ? ` <a href="/drivers/${esc(encodeURIComponent(p.driver_slug))}/live">Driver live</a>` : ''}
       <span class="entry" title="${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}">${esc(entry)} · Team: ${esc(p.team_name || '—')} · Number: ${esc(p.car_number)}</span></td>
-      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td class="num">${esc(p.total_laps)}</td><td class="num sector">${sectorFmt(p.sector1)}</td><td class="num sector">${sectorFmt(p.sector2)}</td><td class="num sector">${sectorFmt(p.sector3)}</td><td class="num">${lapTime(p.last_lap_time, p.last_lap_class)}</td><td class="num">${bestTime(p)}</td><td class="num">${gapText(p, race)}</td><td class="num">${intervalText(p, race)}</td><td>${tyreText(p)}</td><td>${damageText(p)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
+      ${hideClass ? '' : `<td>${esc(p.vehicle_class || '—')}</td>`}<td class="num">${esc(p.total_laps)}</td><td class="num sector">${sectorFmt(p.sector1)}</td><td class="num sector">${sectorFmt(p.sector2)}</td><td class="num sector">${sectorFmt(p.sector3)}</td><td class="num">${lapTime(p.last_lap_time, p.last_lap_class)}</td><td class="num">${bestTime(p)}</td><td class="num">${gapText(p, race)}</td><td class="num"${intervalTitle(p, race)}>${intervalText(p, race)}</td><td>${tyreText(p)}</td><td>${damageText(p)}</td><td>${stopsText(p)}</td><td>${participantStatus(p)}</td></tr>`;
       }).join('') || `<tr><td colspan="${hideClass ? 14 : 15}">No participants received yet.</td></tr>`}</tbody></table></div></section>`;
   const weatherDetails = document.querySelector('#weather-details');
   if (weatherDetails) weatherDetails.open = weatherOpen;
