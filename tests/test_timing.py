@@ -131,7 +131,7 @@ def test_sector_invalid_values_not_reconstructed():
 
 
 # --- Interval reliability (#68 / #10) ---------------------------------------------------------------------
-# Real private captures (three LMU races) show that LMU reports `mTimeBehindLeader == 0` for every car with a
+# Three private LMU captures showed `mTimeBehindLeader == 0` (observed, not guaranteed) for every car with a
 # positive lap deficit. Two lapped cars therefore carry no subtractable leader gap: any interval would be a
 # fabricated 0.0 s. These tests pin that the interval stays unknown and says why.
 

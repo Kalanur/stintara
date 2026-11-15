@@ -44,11 +44,12 @@ def race_gap(participant, race):
 def interval_unavailable(previous, current):
     """Why the position interval of ``current`` to ``previous`` (the unique P-1) is not known; None if it is.
 
-    Provider fact (three real LMU races): ``mTimeBehindLeader`` is exactly 0 for every car with a positive lap
-    deficit, so two lapped cars have no subtractable leader gap; an interval would be a fabricated 0.0 s.
+    Observed in three private LMU captures (not a provider guarantee): ``mTimeBehindLeader`` was exactly 0 for
+    every car with a positive lap deficit, so two lapped cars gave no subtractable leader gap and a difference
+    would be a fabricated 0.0 s. A positive deficit therefore withholds the interval whatever time is supplied.
     Subtraction is only valid between two lead-lap cars with equal completed laps and nondecreasing
     nonnegative gaps taken from the same scoring packet. Reasons: "position" (no unique adjacent previous),
-    "lapped" (a positive lap deficit: the provider reports no time), "laps" (completed laps unknown or
+    "lapped" (a positive lap deficit: no reliable interval can be computed from the current scoring data), "laps" (completed laps unknown or
     different), "gap" (deficit/gap invalid, negative or not nondecreasing).
     """
     if not previous or current["position"] != previous["position"] + 1:

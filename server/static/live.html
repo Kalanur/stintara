@@ -117,7 +117,7 @@ function gapText(f) {
 }
 const intervalText = f => !int(f.gap_laps, 1) && Number.isFinite(f.interval) && f.interval >= 0 ? seconds(f.interval) : '—';
 const intervalNote = f => intervalText(f) === '—' && f.interval_reason === 'lapped'
-  ? 'lapped: no LMU time' : 'to car ahead';
+  ? 'lapped: not computable' : 'to car ahead';
 function stopsText(f) {
   const stops = int(f.pitstops);
   if (stops === null) return 'Stops —';
