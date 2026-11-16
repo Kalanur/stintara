@@ -21,6 +21,31 @@ Every later record is `{"record_type":"message","t":0.0,"message":{...}}`. Relat
 
 `tools.replay.format` provides pure header/record validation, `loads`/`dumps`, and file `load`/`write`. Offline tools currently load the complete file in memory; record long sessions in manageable files. No arbitrary provider payload is printed by CLI failures.
 
+## Recording a real LMU session (automatic file names)
+
+**RAW means Pitwall WebSocket JSON before Stintara normalisation. It is not LMU shared memory.** The recorder is a separate process with its own Pitwall connection; it never talks to Stintara, so it can run in parallel with the normal agent (Pitwall accepts several clients) and a stopped recorder cannot affect live data. Nothing is uploaded.
+
+From the activated development environment, with LMU and Pitwall running:
+
+```powershell
+python -m tools.replay.capture --track spa --event daily --driver-alias driver-a
+.\tools\capture.ps1 -Track spa -Event daily -DriverAlias driver-a   # same tool, Windows starter
+```
+
+All labels are optional. Start before qualifying and press Ctrl+C after the race ends; one file may span practice, qualifying, race and session changes, so name and metadata make no session claim. For a short Pitwall reconnect, restart the command: it creates the next file and never overwrites.
+
+Files go to `data/captures/raw/` (`--output-dir` may name another directory under `data/`):
+
+`<UTC start>_lmu_pitwall-ws_<track>_<event>_<driver-alias>_<NN>.jsonl`, e.g. `20261115T113000Z_lmu_pitwall-ws_spa_daily_driver-a_01.jsonl`
+
+Labels are reduced to lowercase ASCII letters, digits and `-` (24 characters at most); missing ones read `unknown`; labels without usable characters are rejected. They are your own organisational notes, not verified LMU, driver or event identities. `NN` increments on collisions. Existing files are never written.
+
+The explicit `--output data/captures/raw/name.jsonl` form still works as before (no labels, no sidecar). The file is created after Pitwall connects, so a failed connection leaves nothing behind. The JSONL v1 header is unchanged. Automatic recordings also get `<name>.meta.json` (`capture-meta-v1`: labels, UTC start, status, message count, duration, size, SHA-256; no endpoint or credentials). The capture file and its sidecar name are reserved together (exclusive create; a clash on either advances `NN`), and updates go through a unique temporary file that atomically replaces the sidecar, so existing files and symlinks are never written. A recording that fails right after reservation leaves an empty or `error` sidecar. It starts as `recording` and is only final once the recorder finished: a missing or `recording` sidecar means a crash or kill.
+
+While recording, a status line appears every 10 seconds (time, message count, file). On exit the tool prints message count, duration, size and SHA-256 (computed in chunks) and a status. Regular ends: Ctrl+C, or Pitwall closing the connection. `INCOMPLETE` is printed for a lost connection, a malformed message or another error; data written until then stays valid and readable. Message contents are never printed. The tool does not reconnect by itself.
+
+`tools/capture.ps1` only resolves Python (`-Python`, else `.venv`, else `python`) and forwards arguments. It installs nothing. A double-click launcher without a development environment would need a separate executable; this is deliberately not part of this tool.
+
 ## Synthetic local demo
 
 From the repository root, using the activated development environment:
