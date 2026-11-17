@@ -91,12 +91,22 @@ class IntervalHistory:
         self.stats = Counter()
         self._reset(None)
 
-    def _reset(self, key):
+    def _reset(self, key, keep_pits=False):
+        """New observation state. Pit knowledge is dropped only with a real session/epoch/clock boundary."""
+        pits = (self.pit_clock, self.pit_all, self.pending_ids, self.pending_all) if keep_pits else ({}, -math.inf, set(), False)
         self.key, self.clock, self.length = key, None, None
         self.tracks = {}
-        self.pit_clock = {}                    # vehicle id -> clock of its newest in-pit sample (survives clears)
         self.snapshot = {}                     # vehicle id -> content row of the newest accepted snapshot
         self.fingerprint = None                # content of that snapshot, to tell repeats from changes
+        # vehicle id -> clock of its newest in-pit (or unknown-pit) sample; survives history clears
+        self.pit_clock, self.pit_all, self.pending_ids, self.pending_all = pits
+        # pit_all: the same for rows or whole packets that cannot be attributed to one vehicle
+        # pending_*: pit activity seen in packets without a usable clock, dated at the next usable clock
+
+    def _invalidate(self):
+        """Drop every measured history and remembered content (the observation continues, its pit memory too)."""
+        self.tracks.clear()
+        self.snapshot, self.fingerprint = {}, None
 
     def sample_count(self):
         return sum(len(t) for t in self.tracks.values())
@@ -108,15 +118,20 @@ class IntervalHistory:
         (the previous result then still describes the same clock).
         """
         def result(pairs=None):
-            return dict(session_id=session_id, epoch=epoch, clock=clock if finite(clock) else None, pairs=pairs or {})
+            return dict(session_id=session_id, epoch=epoch, clock=clock if finite(clock) and clock >= 0 else None,
+                        pairs=pairs or {})
 
         if session_id is None:
-            self._reset(None)
+            # Nothing can be measured without a session, but no boundary was observed either: the history is dropped,
+            # the pit memory of the observation (same key) is not.
+            self._invalidate()
+            self._defer_pits(vehicles)
             self.stats[NO_SESSION] += 1
             return result()
         if epoch is None:
             # Without a connection generation continuity of the frame sequence cannot be established.
-            self._reset(None)
+            self._invalidate()
+            self._defer_pits(vehicles)
             self.stats[NO_EPOCH] += 1
             return result()
         key = (session_id, epoch)
@@ -124,7 +139,10 @@ class IntervalHistory:
             self.stats["reset_key" if key != self.key else "reset_requested"] += 1
             self._reset(key)
         if not finite(clock) or clock < 0 or not isinstance(vehicles, (list, tuple)):
-            self._reset(key)
+            # No usable clock or vehicle list: that is not a session or clock boundary. Measurements are dropped, any
+            # pit activity in the packet is dated at the next usable clock and the earlier quarantine stays.
+            self._invalidate()
+            self._defer_pits(vehicles)
             self.stats[INVALID] += 1
             return result()
         if self.clock is not None:
@@ -133,6 +151,7 @@ class IntervalHistory:
                 self._reset(key)
             elif clock < self.clock:
                 self.stats["ignored_older"] += 1
+                self._register_pits(clock, vehicles, flush=False)     # an ignored packet may still show a pit stop
                 return None
             elif clock == self.clock:
                 return self._repeat(result, clock, vehicles, track_length)
@@ -140,9 +159,12 @@ class IntervalHistory:
                 self.stats["reset_gap"] += 1
                 self.tracks.clear()
         if len(vehicles) > MAX_VEHICLES:
-            # Checked before anything is indexed or stored: an oversized field costs nothing and keeps no state.
-            self.tracks.clear()
-            self.snapshot, self.fingerprint, self.clock = {}, None, clock
+            # Checked before anything is indexed or stored: an oversized field costs nothing and keeps no state. It
+            # cannot be searched for pit activity, so the whole field is quarantined from this clock on.
+            self._invalidate()
+            self.clock = clock
+            self._flush_pending(clock)
+            self.pit_all = max(self.pit_all, clock)
             self.stats["field_too_large"] += 1
             return result()
         valid, duplicated = self._index(vehicles)
@@ -154,9 +176,7 @@ class IntervalHistory:
         length = track_length if finite(track_length) and track_length > 0 else None
         if length is not None and self.length is not None and abs(length - self.length) > LENGTH_TOLERANCE_METERS:
             self.stats["reset_track"] += 1
-            pits = self.pit_clock
-            self._reset(key)
-            self.pit_clock = pits              # pit knowledge does not depend on the track geometry
+            self._reset(key, keep_pits=True)   # pit knowledge does not depend on the track geometry
         self.clock = clock
         self._remember(valid, duplicated, vehicles)
         if length is None:
@@ -196,7 +216,7 @@ class IntervalHistory:
                     distance = max(distance, track.s[-1])   # only sub-threshold jitter is flattened
             track.push(clock, distance)
             usable.setdefault(vid, None)
-        return result(self._pairs(valid, duplicated, usable, clock))
+        return result(self._pairs(valid, duplicated, usable, clock, self._claims(vehicles)))
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -212,10 +232,46 @@ class IntervalHistory:
             valid[vid] = v
         return valid, duplicated
 
-    def _register_pits(self, clock, vehicles):
+    @staticmethod
+    def _pit_suspect(v):
+        """In the pits, or the pit state is not a plain boolean (unknown counts as possibly in the pits)."""
+        flag = v.get("in_pits")
+        return flag is True or type(flag) is not bool
+
+    def _flush_pending(self, clock):
+        for vid in self.pending_ids:
+            self.pit_clock[vid] = max(self.pit_clock.get(vid, -math.inf), clock)
+        if self.pending_all:
+            self.pit_all = max(self.pit_all, clock)
+        self.pending_ids, self.pending_all = set(), False
+
+    def _register_pits(self, clock, vehicles, flush=True):
+        """Record pit activity of every row (duplicates and rows without a usable distance included)."""
+        if flush:
+            self._flush_pending(clock)
         for v in vehicles:
-            if isinstance(v, dict) and count(v.get("id")) and v.get("in_pits") is True:
-                self.pit_clock[v["id"]] = clock
+            if isinstance(v, dict) and self._pit_suspect(v):
+                if count(v.get("id")):
+                    self.pit_clock[v["id"]] = max(self.pit_clock.get(v["id"], -math.inf), clock)
+                else:
+                    self.pit_all = max(self.pit_all, clock)       # a row we cannot attribute to a vehicle
+
+    def _defer_pits(self, vehicles):
+        """Pit activity in a packet without a usable clock: remembered, dated at the next usable clock."""
+        if not isinstance(vehicles, (list, tuple)) or len(vehicles) > MAX_VEHICLES:
+            self.pending_all = True
+            return
+        for v in vehicles:
+            if isinstance(v, dict) and self._pit_suspect(v):
+                if count(v.get("id")):
+                    self.pending_ids.add(v["id"])
+                else:
+                    self.pending_all = True
+
+    @staticmethod
+    def _claims(vehicles):
+        """How many received rows claim each position (every row counts, duplicated and invalid ids included)."""
+        return Counter(v.get("position") for v in vehicles if isinstance(v, dict) and count(v.get("position"), 1))
 
     @staticmethod
     def _row(v):
@@ -237,8 +293,8 @@ class IntervalHistory:
     def _repeat(self, result, clock, vehicles, track_length):
         """A snapshot with the clock of the previous one: identical content and geometry are ignored, a change is not."""
         if len(vehicles) > MAX_VEHICLES:
-            self.tracks.clear()
-            self.snapshot, self.fingerprint = {}, None
+            self._invalidate()
+            self.pit_all = max(self.pit_all, clock)
             self.stats["field_too_large"] += 1
             return result()
         valid, duplicated = self._index(vehicles)
@@ -253,7 +309,8 @@ class IntervalHistory:
             self.tracks.clear()
             self.length = length
             self._remember(valid, duplicated, vehicles)
-            return result() if length is None else result(self._pairs(valid, duplicated, {}, clock, force=CONFLICT))
+            return result() if length is None else result(
+                self._pairs(valid, duplicated, {}, clock, self._claims(vehicles), force=CONFLICT))
         fingerprint = self._fingerprint(vehicles)
         if fingerprint == self.fingerprint:
             self.stats["ignored_identical"] += 1
@@ -268,9 +325,9 @@ class IntervalHistory:
             if v is None or vid in duplicated or previous.get(vid) != self._row(v):
                 del self.tracks[vid]
         self._remember(valid, duplicated, vehicles)
-        return result(self._pairs(valid, duplicated, {}, clock, force=CONFLICT))
+        return result(self._pairs(valid, duplicated, {}, clock, self._claims(vehicles), force=CONFLICT))
 
-    def _pairs(self, vehicles, duplicated, usable, clock, force=None):
+    def _pairs(self, vehicles, duplicated, usable, clock, claims, force=None):
         by_position = {}
         for vid, v in vehicles.items():
             p = v.get("position")
@@ -281,6 +338,8 @@ class IntervalHistory:
             ahead_ids = by_position.get(position - 1)
             if position < 2 or len(ids) != 1 or not ahead_ids or len(ahead_ids) != 1:
                 continue
+            if claims[position] != 1 or claims[position - 1] != 1:
+                continue                         # some other received row (a duplicate id, an invalid id) claims one
             b, a = ids[0], ahead_ids[0]
             vb, va = vehicles[b], vehicles[a]
             deficit = vb.get("laps_behind_leader")
@@ -297,7 +356,7 @@ class IntervalHistory:
         ta, tb = self.tracks.get(a), self.tracks.get(b)
         if a in duplicated or b in duplicated or ta is None or tb is None or not len(ta) or not len(tb):
             return INVALID
-        if vb["in_pits"] or va["in_pits"] or any(
+        if vb["in_pits"] or va["in_pits"] or clock - self.pit_all <= PIT_GUARD_SECONDS or any(
                 clock - self.pit_clock.get(x, -math.inf) <= PIT_GUARD_SECONDS for x in (a, b)):
             return PIT
         if usable.get(a) == DISCONTINUITY or usable.get(b) == DISCONTINUITY:
@@ -312,7 +371,7 @@ class IntervalHistory:
             return HISTORY                       # A's pass of this distance is not inside its contiguous history
         s0, s1 = ta.s[i - 1], ta.s[i]
         t0, t1 = ta.t[i - 1], ta.t[i]
-        if self.pit_clock.get(a, -math.inf) >= t0:
+        if self.pit_clock.get(a, -math.inf) >= t0 or self.pit_all >= t0:
             return PIT_WINDOW
         if not s1 > s0:
             return HISTORY

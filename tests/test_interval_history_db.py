@@ -289,3 +289,37 @@ async def test_pit_flag_in_a_duplicate_vehicle_row_blocks_the_number_through_ing
     assert own(await main.api_session_live(sid))["interval"] is None
     await feed(agent, 410, 760)                                       # 60 s of session clock after the observed flag
     assert own(await main.api_session_live(sid))["interval_source"] == "history"
+
+
+# ---- third review round (#77) -----------------------------------------------------------------------------
+
+async def test_missing_session_clock_keeps_the_pit_quarantine_through_ingest(db):
+    agent = await start(db, "noclock")
+    await feed(agent, 0, 300, pit=lambda k, i: i == 9 and 300 > k >= 296)    # car 9 pits at t = 59.2 .. 59.8
+    _, clockless = next(frames(300, 301))
+    clockless["session_time"] = None
+    await main.handle_message(agent, "lmu", "scoring", clockless, source_epoch="e1")
+    sid = main.runtime[str(agent["id"])]["session_id"]
+    p = own(await main.api_session_live(sid))
+    assert p["interval"] is None and p["interval_source"] is None           # no stale number under a missing clock
+    await feed(agent, 301, 330)
+    assert own(await main.api_session_live(sid))["interval"] is None        # t = 66: inside 60 s of the pit stop
+    await feed(agent, 330, 420)
+    assert own(await main.api_session_live(sid))["interval"] is None        # t = 83.8: still before 59.8 + 60 = 119.8
+    await feed(agent, 420, 700)
+    assert own(await main.api_session_live(sid))["interval_source"] == "history"
+
+
+async def test_ambiguous_positions_from_duplicate_rows_remove_the_number_through_ingest(db):
+    agent = await start(db, "claims")
+    await feed(agent, 0, 400)
+    sid = main.runtime[str(agent["id"])]["session_id"]
+    assert own(await main.api_session_live(sid))["interval_source"] == "history"
+    _, last = next(frames(400, 401))
+    twin = dict(last["vehicles"][1], id=10)
+    ambiguous = dict(last, vehicles=last["vehicles"] + [dict(twin, position=2), dict(twin, position=5)])
+    await main.handle_message(agent, "lmu", "scoring", ambiguous, source_epoch="e1")
+    p = own(await main.api_session_live(sid))
+    assert p["interval"] is None and p["interval_source"] is None
+    live = await main.api_driver_live(agent["slug"])
+    assert live["focus"]["interval"] is None and live["focus"]["interval_source"] is None

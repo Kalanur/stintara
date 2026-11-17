@@ -804,3 +804,194 @@ def test_pit_flag_of_an_otherwise_invalid_row_is_recorded_on_a_repeat():
     broken = frame_at(10.0) + [dict(id=2, in_pits=True, position=None, total_laps=None, lap_dist=None)]
     r = step(h, 10.0, broken)
     assert r is not None and h.pit_clock[2] == 10.0
+
+
+# ---- third review round (#77): quarantine without a usable clock, position claims of all rows, early returns ----
+
+def pit_at_10_2(h):
+    """The review reproduction: history to t=10.0, B in the pits at t=10.2."""
+    drive(h, 0, 10, (60, 100), (60, 0))
+    step(h, 10.2, [car(1, 1, 100 + 60 * 10.2), dict(car(2, 2, 60 * 10.2), in_pits=True)])
+
+
+def after_pit(h, start, end, **kw):
+    """Valid on-track scoring from `start` to `end`; returns {clock: entry}."""
+    out = {}
+    for k in range(int(round((end - start) / .2)) + 1):
+        t = round(start + .2 * k, 3)
+        out[t] = entry(step(h, t, frame_at(t), **kw))
+    return out
+
+
+@pytest.mark.parametrize("bad_clock", [None, float("nan"), float("inf"), -1.0, "10.4", True])
+def test_missing_clock_keeps_the_pit_quarantine(bad_clock):
+    h = IntervalHistory()
+    pit_at_10_2(h)
+    r = step(h, bad_clock, frame_at(10.4))
+    assert r["pairs"] == {} and r["clock"] is None
+    assert h.stats[ih.INVALID] == 1 and h.pit_clock[2] == 10.2          # not a boundary: nothing was forgotten
+    seen = after_pit(h, 10.6, 70.4)
+    assert all(e["value"] is None for t, e in seen.items() if t <= 70.2), "value inside the 60 s quarantine"
+    assert seen[13.8]["value"] is None and seen[13.8]["reason"] == ih.PIT        # the reviewer's check point
+    assert seen[70.2]["reason"] == ih.PIT
+    resumed = after_pit(h, 70.6, 72.0)
+    assert entry_ok(resumed[72.0])
+
+
+def entry_ok(e):
+    return e["reason"] is None and e["value"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+def test_pit_activity_inside_a_clockless_packet_is_dated_at_the_next_clock():
+    h = IntervalHistory()
+    drive(h, 0, 10, (60, 100), (60, 0))
+    step(h, None, [car(1, 1, 100 + 60 * 10.2), dict(car(2, 2, 60 * 10.2), in_pits=True)])
+    assert h.pending_ids == {2} and 2 not in h.pit_clock
+    seen = after_pit(h, 10.4, 71.0)
+    assert h.pit_clock[2] == 10.4 and not h.pending_ids
+    assert all(e["value"] is None for t, e in seen.items() if t <= 70.2)      # dated 10.4, so guarded until 70.4
+    assert entry_ok(after_pit(h, 71.2, 72.0)[72.0])
+
+
+def test_clockless_packet_drops_measurements_but_not_without_a_reason():
+    h, last = built()
+    assert entry(last)["value"] is not None
+    r = step(h, None, frame_at(10.2))
+    assert r["pairs"] == {} and not h.tracks and h.snapshot == {}
+    # the stream continues on the same clock line: the history has to be rebuilt, no value from before comes back
+    assert entry(step(h, 10.4, frame_at(10.4)))["value"] is None
+    e = entry(drive(h, 10.6, 13.0, (60, 100 + 60 * 10.6), (60, 60 * 10.6)))
+    assert entry_ok(e)
+
+
+def test_real_boundaries_still_forget_the_pit_memory():
+    for how in ("session", "epoch", "clock_reset", "requested"):
+        h = IntervalHistory()
+        pit_at_10_2(h)
+        kw = dict(session="s2") if how == "session" else dict(epoch="e2") if how == "epoch" else dict(reset=True) if how == "requested" else {}
+        clock = 0.4 if how == "clock_reset" else 10.4
+        step(h, clock, frame_at(clock), **kw)
+        assert 2 not in h.pit_clock, how
+    # and a reset that is only a track change keeps it
+    h = IntervalHistory()
+    pit_at_10_2(h)
+    step(h, 10.4, frame_at(10.4), length=L + 50)
+    assert h.pit_clock[2] == 10.2
+
+
+def test_missing_session_or_epoch_does_not_erase_the_quarantine_of_the_same_observation():
+    for kw in (dict(session=None), dict(epoch=None)):
+        h = IntervalHistory()
+        pit_at_10_2(h)
+        r = step(h, 10.4, frame_at(10.4), **kw)
+        assert r["pairs"] == {} and h.pit_clock[2] == 10.2 and not h.tracks
+        seen = after_pit(h, 10.6, 70.4)
+        assert all(e["value"] is None for t, e in seen.items() if t <= 70.2)
+        assert entry_ok(after_pit(h, 70.6, 72.0)[72.0])
+
+
+def test_pit_flag_in_an_ignored_older_packet_is_still_recorded():
+    h, _ = built()
+    assert step(h, 9.0, [car(1, 1, 100 + 60 * 9.0), dict(car(2, 2, 60 * 9.0), in_pits=True)]) is None
+    assert h.stats["ignored_older"] == 1 and h.pit_clock[2] == 9.0
+    step(h, 10.2, frame_at(10.2))
+    assert h.pit_clock[2] == 9.0                       # never lowered or lost by later packets
+    # an older sighting must not shorten a newer one
+    step(h, 10.4, [car(1, 1, 100 + 60 * 10.4), dict(car(2, 2, 60 * 10.4), in_pits=True)])
+    step(h, 10.0, [car(1, 1, 100 + 60 * 10.0), dict(car(2, 2, 60 * 10.0), in_pits=True)])
+    assert h.pit_clock[2] == 10.4
+
+
+def test_oversized_field_quarantines_the_whole_field_afterwards():
+    h, _ = built()
+    big = [car(i, i + 10, 10 * i) for i in range(ih.MAX_VEHICLES + 1)]
+    assert step(h, 10.2, big)["pairs"] == {}
+    assert h.pit_all == 10.2
+    seen = after_pit(h, 10.4, 70.6)
+    assert all(e["value"] is None for t, e in seen.items() if t <= 70.2)
+    assert entry_ok(after_pit(h, 70.8, 72.4)[72.4])
+    # also on the repeat path
+    h, _ = built()
+    step(h, 10.2, big)
+    assert step(h, 10.2, big)["pairs"] == {} and h.pit_all == 10.2
+
+
+@pytest.mark.parametrize("unknown", [None, "yes", 1, 0])
+def test_an_unknown_pit_state_counts_as_possible_pit_activity(unknown):
+    h, _ = built()
+    step(h, 10.2, [car(1, 1, 100 + 60 * 10.2), dict(car(2, 2, 60 * 10.2), in_pits=unknown)])
+    assert h.pit_clock[2] == 10.2
+    seen = after_pit(h, 10.4, 30.0)
+    assert all(e["value"] is None for e in seen.values())
+
+
+def test_a_row_without_a_usable_id_but_with_pit_activity_quarantines_everyone():
+    h, _ = built()
+    step(h, 10.2, [car(1, 1, 100 + 60 * 10.2), car(2, 2, 60 * 10.2), dict(id=None, in_pits=True)])
+    assert h.pit_all == 10.2
+    assert all(e["value"] is None for e in after_pit(h, 10.4, 30.0).values())
+
+
+# ---- position claims of every received row ----------------------------------------------------------------
+
+def tri(clock, extra=(), ahead_deficit=1, behind_deficit=1):
+    """X leads on the lead lap; A is P2 and B is P3, both lapped by one, 100 m apart."""
+    return [car(0, 1, 90000 + 70 * clock, deficit=0), car(1, 2, 100 + 60 * clock, deficit=ahead_deficit),
+            car(2, 3, 60 * clock, deficit=behind_deficit), *extra]
+
+
+def tri_history(until=10.0):
+    h, last = IntervalHistory(), None
+    for k in range(int(until / .2) + 1):
+        t = round(k * .2, 3)
+        last = step(h, t, tri(t)) or last
+    return h, last
+
+
+def test_baseline_pair_is_measured():
+    h, last = tri_history()
+    e = entry(last, 3 - 1)
+    assert e["ahead_id"] == 1 and e["position"] == 3 and entry_ok(e)
+
+
+def test_two_rows_of_another_id_claiming_p2_and_p5_make_the_pair_unknown():
+    # The review reproduction: A/P2, B/P3, and C reported twice, as P2 and as P5.
+    h, _ = tri_history()
+    extra = [car(3, 2, 5), car(3, 5, 6)]
+    r = step(h, 10.2, tri(10.2, extra))
+    assert 2 not in r["pairs"] or r["pairs"][2]["value"] is None
+    assert all(p["value"] is None for p in r["pairs"].values())
+    # the other order of the duplicate rows gives the same answer
+    h, _ = tri_history()
+    r = step(h, 10.2, tri(10.2, list(reversed(extra))))
+    assert all(p["value"] is None for p in r["pairs"].values())
+
+
+@pytest.mark.parametrize("extra", [
+    [car(3, 3, 5)],                                           # another vehicle also on P3
+    [dict(car(3, 2, 5), id=None)],                            # a row without usable id on P2
+    [car(3, 2, 5), car(3, 9, 6)],                             # duplicate id, one row on P2
+    [car(3, 3, 5), car(3, 3, 6)],                             # duplicate id, both rows on P3
+    ["not-a-vehicle", car(4, 2, 5)],                          # unrelated garbage plus a P2 claim
+])
+def test_any_other_claim_of_a_position_of_the_pair_removes_the_number(extra):
+    h, _ = tri_history()
+    r = step(h, 10.2, tri(10.2, extra))
+    assert all(p["value"] is None for p in r["pairs"].values())
+    # unique again: measured again (B and A keep their own history; no pit activity was involved)
+    e = entry(step(h, 10.4, tri(10.4)), 2)
+    assert entry_ok(e)
+
+
+def test_claims_that_do_not_touch_the_pair_do_not_hide_it():
+    h, _ = tri_history()
+    r = step(h, 10.2, tri(10.2, [car(3, 7, 5), car(3, 8, 6)]))      # duplicate id elsewhere in the standings
+    assert entry_ok(entry(r, 2))
+    r = step(h, 10.4, tri(10.4, [dict(id=None, position=None, in_pits=False)]))   # a row claiming nothing
+    assert entry_ok(entry(r, 2))
+
+
+def test_position_claims_are_also_checked_on_a_repeated_clock():
+    h, _ = tri_history()
+    r = step(h, 10.0, tri(10.0, [car(3, 2, 5), car(3, 5, 6)]))
+    assert r is not None and all(p["value"] is None for p in r["pairs"].values())
