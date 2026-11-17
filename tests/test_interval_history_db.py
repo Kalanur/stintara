@@ -257,3 +257,35 @@ async def test_identical_repeat_keeps_the_number_through_ingest(db):
     await main.handle_message(agent, "lmu", "scoring", dict(last), source_epoch="e1")
     p = own(await main.api_session_live(sid))
     assert p["interval_source"] == "history" and p["interval"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+# ---- second review round (#77) ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("length", [6000.0, None])
+async def test_track_length_change_at_a_repeated_clock_removes_the_number_through_ingest(db, length):
+    agent = await start(db, "geometry")
+    await feed(agent, 0, 400)
+    sid = main.runtime[str(agent["id"])]["session_id"]
+    assert own(await main.api_session_live(sid))["interval_source"] == "history"
+    await main.handle_message(agent, "lmu", "session_info", {"track_name": "Imola", "track_length": length})
+    _, last = next(frames(399, 400))
+    await main.handle_message(agent, "lmu", "scoring", dict(last), source_epoch="e1")     # identical packet, new geometry
+    p = own(await main.api_session_live(sid))
+    assert p["interval"] is None and p["interval_reason"] == "lapped" and p["interval_source"] is None
+    live = await main.api_driver_live(agent["slug"])
+    assert live["focus"]["interval"] is None and live["focus"]["interval_source"] is None
+
+
+async def test_pit_flag_in_a_duplicate_vehicle_row_blocks_the_number_through_ingest(db):
+    agent = await start(db, "dupe")
+    await feed(agent, 0, 400)
+    sid = main.runtime[str(agent["id"])]["session_id"]
+    _, last = next(frames(399, 400))
+    twin = dict(last["vehicles"][2])
+    await main.handle_message(agent, "lmu", "scoring", dict(last, vehicles=last["vehicles"] + [dict(twin)]), source_epoch="e1")
+    await main.handle_message(agent, "lmu", "scoring",
+                              dict(last, vehicles=last["vehicles"] + [dict(twin, in_pits=True)]), source_epoch="e1")
+    await feed(agent, 400, 410)                                       # unique, valid, on-track again
+    assert own(await main.api_session_live(sid))["interval"] is None
+    await feed(agent, 410, 760)                                       # 60 s of session clock after the observed flag
+    assert own(await main.api_session_live(sid))["interval_source"] == "history"

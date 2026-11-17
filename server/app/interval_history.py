@@ -135,7 +135,7 @@ class IntervalHistory:
                 self.stats["ignored_older"] += 1
                 return None
             elif clock == self.clock:
-                return self._repeat(result, clock, vehicles)
+                return self._repeat(result, clock, vehicles, track_length)
             elif clock - self.clock > MAX_PACKET_GAP_SECONDS:
                 self.stats["reset_gap"] += 1
                 self.tracks.clear()
@@ -221,29 +221,48 @@ class IntervalHistory:
     def _row(v):
         return v.get("position"), v.get("total_laps"), v.get("lap_dist"), v.get("in_pits"), v.get("laps_behind_leader")
 
+    @classmethod
+    def _fingerprint(cls, vehicles):
+        """Content of the whole snapshot as a multiset of rows: every row counts, duplicates and invalid ones included."""
+        rows = [(v.get("id"), cls._row(v)) if isinstance(v, dict) else ("not-a-vehicle", repr(v)) for v in vehicles]
+        try:
+            return Counter(rows)
+        except TypeError:                          # an unhashable field value: compare the textual form instead
+            return Counter(repr(r) for r in rows)
+
     def _remember(self, valid, duplicated, vehicles):
         self.snapshot = {vid: self._row(v) for vid, v in valid.items()}
-        self.fingerprint = (len(vehicles), tuple(sorted(self.snapshot.items())), tuple(sorted(duplicated)))
+        self.fingerprint = self._fingerprint(vehicles)
 
-    def _repeat(self, result, clock, vehicles):
-        """A snapshot with the clock of the previous one: identical content is ignored, a change is not."""
+    def _repeat(self, result, clock, vehicles, track_length):
+        """A snapshot with the clock of the previous one: identical content and geometry are ignored, a change is not."""
         if len(vehicles) > MAX_VEHICLES:
             self.tracks.clear()
             self.snapshot, self.fingerprint = {}, None
             self.stats["field_too_large"] += 1
             return result()
         valid, duplicated = self._index(vehicles)
-        previous = self.snapshot
-        fingerprint = (len(vehicles), tuple(sorted({vid: self._row(v) for vid, v in valid.items()}.items())),
-                       tuple(sorted(duplicated)))
+        # Safety first: pit flags of every row (duplicates included) are recorded before anything can return early.
+        self._register_pits(clock, vehicles)
+        length = track_length if finite(track_length) and track_length > 0 else None
+        if (length is None) != (self.length is None) or (
+                length is not None and abs(length - self.length) > LENGTH_TOLERANCE_METERS):
+            # The track length changed or vanished between two packets of the same clock: every stored distance
+            # belongs to the old geometry. Pit memory is kept, all histories and the result are dropped.
+            self.stats["reset_track" if length is not None and self.length is not None else NO_TRACK] += 1
+            self.tracks.clear()
+            self.length = length
+            self._remember(valid, duplicated, vehicles)
+            return result() if length is None else result(self._pairs(valid, duplicated, {}, clock, force=CONFLICT))
+        fingerprint = self._fingerprint(vehicles)
         if fingerprint == self.fingerprint:
             self.stats["ignored_identical"] += 1
             return None
         # Same clock, different content (position, deficit, pit flag, distance, vehicle set): the stored samples of
-        # every changed vehicle conflict with the new state and are dropped, pit activity is still recorded, and
-        # nothing measured for the earlier content may stay valid for this one.
+        # every changed vehicle conflict with the new state and are dropped, and nothing measured for the earlier
+        # content may stay valid for this one.
         self.stats["conflicting_repeat"] += 1
-        self._register_pits(clock, vehicles)
+        previous = self.snapshot
         for vid in list(self.tracks):
             v = valid.get(vid)
             if v is None or vid in duplicated or previous.get(vid) != self._row(v):

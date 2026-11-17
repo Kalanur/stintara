@@ -632,3 +632,175 @@ def test_oversized_field_keeps_no_state_even_when_repeated():
     assert step(h, 1.0, big)["pairs"] == {} and not h.tracks and h.snapshot == {}
     assert step(h, 1.0, big)["pairs"] == {} and not h.tracks and h.snapshot == {}      # repeat path, same cap
     assert h.stats["field_too_large"] == 2
+
+
+# ---- second review round (#77): geometry at a repeated clock, pit flags in duplicate-id rows -----------------
+
+def lap1_frame(clock):
+    """A is 100 m ahead of B, both on their second lap (the provider reports total_laps=1)."""
+    return [car(1, 1, L + 100 + 60 * clock), car(2, 2, L + 60 * clock)]
+
+
+def lap1_history(until=10.0):
+    h, last = IntervalHistory(), None
+    for k in range(int(until / .2) + 1):
+        t = round(k * .2, 3)
+        last = step(h, t, lap1_frame(t)) or last
+    return h, last
+
+
+def lap1_stream(h, start, end, **kw):
+    out = None
+    for k in range(int(round((end - start) / .2)) + 1):
+        t = round(start + .2 * k, 3)
+        out = step(h, t, lap1_frame(t), **kw) or out
+    return out
+
+
+def differing_laps_history():
+    """A has completed one lap more than B (5100 m ahead): the value is 85 s and needs 85+ s of history."""
+    h, last = IntervalHistory(), None
+    for k in range(501):
+        t = round(k * .2, 3)
+        last = step(h, t, [car(1, 1, L + 100 + 60 * t), car(2, 2, 60 * t)]) or last
+    return h, last, [car(1, 1, L + 100 + 60 * 100.0), car(2, 2, 60 * 100.0)]
+
+
+def test_track_length_change_at_a_repeated_clock_drops_the_number():
+    h, last, frame = differing_laps_history()
+    assert entry(last)["value"] == pytest.approx((L + 100) / 60, abs=1e-6)
+    # the identical packet again, only the geometry changed 5000 -> 6000 m
+    r = step(h, 100.0, frame, length=6000.0)
+    assert r is not None and entry(r)["value"] is None and entry(r)["reason"] == ih.CONFLICT
+    assert h.length == 6000.0 and h.stats["reset_track"] == 1 and not h.tracks
+
+
+def test_same_lap_pair_rebuilds_its_history_under_the_new_geometry():
+    h, last = lap1_history()
+    assert entry(last)["value"] == pytest.approx(100 / 60, abs=1e-6)
+    r = step(h, 10.0, lap1_frame(10.0), length=6000.0)
+    assert entry(r)["value"] is None and entry(r)["reason"] == ih.CONFLICT
+    assert entry(step(h, 10.2, lap1_frame(10.2), length=6000.0))["value"] is None
+    e = lap1_stream(h, 10.4, 12.0, length=6000.0)
+    assert e is not None and entry(e)["reason"] is None and entry(e)["value"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+@pytest.mark.parametrize("length", [None, 0, -5.0, float("nan"), float("inf"), True, "5000"])
+def test_missing_or_invalid_track_length_at_a_repeated_clock_drops_the_number(length):
+    h, last, frame = differing_laps_history()
+    assert entry(last)["value"] is not None
+    r = step(h, 100.0, frame, length=length)
+    assert r is not None and r["pairs"] == {} and h.length is None and not h.tracks
+    assert h.stats[ih.NO_TRACK] == 1
+    # the length comes back: the history starts empty, nothing from before the loss is reused
+    assert entry(step(h, 100.2, [car(1, 1, L + 100 + 60 * 100.2), car(2, 2, 60 * 100.2)]))["value"] is None
+
+
+def test_pit_quarantine_survives_a_geometry_change_at_a_repeated_clock():
+    h, _ = lap1_history(10.0)
+    pit_frame = [car(1, 1, L + 100 + 60 * 10.2), dict(car(2, 2, L + 60 * 10.2), in_pits=True)]
+    step(h, 10.2, pit_frame)
+    r = step(h, 10.2, pit_frame, length=6000.0)                        # same clock, new geometry
+    assert entry(r)["value"] is None and h.pit_clock[2] == 10.2 and h.stats["reset_track"] == 1
+    e = None
+    for k in range(1, 320):
+        t = round(10.2 + .2 * k, 3)
+        e = entry(step(h, t, lap1_frame(t), length=6000.0))
+        if t - 10.2 <= ih.PIT_GUARD_SECONDS:
+            assert e["value"] is None, t
+    assert e["reason"] is None and e["value"] == pytest.approx(100 / 60, abs=1e-6)   # resumed after the quarantine
+
+
+@pytest.mark.parametrize("length", [L, L + 0.5, L - 0.9])
+def test_identical_repeat_with_unchanged_geometry_is_still_ignored(length):
+    h, last = lap1_history()
+    assert step(h, 10.0, lap1_frame(10.0), length=length) is None
+    assert h.stats["ignored_identical"] == 1 and h.stats["reset_track"] == 0
+    assert entry(step(h, 10.2, lap1_frame(10.2)))["value"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+def test_geometry_change_is_bound_at_state_level_and_no_stale_number_remains():
+    sid = uuid7()
+    state = observed(sid)
+    assert current_pairs(state, sid, 100.0)[2]["value"] is not None
+    for length in (6000.0, None):
+        state["track_length_m"] = length
+        observe(state, state["scoring"], epoch="e1")                  # the identical scoring again, geometry differs
+        assert current_pairs(state, sid, 100.0).get(2, {}).get("value") is None
+    rows = [dict(id=uuid7(), local_vehicle_id=i, position=i, total_laps=3 + (i == 1), laps_behind_leader=1,
+                 gap_to_leader=None) for i in (1, 2)]
+    out = main.spectator_participants(rows, sid, True, [state], 100.0, "Race")
+    assert out[1]["interval"] is None and out[1]["interval_reason"] == "lapped" and out[1]["interval_source"] is None
+
+
+def dup_frame(clock, first_b_pit=False, second_b_pit=False):
+    return [car(1, 1, 100 + 60 * clock), dict(car(2, 2, 60 * clock), in_pits=first_b_pit),
+            dict(car(2, 2, 60 * clock), in_pits=second_b_pit)]
+
+
+def test_pit_flag_only_in_a_hidden_duplicate_row_is_recorded_on_a_repeat():
+    h, last = built()
+    assert entry(last)["value"] is not None
+    first = step(h, 10.0, dup_frame(10.0))                      # [A, B, B]: ambiguous vehicle, never a value
+    assert first["pairs"].get(2, {}).get("value") is None
+    assert step(h, 10.0, dup_frame(10.0)) is None               # the very same packet again is identical
+    r = step(h, 10.0, dup_frame(10.0, first_b_pit=True))        # only the FIRST B row now says in_pits
+    assert r is not None and h.pit_clock[2] == 10.0
+    assert r["pairs"].get(2, {}).get("value") is None
+    # unique, valid, on-track packets follow: the observed pit activity still blocks the number for 60 s
+    for k in range(1, 5):
+        t = round(10 + .2 * k, 3)
+        e = entry(step(h, t, frame_at(t)))
+        assert e["value"] is None
+        if k >= 2:
+            assert e["reason"] == ih.PIT
+    e = entry(drive(h, 10.8, 70.0, (60, 100 + 60 * 10.8), (60, 60 * 10.8)))
+    assert e["reason"] == ih.PIT                                 # still inside 60 s of the observed pit flag
+    e = entry(drive(h, 70.2, 72.0, (60, 100 + 60 * 70.2), (60, 60 * 70.2)))
+    assert e["reason"] is None and e["value"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+def test_pit_flag_in_the_last_duplicate_row_and_a_swapped_row_order():
+    h, _ = built()
+    step(h, 10.0, dup_frame(10.0))
+    assert step(h, 10.0, list(reversed(dup_frame(10.0)))) is None          # same rows, other order: identical
+    r = step(h, 10.0, dup_frame(10.0, second_b_pit=True))
+    assert r is not None and h.pit_clock[2] == 10.0
+    before = h.stats["conflicting_repeat"]
+    r = step(h, 10.0, dup_frame(10.0, first_b_pit=True, second_b_pit=True))
+    assert r is not None and h.stats["conflicting_repeat"] == before + 1
+
+
+def test_pit_flag_registration_never_depends_on_the_identical_shortcut():
+    # Even if a repeat is judged identical, every row's flag has been recorded when the clock was first seen.
+    h, _ = built()
+    step(h, 10.0, dup_frame(10.0, first_b_pit=True))
+    assert h.pit_clock[2] == 10.0
+    assert step(h, 10.0, dup_frame(10.0, first_b_pit=True)) is None and h.pit_clock[2] == 10.0
+
+
+def test_duplicate_ids_never_give_a_number_and_recover_safely_without_pit_activity():
+    h, _ = built()
+    for k in range(0, 5):
+        t = round(10 + .2 * k, 3)
+        r = step(h, t, dup_frame(t))
+        assert r["pairs"].get(2, {}).get("value") is None
+    # unique again: B's history was dropped while it was ambiguous, so it takes two samples to measure again
+    assert entry(step(h, 11.0, frame_at(11.0)))["value"] is None
+    e = entry(step(h, 11.2, frame_at(11.2)))
+    assert e["reason"] is None and e["value"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+def test_conflicting_positions_of_a_duplicate_id_are_unknown_for_its_neighbours():
+    h, _ = built()
+    rows = [car(1, 1, 100 + 60 * 10.2), car(2, 2, 60 * 10.2), car(2, 3, 60 * 10.2 - 5)]
+    r = step(h, 10.2, rows)
+    assert all(p["value"] is None for p in r["pairs"].values())
+
+
+def test_pit_flag_of_an_otherwise_invalid_row_is_recorded_on_a_repeat():
+    h, _ = built()
+    step(h, 10.0, frame_at(10.0))
+    broken = frame_at(10.0) + [dict(id=2, in_pits=True, position=None, total_laps=None, lap_dist=None)]
+    r = step(h, 10.0, broken)
+    assert r is not None and h.pit_clock[2] == 10.0
