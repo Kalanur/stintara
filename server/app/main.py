@@ -25,6 +25,8 @@ from .chain import CHAIN_COLUMNS, CHAIN_JOINS, pop_chain
 from .domain import sample_due
 from .driver_live import focus_block
 from .fuel import fuel_report
+from .interval_history import current_pairs
+from .interval_history import observe as observe_intervals
 from .lap_sensors import (
     accepted_sensors,
     checkpoint_compatible,
@@ -419,6 +421,7 @@ def spectator_participants(rows, session_id, live, states, now, session_type=Non
     scoring = state.get("scoring", {})
     snapshots = state.get("snapshots", {}) if now - state.get("snapshots_at", -1e9) < 30 else {}
     vehicles = {v["id"]: v for v in scoring.get("vehicles", [])}
+    measured = current_pairs(state, session_id, now) if state else {}
     for p in participants:
         vehicle = vehicles.get(p["local_vehicle_id"])
         if vehicle:
@@ -426,6 +429,8 @@ def spectator_participants(rows, session_id, live, states, now, session_type=Non
                 p[key] = vehicle.get(key)
             p["gap_to_leader"] = vehicle.get("time_behind_leader")
             p["laps_behind_leader"] = vehicle.get("laps_behind_leader")
+            if p["local_vehicle_id"] in measured:
+                p["history_interval"] = measured[p["local_vehicle_id"]]
         elif scoring:
             # Retain the recorded participant, but never mix old gaps into this observation.
             p["gap_to_leader"] = p["laps_behind_leader"] = None
@@ -439,6 +444,8 @@ def spectator_participants(rows, session_id, live, states, now, session_type=Non
                                   (snap.get("damage") or {}).get("dent_severity"))
         p.update(status)
     project_timing(participants, session_type)
+    for p in participants:
+        p.pop("history_interval", None)     # internal evidence for project_timing, not part of the API
     return sorted(participants, key=lambda p: (p["position"] is None,
                                               p["position"] or 0, str(p["id"])))
 
@@ -710,10 +717,16 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
     for participant in participants:
         participant.update(vehicle_identity(participant))
     now = time.monotonic()
+    # Measured lapped intervals come from the newest fresh observation only; project_timing re-checks that the
+    # recorded pair still matches the displayed positions and deficits, so a mixed overlay falls back to "lapped".
+    newest = newest_state(session["id"], True, list(runtime.values()), now)
+    measured = current_pairs(newest, session["id"], now) if newest else {}
+    timing_rows = [{**p, "history_interval": measured[p["local_vehicle_id"]]} if p["local_vehicle_id"] in measured else p
+                   for p in participants]      # evidence for the focus timing only; the response rows stay as before
     return {
         "driver": dict(driver),
         "live": True,
-        "focus": focus_block(driver["slug"], dict(session), participants, history, list(runtime.values()), now),
+        "focus": focus_block(driver["slug"], dict(session), timing_rows, history, list(runtime.values()), now),
         "session": {**dict(session), "weather": normalize_weather(session["weather"], session["simulator_provider"])},
         "participants": participants,
         "strategy": dict(strategy) if strategy else None,
@@ -760,7 +773,7 @@ async def current_or_create_session(agent, payload, *, changed=False, source_epo
             state[key] = resolution_state[key]
     if session_id != state.get("session_id"):
         for key in ("last_sample_at", "last_persisted_scoring", "scoring", "snapshots", "snapshots_at",
-                    "participant_index", "lap_crossings"):
+                    "participant_index", "lap_crossings", "interval_history", "interval_pairs"):
             state.pop(key, None)
     state["session_id"] = session_id
     if session_id:
@@ -1076,6 +1089,8 @@ async def handle_message(agent, provider, kind, payload, source_epoch=None):
         observe_crossing(state.setdefault("lap_crossings", {}), crossing_previous, crossing_previous_at, payload, now)
         state["scoring_seq"] = next_sample_seq()
         feed_scoring(state, payload, reset=changed)
+        # Bounded per-agent scoring history for lapped position intervals (#68); epoch-keyed, never shared.
+        observe_intervals(state, payload, epoch=source_epoch, reset=changed)
         await sync_track_store(state)
         pending = state.pop("pending_laps", None)
         if pending:

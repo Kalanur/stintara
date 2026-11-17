@@ -309,7 +309,9 @@ function gapText(p, race) {
   return Number.isFinite(p.gap_to_leader) && p.gap_to_leader >= 0 ? seconds(p.gap_to_leader) : '—';
 }
 function intervalText(p, race) {
-  return race && Number.isFinite(p.gap_to_leader) && p.gap_to_leader >= 0 && !p.gap_laps &&
+  // A measured lapped interval (interval_source "history") is shown although the car is lapped (gap is a lap count).
+  const measured = p.interval_source === 'history';
+  return race && (measured || (Number.isFinite(p.gap_to_leader) && p.gap_to_leader >= 0 && !p.gap_laps)) &&
     Number.isFinite(p.interval) && p.interval >= 0 ? seconds(p.interval) : '—';
 }
 // Visible text instead of a hover-only title: reachable by keyboard, touch and screen readers.
@@ -957,7 +959,7 @@ function renderSession(d, resized = false) {
       <details class="table-help" id="full-help-details"><summary id="full-help-toggle" aria-label="About this table">Info</summary><div class="help-body" id="full-help">
       <p>Provider positions and lap times. Unknown values remain —.</p>
       <p><strong>S1–S3</strong> are the sectors of the last timed lap (the last lap with a valid lap time); after pit laps this can be older than Laps. Sectors are not coloured.</p>
-      <p id="interval-help"><strong>Gap</strong> is leader-relative; <strong>Interval</strong> is to the preceding position and only shown when it can be computed reliably from the current scoring data. A — carries a short reason: <em>lapped</em> (Stintara cannot compute a reliable interval for a lapped car from the current data; the Gap column shows the lap deficit), <em>laps differ</em> (completed laps differ or are unknown), <em>no gap</em> (provider gap missing, negative or inconsistent), <em>no pos</em> (no unique adjacent position).</p>
+      <p id="interval-help"><strong>Gap</strong> is leader-relative; <strong>Interval</strong> is to the preceding position and only shown when it can be computed reliably from the current scoring data. A — carries a short reason: <em>lapped</em> (Stintara cannot compute a reliable interval for a lapped car from the current data; the Gap column shows the lap deficit), <em>laps differ</em> (completed laps differ or are unknown), <em>no gap</em> (provider gap missing, negative or inconsistent), <em>no pos</em> (no unique adjacent position). Two lapped cars with the same lap deficit and no recent pit activity can show a measured interval (time since the car ahead passed the same point, from recent scoring history); otherwise the reason above applies.</p>
       <p><strong>Colours:</strong> Best is purple only for the single fastest lap of the session; ordinary personal bests stay neutral. Last is purple if it is that session best, green if it equals the driver's own best, yellow if slower than it, uncoloured if unknown.</p>
       <p>Feed freshness does not establish race completion.</p></div></details></div>
       <div id="full-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Full field standings"><table>
