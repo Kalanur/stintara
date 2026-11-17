@@ -1,7 +1,10 @@
 """Ingest -> history -> API for lapped position intervals (#68). Synthetic frames only; needs the test database."""
+import time
+
 import pytest
 
 from server.app import main
+from server.app.uuid7 import uuid7
 from tests.conftest import make_agent
 
 L = 5000.0
@@ -109,3 +112,148 @@ async def test_session_change_drops_the_history(db):
     await main.handle_message(agent, "lmu", "scoring", payload, source_epoch="e1")
     assert state["interval_history"] is not first          # a new session starts a new history
     assert state["interval_history"].sample_count() == 3   # one sample for each of the three cars, nothing carried over
+
+
+# ---- review round (#77) ---------------------------------------------------------------------------------------
+
+def other_agent_state(session_id, *, pit_last=False, behind=0.0, seq_offset=0):
+    """Runtime state of a second agent observing the same session, built through the real history ingest."""
+    from server.app.interval_history import observe
+    state = dict(session_id=session_id, scoring_epoch="eb", track_length_m=L, driver_slug="other-agent",
+                 provider="lmu", game_connected=True)
+    for k in range(0, 400):
+        payload = next(frames(k, k + 1))[1]
+        for v in payload["vehicles"]:
+            if v["id"] == 9:
+                t = payload["session_time"]
+                s = 60 * t - behind
+                v["total_laps"], v["lap_dist"] = int(s // L), s - int(s // L) * L
+                v["in_pits"] = pit_last and k >= 395
+        observe(state, payload, epoch="eb")
+        state["scoring"] = payload
+    state["last_scoring_at"] = time.monotonic()
+    state["scoring_seq"] = main.next_sample_seq() + seq_offset
+    return state
+
+
+def reorder(first_key, second_key):
+    items = dict(main.runtime)
+    main.runtime.clear()
+    for key in (first_key, second_key):
+        main.runtime[key] = items[key]
+
+
+@pytest.mark.parametrize("scenario", ["other_in_pits", "other_far_behind"])
+@pytest.mark.parametrize("registration", ["agent_first", "agent_last"])
+async def test_driver_live_uses_one_observation_whatever_the_registration_order(db, scenario, registration):
+    agent = await start(db, "mix")
+    await feed(agent, 0, 400)
+    key_a = str(agent["id"])
+    state_a = main.runtime[key_a]
+    sid = state_a["session_id"]
+    kwargs = dict(pit_last=True) if scenario == "other_in_pits" else dict(behind=400.0)
+    older = other_agent_state(sid, **kwargs)
+    older["last_scoring_at"] = state_a["last_scoring_at"] - 1.0           # the real agent is newer
+    main.runtime["agent-b"] = older
+    if registration == "agent_last":
+        reorder(key_a, "agent-b")
+    else:
+        reorder("agent-b", key_a)
+    live = await main.api_driver_live(agent["slug"])
+    focus = live["focus"]
+    # every field comes from the newer observation (the real agent): the measurement and a consistent TRACK status
+    assert focus["interval_source"] == "history" and focus["interval"] == pytest.approx(100 / 60, abs=1e-6)
+    assert focus["status"] == "TRACK"
+    me = next(p for p in live["participants"] if p["local_vehicle_id"] == 9)
+    assert me["in_pits"] is False and me["laps_behind_leader"] == 1
+    # the same answer with the other registration order (only the age of the observation moves with time)
+    first, second = list(main.runtime)
+    reorder(second, first)
+    again = await main.api_driver_live(agent["slug"])
+    assert {**again["focus"], "live_age_s": None} == {**focus, "live_age_s": None}
+    assert again["participants"] == live["participants"]
+
+
+@pytest.mark.parametrize("registration", ["agent_first", "agent_last"])
+async def test_driver_live_follows_the_newer_observation_of_another_agent(db, registration):
+    agent = await start(db, "newer")
+    await feed(agent, 0, 400)
+    key_a = str(agent["id"])
+    state_a = main.runtime[key_a]
+    sid = state_a["session_id"]
+    newer = other_agent_state(sid, pit_last=True)
+    state_a["last_scoring_at"] -= 1.5                                       # the other agent is newer
+    main.runtime["agent-b"] = newer
+    reorder(*((key_a, "agent-b") if registration == "agent_first" else ("agent-b", key_a)))
+    live = await main.api_driver_live(agent["slug"])
+    me = next(p for p in live["participants"] if p["local_vehicle_id"] == 9)
+    # everything, pit state included, now describes the other observation, and no number is shown with it
+    assert me["in_pits"] is True and live["focus"]["status"] == "PIT"
+    assert live["focus"]["interval"] is None and live["focus"]["interval_source"] is None
+
+
+async def test_unbindable_observation_shows_no_history_number(db):
+    # The newest observation does not contain the car ahead: the pair cannot be tied to it, so the number stays unknown.
+    agent = await start(db, "unbound")
+    await feed(agent, 0, 400)
+    state = main.runtime[str(agent["id"])]
+    sid = state["session_id"]
+    state["scoring"] = dict(state["scoring"], vehicles=[v for v in state["scoring"]["vehicles"] if v["id"] != 8])
+    live = await main.api_driver_live(agent["slug"])
+    assert live["focus"]["interval"] is None and live["focus"]["interval_source"] is None
+    assert (await main.api_session_live(sid)) is not None
+
+
+def test_equal_receive_times_are_resolved_by_arrival_sequence_not_registration_order():
+    from server.app.timing import newest_state
+    sid = uuid7()
+    first = dict(session_id=sid, last_scoring_at=99.0, scoring_seq=5, scoring={"v": 1}, name="first")
+    second = dict(session_id=sid, last_scoring_at=99.0, scoring_seq=9, scoring={"v": 2}, name="second")
+    assert newest_state(sid, True, [first, second], 100.0)["name"] == "second"
+    assert newest_state(sid, True, [second, first], 100.0)["name"] == "second"
+    assert newest_state(sid, True, [dict(first, last_scoring_at=99.5), second], 100.0)["name"] == "first"
+
+
+async def test_pit_seen_without_distance_blocks_the_number_through_ingest(db):
+    agent = await start(db, "pitnodist")
+    await feed(agent, 0, 300)
+    sid = main.runtime[str(agent["id"])]["session_id"]
+    assert own(await main.api_session_live(sid))["interval_source"] == "history"
+    _, payload = next(frames(300, 301))
+    payload["vehicles"][2].update(in_pits=True, lap_dist=None)           # car 9: in the pits, no usable distance
+    await main.handle_message(agent, "lmu", "scoring", payload, source_epoch="e1")
+    await feed(agent, 301, 330)                                          # distance valid again, pit flag cleared
+    p = own(await main.api_session_live(sid))
+    assert p["interval"] is None and p["interval_reason"] == "lapped" and p["interval_source"] is None
+    await feed(agent, 330, 700)                                          # more than 60 s of session clock later
+    assert own(await main.api_session_live(sid))["interval_source"] == "history"
+
+
+async def test_changed_repeat_of_one_clock_removes_the_number_through_ingest(db):
+    agent = await start(db, "repeat")
+    await feed(agent, 0, 400)
+    sid = main.runtime[str(agent["id"])]["session_id"]
+    assert own(await main.api_session_live(sid))["interval_source"] == "history"
+    _, last = next(frames(399, 400))
+    # the very same clock again, same positions and deficits, but car 9 is now reported in the pits
+    again = dict(last, vehicles=[dict(v, in_pits=(v["id"] == 9)) for v in last["vehicles"]])
+    await main.handle_message(agent, "lmu", "scoring", again, source_epoch="e1")
+    p = own(await main.api_session_live(sid))
+    assert p["in_pits"] is True and p["interval"] is None and p["interval_source"] is None
+    live = await main.api_driver_live(agent["slug"])
+    assert live["focus"]["interval"] is None and live["focus"]["status"] == "PIT"
+    # an identical repeat of the original packet is simply ignored and does not resurrect anything
+    await feed(agent, 400, 410)
+    assert own(await main.api_session_live(sid))["interval"] is None       # quarantine after the observed pit flag
+    await feed(agent, 410, 760)
+    assert own(await main.api_session_live(sid))["interval_source"] == "history"
+
+
+async def test_identical_repeat_keeps_the_number_through_ingest(db):
+    agent = await start(db, "identical")
+    await feed(agent, 0, 400)
+    sid = main.runtime[str(agent["id"])]["session_id"]
+    _, last = next(frames(399, 400))
+    await main.handle_message(agent, "lmu", "scoring", dict(last), source_epoch="e1")
+    p = own(await main.api_session_live(sid))
+    assert p["interval_source"] == "history" and p["interval"] == pytest.approx(100 / 60, abs=1e-6)

@@ -21,7 +21,8 @@ def position(value):
 def newest_state(session_id, live, states, now):
     candidates = [s for s in states if live and s.get("session_id") == session_id
                   and 0 <= now - s.get("last_scoring_at", 0) < 15 and s.get("scoring")]
-    return max(candidates, key=lambda s: s["last_scoring_at"], default={})
+    # Equal receive times are broken by the global arrival sequence, never by registration order.
+    return max(candidates, key=lambda s: (s["last_scoring_at"], s.get("scoring_seq", 0)), default={})
 
 
 def newest_scoring(session_id, live, states, now):

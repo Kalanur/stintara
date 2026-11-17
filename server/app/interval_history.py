@@ -28,6 +28,14 @@ MAX_VEHICLES = 128              # a larger field is not tracked at all
 MAX_PACKET_GAP_SECONDS = 1.0    # a longer scoring gap clears the history instead of interpolating over it
 CLOCK_RESET_SECONDS = 2.0       # clock moved back by more than this: new session state
 BACKSTEP_METERS = 3.0           # distance moved back by more than this: that vehicle's history is discontinuous
+# A forward step is plausible only up to MAX_SPEED * dt + JUMP_SLACK. In 1.6 million consecutive scoring samples of
+# three private captures (Hypercar top speed about 97 m/s, GT3 about 80 m/s) all but 178 forward steps were below
+# 100 m/s; the 178 outliers were lap-length jumps and pit-lane distance switches. 110 m/s (about 396 km/h) leaves
+# headroom above the fastest car and the slack covers the provider's lap_dist rounding around the start/finish line
+# (observed overshoot of the lap length: up to about 10 m).
+MAX_SPEED_MPS = 110.0
+JUMP_SLACK_METERS = 10.0
+MIN_OWN_SAMPLES = 2             # the car behind needs at least one plausibility-checked step of its own
 PIT_GUARD_SECONDS = 60.0        # no value after pit activity of either car
 MAX_AGE_SECONDS = 3.0           # a projected history value must come from scoring at most this old (wall time)
 LENGTH_TOLERANCE_METERS = 1.0
@@ -42,6 +50,7 @@ PIT_WINDOW = "pit_in_window"
 NOT_AHEAD = "ahead_not_ahead"
 HISTORY = "no_history"
 DISCONTINUITY = "discontinuity"
+CONFLICT = "conflicting_snapshot"   # same clock, different content
 
 
 def finite(value):
@@ -86,6 +95,8 @@ class IntervalHistory:
         self.key, self.clock, self.length = key, None, None
         self.tracks = {}
         self.pit_clock = {}                    # vehicle id -> clock of its newest in-pit sample (survives clears)
+        self.snapshot = {}                     # vehicle id -> content row of the newest accepted snapshot
+        self.fingerprint = None                # content of that snapshot, to tell repeats from changes
 
     def sample_count(self):
         return sum(len(t) for t in self.tracks.values())
@@ -120,39 +131,42 @@ class IntervalHistory:
             if clock < self.clock - CLOCK_RESET_SECONDS:
                 self.stats["reset_clock"] += 1
                 self._reset(key)
-            elif clock <= self.clock:
-                self.stats["ignored_duplicate"] += 1
+            elif clock < self.clock:
+                self.stats["ignored_older"] += 1
                 return None
+            elif clock == self.clock:
+                return self._repeat(result, clock, vehicles)
             elif clock - self.clock > MAX_PACKET_GAP_SECONDS:
                 self.stats["reset_gap"] += 1
                 self.tracks.clear()
-        length = track_length if finite(track_length) and track_length > 0 else None
-        if length is None:
-            self.tracks.clear()
-            self.clock, self.length = clock, None
-            self.stats[NO_TRACK] += 1
-            return result()
-        if self.length is not None and abs(length - self.length) > LENGTH_TOLERANCE_METERS:
-            self.stats["reset_track"] += 1
-            self._reset(key)
-        self.clock, self.length = clock, length
         if len(vehicles) > MAX_VEHICLES:
+            # Checked before anything is indexed or stored: an oversized field costs nothing and keeps no state.
             self.tracks.clear()
+            self.snapshot, self.fingerprint, self.clock = {}, None, clock
             self.stats["field_too_large"] += 1
             return result()
-
-        seen, duplicated, valid = set(), set(), {}
-        for v in vehicles:
-            vid = v.get("id") if isinstance(v, dict) else None
-            if not count(vid):
-                continue
-            if vid in seen:
-                duplicated.add(vid)
-            seen.add(vid)
-            valid[vid] = v
+        valid, duplicated = self._index(vehicles)
+        # Pit activity is recorded before any validity check of the distance sample: a car that is seen in the pits
+        # must start the quarantine even if this very sample carries no usable lap_dist.
+        self._register_pits(clock, vehicles)
         for vid in [k for k, c in self.pit_clock.items() if clock - c > WINDOW_SECONDS]:
             del self.pit_clock[vid]
-        for vid in [k for k in self.tracks if k not in seen or k in duplicated]:
+        length = track_length if finite(track_length) and track_length > 0 else None
+        if length is not None and self.length is not None and abs(length - self.length) > LENGTH_TOLERANCE_METERS:
+            self.stats["reset_track"] += 1
+            pits = self.pit_clock
+            self._reset(key)
+            self.pit_clock = pits              # pit knowledge does not depend on the track geometry
+        self.clock = clock
+        self._remember(valid, duplicated, vehicles)
+        if length is None:
+            self.tracks.clear()
+            self.length = None
+            self.stats[NO_TRACK] += 1
+            return result()
+        self.length = length
+
+        for vid in [k for k in self.tracks if k not in valid or k in duplicated]:
             del self.tracks[vid]               # identity continuity: absent or ambiguous vehicles lose their past
         usable = {}
         for vid, v in valid.items():
@@ -166,20 +180,78 @@ class IntervalHistory:
             distance = laps * length + dist
             if track is None:
                 track = self.tracks[vid] = _Track()
-            elif len(track) and distance < track.s[-1] - BACKSTEP_METERS:
-                track.clear()                  # reset / teleport / pit-lane distance switch: past is not comparable
-                self.stats["reset_backstep"] += 1
-                usable[vid] = DISCONTINUITY
             elif len(track):
-                distance = max(distance, track.s[-1])   # only sub-threshold jitter is flattened
+                step, elapsed = distance - track.s[-1], clock - track.t[-1]
+                if step < -BACKSTEP_METERS:
+                    # reset / teleport / pit-lane distance switch: the past is not comparable
+                    track.clear()
+                    self.stats["reset_backstep"] += 1
+                    usable[vid] = DISCONTINUITY
+                elif step > MAX_SPEED_MPS * elapsed + JUMP_SLACK_METERS:
+                    # implausibly fast forward step (teleport, corrected lap counter): never interpolate across it
+                    track.clear()
+                    self.stats["reset_forward_jump"] += 1
+                    usable[vid] = DISCONTINUITY
+                else:
+                    distance = max(distance, track.s[-1])   # only sub-threshold jitter is flattened
             track.push(clock, distance)
-            if pit:
-                self.pit_clock[vid] = clock
             usable.setdefault(vid, None)
         return result(self._pairs(valid, duplicated, usable, clock))
 
     # ------------------------------------------------------------------
-    def _pairs(self, vehicles, duplicated, usable, clock):
+    @staticmethod
+    def _index(vehicles):
+        seen, duplicated, valid = set(), set(), {}
+        for v in vehicles:
+            vid = v.get("id") if isinstance(v, dict) else None
+            if not count(vid):
+                continue
+            if vid in seen:
+                duplicated.add(vid)
+            seen.add(vid)
+            valid[vid] = v
+        return valid, duplicated
+
+    def _register_pits(self, clock, vehicles):
+        for v in vehicles:
+            if isinstance(v, dict) and count(v.get("id")) and v.get("in_pits") is True:
+                self.pit_clock[v["id"]] = clock
+
+    @staticmethod
+    def _row(v):
+        return v.get("position"), v.get("total_laps"), v.get("lap_dist"), v.get("in_pits"), v.get("laps_behind_leader")
+
+    def _remember(self, valid, duplicated, vehicles):
+        self.snapshot = {vid: self._row(v) for vid, v in valid.items()}
+        self.fingerprint = (len(vehicles), tuple(sorted(self.snapshot.items())), tuple(sorted(duplicated)))
+
+    def _repeat(self, result, clock, vehicles):
+        """A snapshot with the clock of the previous one: identical content is ignored, a change is not."""
+        if len(vehicles) > MAX_VEHICLES:
+            self.tracks.clear()
+            self.snapshot, self.fingerprint = {}, None
+            self.stats["field_too_large"] += 1
+            return result()
+        valid, duplicated = self._index(vehicles)
+        previous = self.snapshot
+        fingerprint = (len(vehicles), tuple(sorted({vid: self._row(v) for vid, v in valid.items()}.items())),
+                       tuple(sorted(duplicated)))
+        if fingerprint == self.fingerprint:
+            self.stats["ignored_identical"] += 1
+            return None
+        # Same clock, different content (position, deficit, pit flag, distance, vehicle set): the stored samples of
+        # every changed vehicle conflict with the new state and are dropped, pit activity is still recorded, and
+        # nothing measured for the earlier content may stay valid for this one.
+        self.stats["conflicting_repeat"] += 1
+        self._register_pits(clock, vehicles)
+        for vid in list(self.tracks):
+            v = valid.get(vid)
+            if v is None or vid in duplicated or previous.get(vid) != self._row(v):
+                del self.tracks[vid]
+        self._remember(valid, duplicated, vehicles)
+        return result(self._pairs(valid, duplicated, {}, clock, force=CONFLICT))
+
+    def _pairs(self, vehicles, duplicated, usable, clock, force=None):
         by_position = {}
         for vid, v in vehicles.items():
             p = v.get("position")
@@ -198,7 +270,7 @@ class IntervalHistory:
             entry = dict(value=None, reason=None, ahead_id=a, position=position, ahead_position=position - 1,
                          deficit=deficit)
             pairs[b] = entry
-            entry["reason"] = self._measure(entry, a, b, usable, duplicated, vb, va, clock)
+            entry["reason"] = force or self._measure(entry, a, b, usable, duplicated, vb, va, clock)
         return pairs
 
     def _measure(self, entry, a, b, usable, duplicated, vb, va, clock):
@@ -211,6 +283,8 @@ class IntervalHistory:
             return PIT
         if usable.get(a) == DISCONTINUITY or usable.get(b) == DISCONTINUITY:
             return DISCONTINUITY
+        if len(tb) < MIN_OWN_SAMPLES:
+            return HISTORY                       # B's own distance has no plausibility-checked step yet
         sb = tb.s[-1]
         if ta.s[-1] <= sb:
             return NOT_AHEAD

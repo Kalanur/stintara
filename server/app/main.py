@@ -704,24 +704,29 @@ async def api_driver_live(slug: str) -> dict[str, Any]:
         # endpoint's all-field laterals are deliberately not reused here (500 ms polling).
         async with pool.acquire() as conn:
             history = await conn.fetchrow(OWN_LAP_HISTORY_SQL, own[0]["participant_id"])
-    for state in runtime.values():
-        if state.get("session_id") == session["id"] and time.monotonic() - state.get("last_scoring_at", 0) < 15:
-            by_vehicle = {v["id"]: v for v in state.get("scoring", {}).get("vehicles", [])}
-            for participant in participants:
-                vehicle = by_vehicle.get(participant["local_vehicle_id"])
-                if vehicle:
-                    for key in ("position", "total_laps", "last_lap_time", "best_lap_time", "in_pits"):
-                        participant[key] = vehicle.get(key)
-                    participant["gap_to_leader"] = vehicle.get("time_behind_leader")
+    now = time.monotonic()
+    # One observation (the newest fresh one of this session; deterministic, independent of the order in which the
+    # agents were registered) supplies every live field of the overlay, the lap deficit included, and the measured
+    # lapped intervals. Two observations are never mixed: a different agent's vehicle state next to this one's
+    # history value could show a number together with a contradicting pit state or distance.
+    observation = newest_state(session["id"], True, list(runtime.values()), now)
+    by_vehicle = {v["id"]: v for v in observation.get("scoring", {}).get("vehicles", [])} if observation else {}
+    for participant in participants:
+        vehicle = by_vehicle.get(participant["local_vehicle_id"])
+        if vehicle:
+            for key in ("position", "total_laps", "last_lap_time", "best_lap_time", "in_pits"):
+                participant[key] = vehicle.get(key)
+            participant["gap_to_leader"] = vehicle.get("time_behind_leader")
+            participant["laps_behind_leader"] = vehicle.get("laps_behind_leader")
     participants.sort(key=lambda p: p["position"] if p["position"] is not None else 9999)
     for participant in participants:
         participant.update(vehicle_identity(participant))
-    now = time.monotonic()
-    # Measured lapped intervals come from the newest fresh observation only; project_timing re-checks that the
-    # recorded pair still matches the displayed positions and deficits, so a mixed overlay falls back to "lapped".
-    newest = newest_state(session["id"], True, list(runtime.values()), now)
-    measured = current_pairs(newest, session["id"], now) if newest else {}
-    timing_rows = [{**p, "history_interval": measured[p["local_vehicle_id"]]} if p["local_vehicle_id"] in measured else p
+    # The measured interval needs both cars of the pair to be overlaid from that very observation; otherwise one of
+    # them would show stored (older) values next to the measurement and the number stays unknown.
+    measured = current_pairs(observation, session["id"], now) if observation else {}
+    timing_rows = [{**p, "history_interval": measured[p["local_vehicle_id"]]}
+                   if p["local_vehicle_id"] in measured and p["local_vehicle_id"] in by_vehicle
+                   and measured[p["local_vehicle_id"]]["ahead_id"] in by_vehicle else p
                    for p in participants]      # evidence for the focus timing only; the response rows stay as before
     return {
         "driver": dict(driver),

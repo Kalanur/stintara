@@ -167,7 +167,7 @@ def test_duplicate_clock_ties_and_missing_position():
     h = IntervalHistory()
     drive(h, 0, 5, (60, 100), (60, 0))
     assert step(h, 5.0, [car(1, 1, 400), car(2, 2, 300)]) is None
-    assert h.stats["ignored_duplicate"] == 1
+    assert h.stats["ignored_identical"] == 1
     # two cars claim position 2 -> no pair at all (a third car at 3 has no unique predecessor either)
     r = step(h, 5.2, [car(1, 2, 412), car(2, 2, 312), car(3, 3, 200)])
     assert r["pairs"] == {}
@@ -440,3 +440,195 @@ def test_different_deficits_stay_lapped_even_with_a_history_entry():
     rows[0]["laps_behind_leader"] = 1
     project_timing(rows, "Race")
     assert rows[1]["interval"] is None and rows[1]["interval_reason"] == "lapped"
+
+
+# ---- review round: pit seen without distance, forward jumps, changed repeats of one clock (#77) -----------
+
+def pit_without_distance(**broken):
+    return dict(car(2, 2, 60 * 10.2), in_pits=True, **broken)
+
+
+@pytest.mark.parametrize("broken", [dict(lap_dist=None), dict(lap_dist=float("nan")), dict(lap_dist=float("inf")),
+                                    dict(total_laps=None), dict(lap_dist="12")])
+def test_pit_seen_without_a_usable_distance_still_starts_the_quarantine(broken):
+    h = IntervalHistory()
+    drive(h, 0, 10, (60, 100), (60, 0))
+    assert entry(step(h, 10.0 + .2, [car(1, 1, 100 + 60 * 10.2), pit_without_distance(**broken)]))["value"] is None
+    # the very next valid sample (pit flag cleared) must not produce a value: the stop was observed
+    e = entry(step(h, 10.4, [car(1, 1, 100 + 60 * 10.4), car(2, 2, 60 * 10.4)]))
+    assert e["value"] is None and e["reason"] == ih.PIT
+    # still quarantined just inside 60 s of the in-pit sample ...
+    e = entry(drive(h, 10.6, 70.0, (60, 100 + 60 * 10.6), (60, 60 * 10.6)))
+    assert e["value"] is None and e["reason"] == ih.PIT
+    # ... and safely resumed afterwards, with the correct value
+    e = entry(drive(h, 70.2, 72.0, (60, 100 + 60 * 70.2), (60, 60 * 70.2)))
+    assert e["reason"] is None and e["value"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+def test_pit_activity_of_the_car_ahead_without_distance_also_counts():
+    h = IntervalHistory()
+    drive(h, 0, 10, (60, 100), (60, 0))
+    step(h, 10.2, [dict(car(1, 1, 100 + 60 * 10.2), in_pits=True, lap_dist=None), car(2, 2, 60 * 10.2)])
+    e = entry(step(h, 10.4, [car(1, 1, 100 + 60 * 10.4), car(2, 2, 60 * 10.4)]))
+    assert e["value"] is None and e["reason"] == ih.PIT
+
+
+def test_pit_memory_survives_a_track_length_reset_in_the_same_session():
+    h = IntervalHistory()
+    drive(h, 0, 10, (60, 100), (60, 0))
+    step(h, 10.2, [car(1, 1, 100 + 60 * 10.2), dict(car(2, 2, 60 * 10.2), in_pits=True)])
+    e = entry(drive(h, 10.4, 14, (60, 100 + 60 * 10.4), (60, 60 * 10.4), length=L + 30))
+    assert e["value"] is None and h.stats["reset_track"] == 1
+    assert 2 in h.pit_clock
+
+
+def test_forward_jump_of_the_car_ahead_is_not_interpolated():
+    # The review reproduction: 5000 m track, car A jumps from 1000 m to 6012 m in 0.2 s, B moves 990 -> 1002 m.
+    h = IntervalHistory()
+    step(h, 10.0, [car(1, 1, 1000), car(2, 2, 990)])
+    e = entry(step(h, 10.2, [car(1, 1, 6012), car(2, 2, 1002)]))
+    assert e["value"] is None and e["reason"] == ih.DISCONTINUITY and h.stats["reset_forward_jump"] == 1
+    assert len(h.tracks[1]) == 1                  # the whole conflicting segment is gone
+    # following normal samples never produce a made-up passage time either
+    for k in range(1, 40):
+        e = entry(step(h, round(10.2 + .2 * k, 3), [car(1, 1, 6012 + 60 * .2 * k), car(2, 2, 1002 + 60 * .2 * k)]))
+        assert e["value"] is None
+
+
+def test_forward_jump_of_the_car_behind_is_unknown_too():
+    h = IntervalHistory()
+    drive(h, 0, 10, (60, 1100), (60, 1000))
+    e = entry(step(h, 10.2, [car(1, 1, 1100 + 60 * 10.2), car(2, 2, 1000 + 60 * 10.2 + 5000)]))
+    assert e["value"] is None and h.stats["reset_forward_jump"] == 1
+
+
+@pytest.mark.parametrize("jump", [5000.0, 2500.0, 100.0, 40.0])
+def test_implausible_forward_steps_break_the_history(jump):
+    h = IntervalHistory()
+    drive(h, 0, 10, (60, 600), (60, 500))
+    e = entry(step(h, 10.2, [car(1, 1, 600 + 60 * 10.2 + jump), car(2, 2, 500 + 60 * 10.2)]))
+    assert e["value"] is None and h.stats["reset_forward_jump"] == 1
+
+
+def test_regular_motion_and_start_finish_crossings_are_not_jumps():
+    # 100 m/s (above every real car), sample spacing 0.2-1.0 s, lap counter increments, and the provider reporting
+    # the lap length plus 8 m of overshoot before the counter wraps: none of this may reset the history.
+    def provider(i, pos, s):
+        laps = max(0, int((s - 8) // L))
+        return dict(id=i, position=pos, total_laps=laps, lap_dist=s - laps * L, in_pits=False, laps_behind_leader=1)
+    h = IntervalHistory()
+    t, s_a, s_b, e = 0.0, 4700.0, 4500.0, None
+    for spacing in (0.2, 0.4, 1.0, 0.2, 0.6, 0.2) * 40:
+        t = round(t + spacing, 3)
+        s_a, s_b = s_a + 100 * spacing, s_b + 100 * spacing
+        a, b = provider(1, 1, s_a), provider(2, 2, s_b)
+        e = entry(step(h, t, [a, b]))
+    assert h.stats["reset_forward_jump"] == 0 and h.stats["reset_backstep"] == 0
+    assert e["reason"] is None and e["value"] == pytest.approx(200 / 100, abs=1e-6)
+    assert max(v["total_laps"] for v in (a, b)) >= 2           # several start/finish crossings were really made
+
+
+def test_exact_speed_limit_boundary():
+    limit = ih.MAX_SPEED_MPS * 0.2 + ih.JUMP_SLACK_METERS
+    for step_m, jumps in ((limit - 0.5, 0), (limit + 0.5, 1)):
+        h = IntervalHistory()
+        step(h, 1.0, [car(1, 1, 3000), car(2, 2, 2900)])
+        step(h, 1.2, [car(1, 1, 3000 + step_m), car(2, 2, 2900 + 10)])
+        assert h.stats["reset_forward_jump"] == jumps
+
+
+def test_a_forward_jump_in_the_pit_lane_is_also_a_break():
+    h = IntervalHistory()
+    drive(h, 0, 10, (60, 100), (60, 0))
+    step(h, 10.2, [dict(car(1, 1, 100 + 60 * 10.2 + 900), in_pits=True), car(2, 2, 60 * 10.2)])
+    assert h.stats["reset_forward_jump"] == 1
+
+
+# ---- same clock, different content ----------------------------------------------------------------------
+
+def built(until=10.0):
+    h = IntervalHistory()
+    last = drive(h, 0, until, (60, 100), (60, 0))
+    return h, last
+
+
+def frame_at(clock, **b):
+    return [car(1, 1, 100 + 60 * clock), dict(car(2, 2, 60 * clock), **b)]
+
+
+def test_identical_repeat_is_ignored_and_keeps_the_result_valid():
+    h, last = built()
+    assert entry(last)["value"] is not None
+    assert step(h, 10.0, frame_at(10.0)) is None and h.stats["ignored_identical"] == 1
+    assert step(h, 10.0, frame_at(10.0)) is None and h.stats["ignored_identical"] == 2
+    assert h.stats["conflicting_repeat"] == 0
+    e = entry(step(h, 10.2, frame_at(10.2)))
+    assert e["reason"] is None and e["value"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+def test_repeat_with_b_in_the_pits_invalidates_the_number_and_starts_the_quarantine():
+    h, last = built()
+    assert entry(last)["value"] is not None
+    r = step(h, 10.0, frame_at(10.0, in_pits=True))
+    assert r is not None and entry(r)["value"] is None and entry(r)["reason"] == ih.CONFLICT
+    assert h.stats["conflicting_repeat"] == 1 and h.pit_clock[2] == 10.0
+    # next regular sample: pit flag gone again, but 60 s of quarantine just began
+    e = entry(step(h, 10.2, frame_at(10.2)))
+    assert e["value"] is None and e["reason"] == ih.PIT
+
+
+@pytest.mark.parametrize("change", ["distance", "position", "deficit", "missing", "extra"])
+def test_repeat_with_any_changed_content_drops_the_old_number(change):
+    h, last = built()
+    base = frame_at(10.0)
+    changed = {"distance": [base[0], dict(base[1], lap_dist=base[1]["lap_dist"] + 40)],
+               "position": [dict(base[0], position=2), dict(base[1], position=1)],
+               "deficit": [base[0], dict(base[1], laps_behind_leader=2)],
+               "missing": [base[0]],
+               "extra": base + [car(3, 3, 10)]}[change]
+    r = step(h, 10.0, changed)
+    assert r is not None and h.stats["conflicting_repeat"] == 1
+    assert all(p["value"] is None for p in r["pairs"].values())
+    if change in ("distance", "missing"):
+        assert 2 not in h.tracks                  # the conflicting sample of the changed car is dropped
+
+
+@pytest.mark.parametrize("change", ["distance", "missing"])
+def test_recovery_after_a_conflicting_repeat_is_clean(change):
+    h, _ = built()
+    base = frame_at(10.0)
+    step(h, 10.0, [base[0], dict(base[1], lap_dist=base[1]["lap_dist"] + 40)] if change == "distance" else [base[0]])
+    first = entry(step(h, 10.2, frame_at(10.2)))
+    assert first["value"] is None                 # the car behind has no plausibility-checked step yet
+    e = entry(step(h, 10.4, frame_at(10.4)))
+    assert e["reason"] is None and e["value"] == pytest.approx(100 / 60, abs=1e-6)
+
+
+def test_changed_repeat_is_bound_at_state_level_and_no_stale_number_remains():
+    sid = uuid7()
+    state = observed(sid)
+    clock = state["scoring"]["session_time"]
+    assert current_pairs(state, sid, 100.0)[2]["value"] is not None
+    payload = dict(state["scoring"], vehicles=[car(1, 1, 100 + 60 * clock), dict(car(2, 2, 60 * clock), in_pits=True)])
+    observe(state, payload, epoch="e1")
+    state["scoring"] = payload                      # what handle_message does with every received packet
+    pairs = current_pairs(state, sid, 100.0)
+    assert pairs[2]["value"] is None and pairs[2]["reason"] == ih.CONFLICT
+    rows = [dict(id=uuid7(), local_vehicle_id=i, position=i, total_laps=3 + (i == 1), laps_behind_leader=1,
+                 gap_to_leader=None) for i in (1, 2)]
+    out = main.spectator_participants(rows, sid, True, [state], 100.0, "Race")
+    assert out[1]["interval"] is None and out[1]["interval_reason"] == "lapped" and out[1]["interval_source"] is None
+
+
+def test_changed_repeat_is_ignored_when_content_is_the_same_but_a_new_dict():
+    h, _ = built()
+    again = [dict(v) for v in frame_at(10.0)]
+    assert step(h, 10.0, again) is None
+
+
+def test_oversized_field_keeps_no_state_even_when_repeated():
+    h = IntervalHistory()
+    big = [car(i, i + 1, 10 * i) for i in range(ih.MAX_VEHICLES + 1)]
+    assert step(h, 1.0, big)["pairs"] == {} and not h.tracks and h.snapshot == {}
+    assert step(h, 1.0, big)["pairs"] == {} and not h.tracks and h.snapshot == {}      # repeat path, same cap
+    assert h.stats["field_too_large"] == 2
