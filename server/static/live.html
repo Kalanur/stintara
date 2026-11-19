@@ -37,6 +37,7 @@ a:focus-visible,summary:focus-visible,.table-scroll:focus-visible{outline:2px so
 .standings h2{padding:10px 12px 0}
 .table-scroll{overflow:auto;min-height:0;min-width:0;flex:1;scrollbar-color:var(--line) var(--panel)}
 .side-col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0;overflow:auto}
+.side-col>.panel{flex:none}   /* panels keep their height: a short viewport scrolls the column instead of clipping a panel */
 table{width:100%;border-collapse:separate;border-spacing:0}
 th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
 th{font-size:12px;color:var(--muted);background:var(--raised);position:sticky;top:0;z-index:1}
@@ -49,7 +50,8 @@ tr.me{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus)}
 details summary{cursor:pointer}
 section[aria-label="Weather"] p{margin:2px 0}
 section[aria-label="Weather"] ul{margin:2px 0;padding-left:18px}
-.pr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:6px}
+.pr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:8px;margin-bottom:6px}
+.pr-panel .value{font-size:18px}.pr-title{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.pr-title h2{margin:0}
 .pr-ok{color:var(--ok)}.pr-warn{color:var(--pit)}.pr-bad{color:var(--live)}
 .pr-notes{margin:4px 0;padding-left:18px}.pr-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px}
 .pr-form>p,.pr-form>.pr-actions,.pr-mode{grid-column:1/-1}.pr-field{display:flex;flex-direction:column;gap:2px}.pr-hint{font-size:12px}

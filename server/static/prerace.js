@@ -127,14 +127,15 @@ const PreRaceUI = (() => {
     const stale = staleFields(state, resp.context).length > 0;
     const cls = plan.status === 'ready' && !stale ? 'pr-ok' : plan.status === 'ready' || plan.status === 'ready_capacity_unchecked' ? 'pr-warn' : 'pr-bad';
     const lines = quality(plan, state, resp.context);
-    return `<section class="panel pr-panel" aria-label="Race prep"><h2>Race prep <small class="muted">· estimate</small></h2>
+    // The link sits in the heading row: on a short display (Chromebook) it must stay reachable above the details.
+    return `<section class="panel pr-panel" aria-label="Race prep"><div class="pr-title"><h2>Race prep <small class="muted">· estimate</small></h2>${link}</div>
       <div class="pr-grid"><div><div class="muted">Race</div><div class="value">${e(lengthText(plan))}</div></div>
       <div><div class="muted">Expected laps</div><div class="value">${e(lapsText(plan))}</div></div>
       <div><div class="muted">Start fuel</div><div class="value ${cls}">${e(startText(plan))}</div></div>
       <div><div class="muted">Start VE</div><div class="value">${e(veText(plan))}</div></div>
       <div><div class="muted">Reserve</div><div class="value">${e(n(plan.reserve_laps, 1))} lap</div></div></div>
       <p class="${cls}"><strong>${e(STATUS[plan.status] || 'Pre-race plan unavailable')}</strong></p>
-      ${lines.length ? `<ul class="pr-notes muted">${lines.map(l => `<li>${e(l)}</li>`).join('')}</ul>` : ''}${link}</section>`;
+      ${lines.length ? `<ul class="pr-notes muted">${lines.map(l => `<li>${e(l)}</li>`).join('')}</ul>` : ''}</section>`;
   }
 
   function suggestion(field, ev, sessionId) {

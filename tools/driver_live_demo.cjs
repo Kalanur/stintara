@@ -60,7 +60,7 @@ const preraceFixture = {driver:{slug:'synthetic'},evidence:null,context:null,pla
 const storedPlan = {v:1,mode:'time',values:{duration_minutes:60,lap_time_s:120,fuel_per_lap_l:3,ve_per_lap_percent:2.5},ve_capable:true,
   sources:{duration_minutes:'manual',lap_time_s:'manual',fuel_per_lap_l:'manual',ve_per_lap_percent:'manual',ve_capable:'manual'},context:null};
 
-const VIEWPORTS = [[1920,911,'real 1080p display'],[2560,1271,'real 1440p display']];
+const VIEWPORTS = [[1920,911,'real 1080p display'],[2560,1271,'real 1440p display'],[1366,768,'Chromebook 1366x768'],[1280,800,'Chromebook 1280x800']];
 const PANELS = '.dash > .panel, .side-col > .panel';
 
 async function verifyDriverLive(channel) {
@@ -119,10 +119,17 @@ async function verifyDriverLive(channel) {
       assert.deepEqual(m.overlaps,[],`${where}: panels overlap`);
       assert.deepEqual(m.clipped,[],`${where}: clipped focus text`);
       assert.deepEqual(m.small,[],`${where}: text below 12 px`);
-      assert.ok(m.sideHidden <= 1,`${where}: tyres/weather column cut by ${m.sideHidden}px`);
+      // At 768 px height the side column may scroll internally (the forecast toggle sits below the fold); panels themselves are never clipped (checked below).
+      assert.ok(m.sideHidden <= (height <= 768 ? 40 : 1),`${where}: tyres/weather column cut by ${m.sideHidden}px`);
       assert.ok(m.bottom <= height,`${where}: panels end inside the viewport`);
       assert.equal(m.sectorsVisible,true,`${where}: S1/S2/S3 visible`);
       assert.ok(m.standingsOverflow,`${where}: standings scroll internally, not the page`);
+      // Race prep (#66) must never be clipped by its neighbours: start fuel and the planner link are fully visible.
+      const prep = await page.evaluate(() => { const panel = document.querySelector('.pr-panel'), box = e => e.getBoundingClientRect();
+        const value = [...panel.querySelectorAll('.muted')].find(e => e.textContent === 'Start fuel').nextElementSibling, link = panel.querySelector('a');
+        return {clipped:panel.scrollHeight - panel.clientHeight, value:box(value), link:box(link), panel:box(panel), height:innerHeight}; });
+      assert.ok(prep.clipped <= 1,`${where}: Race prep panel clipped by ${prep.clipped}px`);
+      assert.ok(prep.value.bottom <= prep.height && prep.link.bottom <= prep.height && prep.link.top >= prep.panel.top,`${where}: start fuel and planner link visible`);
       const t = await text();
       for (const expected of ['TRACK','P7','+22.4','13','12 completed','1:31.512','1:30.612','29.101','34.226','28.185','S2 · now','1 stop · last stop L6','42.3 L','82.0%','Race prep','30–32 laps','99.0 L','82.5 %','Manual: 3 inputs'])
         assert.ok(t.includes(expected),`${where}: shows ${expected}`);
