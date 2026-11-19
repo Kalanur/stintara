@@ -21,6 +21,8 @@ STEP_FACTOR, STEP_SLACK_M = 1.5, 10.0   # euclidean step <= travelled * factor +
 SECTOR_MIN_OBSERVATIONS = 2
 SECTOR_MAX_SPREAD_M = 60.0
 MAX_TRACKS = 16
+MIN_SF_CHORD_M = 1.0              # shorter chord: the direction of the start/finish line is not defined
+MIN_SF_CHORD_RATIO = 0.5       # chord much shorter than the closing arc: the arc is not a straight gap
 GEOMETRY_SCHEMA_VERSION = 1    # persisted track_geometries layout; unknown versions are never interpreted
 MIN_TRACK_LENGTH_M, MAX_TRACK_LENGTH_M = 200.0, 60000.0
 
@@ -132,6 +134,32 @@ class TrackModel:
             markers.append(dict(boundary=number, point=[x0 + (x1 - x0) * t, z0 + (z1 - z0) * t],
                                 direction=[(x1 - x0) / length, (z1 - z0) / length]))
         return markers
+
+    def start_finish_marker(self):
+        """Start/finish line derived from the closed geometry and the lap distance, never from a position guess.
+
+        Lap distance 0 (= the track length) lies on the closing arc between the last and the first stored point.
+        The point is interpolated linearly by lap distance on the chord between them and the direction is that
+        chord, i.e. the direction of travel. `arc_m` (length of the closing arc) bounds the position accuracy: the
+        marker is a line drawn through that gap, not a surveyed position. Returns None, never a guess, when the
+        geometry is not closed, the arc is missing or implausible, or the chord is degenerate or inconsistent
+        with the arc.
+        """
+        if not self.complete or len(self.points) < 2:
+            return None
+        (x0, z0), (x1, z1) = self.points[-1], self.points[0]
+        last, first = self.distances[-1], self.distances[0]
+        arc = (self.length - last) + first
+        chord = math.hypot(x1 - x0, z1 - z0)
+        if not all(finite(v) for v in (x0, z0, x1, z1, last, first, arc, chord)):
+            return None
+        if not 0 < arc <= arc_limit(self.length) or not 0 <= self.length - last <= arc:
+            return None
+        if chord < MIN_SF_CHORD_M or chord < arc * MIN_SF_CHORD_RATIO or chord > arc * STEP_FACTOR + STEP_SLACK_M:
+            return None
+        t = (self.length - last) / arc
+        return dict(point=[x0 + (x1 - x0) * t, z0 + (z1 - z0) * t], direction=[(x1 - x0) / chord, (z1 - z0) / chord],
+                    arc_m=arc, basis="lap_distance")
 
     def point_sectors(self, distances=None, boundaries=None):
         boundaries = boundaries if boundaries is not None else self.sector_boundaries()
@@ -364,7 +392,7 @@ def public_geometry(model, learner=None):
     """Compact read-only representation. Closed polylines are explicit; partials never carry a closing edge."""
     if model is None:
         return dict(state="unknown", complete=False, closed=False, progress=None, points=[], point_sectors=None,
-                    sector_boundaries_m=None, sector_markers=None, length_m=None, source=None)
+                    sector_boundaries_m=None, sector_markers=None, start_finish_marker=None, length_m=None, source=None)
     complete = model.complete
     points = model.points if complete else (learner.points if learner and learner.active else [])
     distances = model.distances if complete else (learner.distances if learner and learner.active else [])
@@ -374,7 +402,8 @@ def public_geometry(model, learner=None):
                 points=[list(p) for p in points], length_m=model.length,
                 point_sectors=model.point_sectors(distances, boundaries) if points else None,
                 sector_boundaries_m=boundaries,
-                sector_markers=model.boundary_markers(boundaries) if complete else None, source=model.source if complete else None)
+                sector_markers=model.boundary_markers(boundaries) if complete else None,
+                start_finish_marker=model.start_finish_marker() if complete else None, source=model.source if complete else None)
 
 
 # --- runtime glue (per agent state dict; bounded; persistence lives in track_repo) --------------------------

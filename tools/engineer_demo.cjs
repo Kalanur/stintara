@@ -25,6 +25,11 @@ function sectorMarker(boundary, distance, turn) {
   const length = Math.hypot(x1 - x0, z1 - z0);
   return {boundary, point: [Number(x0.toFixed(1)), Number(z0.toFixed(1))], direction: [(x1 - x0) / length, (z1 - z0) / length]};
 }
+// Start/finish line as the server derives it from the closing arc (lap distance 0): synthetic point, unit direction, arc length.
+function startFinishMarker(turn) {
+  const marker = sectorMarker(1, 0, turn);
+  return {point: marker.point, direction: marker.direction, arc_m: 24.5, basis: 'lap_distance'};
+}
 function syntheticTrackMap(participants, trackScenario = 'green') {
   const learning = trackScenario === 'learning';
   const step = 25, distances = [];
@@ -46,7 +51,7 @@ function syntheticTrackMap(participants, trackScenario = 'green') {
     geometry: {state: 'complete', complete: true, closed: true, progress: null, length_m: TRACK_LENGTH, source: 'stored',
       points: distances.map(d => circuitPoint(d).map(v => Number(v.toFixed(1)))),
       point_sectors: distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3), sector_boundaries_m: [1000, 2000],
-      sector_markers: [sectorMarker(1, 1000, p => p), sectorMarker(2, 2000, p => p)]},
+      sector_markers: [sectorMarker(1, 1000, p => p), sectorMarker(2, 2000, p => p)], start_finish_marker: startFinishMarker(p => p)},
     vehicles: [], vehicles_age_s: null, vehicles_fresh: false, race_control: null, static_only: true};
   return {
     geometry: {state: learning ? 'learning' : 'complete', complete: !learning, closed: !learning,
@@ -54,7 +59,8 @@ function syntheticTrackMap(participants, trackScenario = 'green') {
       points: distances.map(d => turn(circuitPoint(d)).map(v => Number(v.toFixed(1)))),
       point_sectors: learning ? null : distances.map(d => d < 1000 ? 1 : d < 2000 ? 2 : 3),
       sector_boundaries_m: learning ? null : [1000, 2000],
-      sector_markers: learning ? null : [sectorMarker(1, 1000, turn), sectorMarker(2, 2000, turn)]},
+      sector_markers: learning ? null : [sectorMarker(1, 1000, turn), sectorMarker(2, 2000, turn)],
+      start_finish_marker: learning ? null : startFinishMarker(turn)},
     vehicles, vehicles_age_s: 0.2, vehicles_fresh: true,
     race_control: {phase: trackScenario === 'fcy' ? 'full_course_yellow' : 'green', sector_flags: flags,
       safety_car_active: trackScenario === 'fcy', player_sector: 2, diagnostics: {}, age_s: 0.2, fresh: true},
@@ -326,7 +332,9 @@ async function verifyViewports(channel) {
           const samples=Array.from({length:600},(_,i)=>{const q=path.getPointAtLength(total*i/600);return [q.x*ctm.a+ctm.e,q.y*ctm.d+ctm.f];});
           const ticks=[...document.querySelectorAll('.map-area .trk-sector')].map(e=>{const r=e.getBoundingClientRect(),cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;
             return {length:Math.hypot(r.width,r.height),offPath:Math.min(...samples.map(([x,y])=>Math.hypot(x-cx,y-cy)))};});
-          return {labels,dots,ticks,docW:document.documentElement.scrollWidth,docH:document.documentElement.scrollHeight,rows,
+          const sfEl=document.querySelector('.map-area .trk-sf');
+          const sf=sfEl?(()=>{const r=sfEl.getBoundingClientRect(),cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;return {count:document.querySelectorAll('.map-area .trk-sf').length,length:Math.hypot(r.width,r.height),offPath:Math.min(...samples.map(([x,y])=>Math.hypot(x-cx,y-cy))),...rectOf(sfEl)};})():null;
+          return {labels,dots,ticks,sf,docW:document.documentElement.scrollWidth,docH:document.documentElement.scrollHeight,rows,
             h2h:rect('#comparison-panel'),weather:rect('#weather-panel'),strategy:rect('.fuel-panel'),map:rect('.map-panel'),
             svg:{w:box.width,h:box.height},trackAspect:base.width/base.height,overlaps,
             settingsInside:settings?settings.top>=0&&settings.bottom<=innerHeight+1:null,
@@ -351,7 +359,12 @@ async function verifyViewports(channel) {
         // Trackmap V2: two sector ticks on the centerline; focus label first; no label hides a label or the focus dot.
         assert.equal(m.ticks.length,2,`${where}: two sector boundary ticks`);
         for (const tick of m.ticks) assert.ok(tick.offPath<4&&tick.length>6,`${where}: tick sits on the centerline (${tick.offPath.toFixed(1)}px off)`);
+        // Start/finish (#71): one line on the centerline, longer than a sector tick, labelled in the header, never under a label.
+        assert.ok(m.sf&&m.sf.count===1,`${where}: exactly one start/finish line`);
+        assert.ok(m.sf.offPath<4&&m.sf.length>m.ticks[0].length,`${where}: start/finish on the centerline and longer than a sector tick (${m.sf.offPath.toFixed(1)}px off)`);
+        assert.match(m.text,/Start\/Ziel \(aus Rundenabstand\)/);
         const overlap=(a,b)=>a.l<b.r&&b.l<a.r&&a.t<b.b&&b.t<a.b;
+        assert.ok(m.labels.every(l=>!overlap(l,m.sf)),`${where}: no label covers the start/finish line`);
         if (scenario==='stored') assert.equal(m.labels.length,0,`${where}: stored track has no vehicle labels`);
         else {
           const focusLabel=m.labels.find(l=>l.role==='focus');
