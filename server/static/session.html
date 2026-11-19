@@ -87,6 +87,8 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .trk-car.pit{fill:none;stroke:var(--pit);stroke-width:1.5;opacity:.7}
 .trk-car.stale{fill:none;stroke:var(--muted);opacity:.6}
 .trk-focus{fill:var(--focus);stroke:#fff;stroke-width:2;vector-effect:non-scaling-stroke}
+.trk-sf{stroke:#ffffff;stroke-width:5;stroke-linecap:butt;vector-effect:non-scaling-stroke}
+.trk-sf-dash{stroke:#0b1017;stroke-width:5;stroke-dasharray:3 3;stroke-linecap:butt;vector-effect:non-scaling-stroke;pointer-events:none}
 .trk-sector{stroke:#d7e4f0;stroke-width:2;stroke-linecap:round;vector-effect:non-scaling-stroke;opacity:.85}
 .trk-car.rival{fill:var(--info)}
 .trk-rival-ring{fill:none;stroke:var(--info);stroke-width:1.5;vector-effect:non-scaling-stroke;opacity:.7}
@@ -650,7 +652,7 @@ function measureTrackMap() {
 const rectsOverlap = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
 // Greedy, priority-ordered label placement in map units; an item that cannot be placed without covering another
 // label or any vehicle dot is dropped (the focus is always first and is placed at its least-overlapping spot).
-function layoutTrackLabels(items, em, dots) {
+function layoutTrackLabels(items, em, dots, obstacles = []) {
   const placed = [], boxes = [];
   const dotBoxes = dots.map(d => ({ x0: d.at[0] - d.r, x1: d.at[0] + d.r, y0: d.at[1] - d.r, y1: d.at[1] + d.r, key: d.key }));
   for (const [index, item] of items.entries()) {
@@ -663,7 +665,8 @@ function layoutTrackLabels(items, em, dots) {
                tx: dx > 0 ? x0 : dx < 0 ? x0 + width : x0 + width / 2, ty: y0 + height * 0.78 };
     });
     const hits = box => boxes.filter(other => rectsOverlap(box, other)).length
-      + dotBoxes.filter(dot => dot.key !== item.key && rectsOverlap(box, dot)).length;
+      + dotBoxes.filter(dot => dot.key !== item.key && rectsOverlap(box, dot)).length
+      + obstacles.filter(obstacle => rectsOverlap(box, obstacle)).length;   // start/finish line and sector ticks stay readable
     // Fewest collisions first; among equals the spot farthest from any other vehicle keeps the label unambiguous.
     const clearance = box => Math.min(...dots.filter(d => d.key !== item.key).map(d => Math.hypot((box.x0 + box.x1) / 2 - d.at[0], (box.y0 + box.y1) / 2 - d.at[1])), Infinity);
     const best = candidates.map(box => ({ box, hits: hits(box), clear: clearance(box) }))
@@ -682,6 +685,15 @@ function sectorMarkers(geometry) {
     && m.point.length === 2 && m.direction.length === 2 && m.point.every(v => mapNumber(v) !== null)
     && m.direction.every(v => mapNumber(v) !== null) && Math.abs(Math.hypot(m.direction[0], m.direction[1]) - 1) < 0.25);
   return valid ? markers : [];
+}
+const START_FINISH_TITLE = 'Start/Ziel (aus Rundenabstand)';
+// The server derives the line from the closed geometry and lap distance 0; nothing is drawn for anything else.
+function startFinishMarker(geometry) {
+  const m = geometry?.complete === true && geometry?.closed === true ? geometry.start_finish_marker : null;
+  const ok = m && m.basis === 'lap_distance' && Array.isArray(m.point) && Array.isArray(m.direction) && m.point.length === 2 && m.direction.length === 2
+    && m.point.every(v => mapNumber(v) !== null) && m.direction.every(v => mapNumber(v) !== null)
+    && Math.abs(Math.hypot(m.direction[0], m.direction[1]) - 1) < 0.25 && mapNumber(m.arc_m) !== null && m.arc_m > 0;
+  return ok ? m : null;
 }
 // Geometry (outline, flags, sector ticks) and the moving vehicle layer are separate parts so a vehicles-only refresh
 // (#55) can replace just the layer. Returns null when there is nothing to draw.
@@ -730,6 +742,24 @@ function trackMapParts(track, focusId, mode = 'auto', roles = null, size = TRACK
     const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len, half = span * 0.024;
     ticks += `<line class="trk-sector" x1="${fmt(a[0] - nx * half)}" y1="${fmt(a[1] - ny * half)}" x2="${fmt(a[0] + nx * half)}" y2="${fmt(a[1] + ny * half)}"><title>Sector boundary S${m.boundary} | S${m.boundary + 1}</title></line>`;
   }
+  // Start/finish: a longer double stroke (solid light, dashed dark on top) across the centerline, clearly different from the single sector ticks.
+  const obstacles = [];
+  const crossing = (m, half) => {
+    const a = project(m.point), b = project([m.point[0] + m.direction[0] * 10, m.point[1] + m.direction[1] * 10]);
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (!(len > 0)) return null;
+    const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len;
+    return { x1: a[0] - nx * half, y1: a[1] - ny * half, x2: a[0] + nx * half, y2: a[1] + ny * half };
+  };
+  const boxOf = (c, margin) => ({ x0: Math.min(c.x1, c.x2) - margin, x1: Math.max(c.x1, c.x2) + margin, y0: Math.min(c.y1, c.y2) - margin, y1: Math.max(c.y1, c.y2) + margin });
+  let finishLine = '';
+  const sf = startFinishMarker(geometry), line = sf ? crossing(sf, span * 0.034) : null;
+  if (line) {
+    const attrs = `x1="${fmt(line.x1)}" y1="${fmt(line.y1)}" x2="${fmt(line.x2)}" y2="${fmt(line.y2)}"`;
+    finishLine = `<line class="trk-sf" ${attrs}><title>${START_FINISH_TITLE}</title></line><line class="trk-sf-dash" ${attrs}/>`;
+    obstacles.push(boxOf(line, span * 0.01));
+  }
+  for (const m of sectorMarkers(geometry)) { const c = crossing(m, span * 0.024); if (c) obstacles.push(boxOf(c, span * 0.008)); }
   const radius = span / 70;
   const fresh = track?.vehicles_fresh === true;
   const ordered = screenVehicles.slice().sort((a, b) => (a.v.participant_id === focusId) - (b.v.participant_id === focusId));
@@ -753,11 +783,11 @@ function trackMapParts(track, focusId, mode = 'auto', roles = null, size = TRACK
   const order = { focus: 0, ahead: 1, behind: 2 };
   const items = labelled.sort((a, b) => order[a.role] - order[b.role]);
   const dots = ordered.map(({ at }, index) => ({ key: index, at, r: radius * 1.2 }));
-  const labels = layoutTrackLabels(items, em, dots).map(l =>
+  const labels = layoutTrackLabels(items, em, dots, obstacles).map(l =>
     `<line class="trk-leader ${l.role}" x1="${fmt(l.at[0])}" y1="${fmt(l.at[1])}" x2="${fmt(l.lx)}" y2="${fmt(l.ly)}"/>`
     + `<text class="trk-label ${l.role}" x="${fmt(l.tx)}" y="${fmt(l.ty)}" text-anchor="${l.anchor}" font-size="${fmt(em)}">${esc(l.text)}</text>`).join('');
   return { viewBox: `${fmt(minX - pad)} ${fmt(minY - pad)} ${fmt(maxX - minX + 2 * pad)} ${fmt(maxY - minY + 2 * pad)}`,
-           geometry: base + overlay + ticks, vehicles: cars + labels };
+           geometry: base + overlay + ticks + finishLine, vehicles: cars + labels, startFinish: Boolean(line) };
 }
 const TRACK_MAP_PLACEHOLDER = '<div class="placeholder"><span>Waiting for position data</span></div>';
 function trackMapSvgOf(parts) {
@@ -803,10 +833,11 @@ function trackMapPanel(d, focusId, mode) {
   const storedBadges = storedOnly ? '<span class="rc-badge rc-muted" title="Persisted track geometry">STORED TRACK</span><span class="rc-badge rc-muted" title="No live observation of this session">POSITIONS UNAVAILABLE</span>' : '';
   const flagOnly = !storedOnly && rc && rc.fresh && (rc.sector_flags || []).includes('local_yellow') && geometry && !geometry.point_sectors
     ? '<p class="map-note">Yellow sector shown by flag only · sector layer not yet known</p>' : '';
+  const finishNote = startFinishMarker(geometry) ? `<span class="rc-badge rc-muted" title="Derived from the closed geometry and lap distance 0; the position is approximate">${START_FINISH_TITLE}</span>` : '';
   const toggle = geometry?.complete === true && (geometry.points || []).length > 1
     ? `<button type="button" id="orientation-toggle" class="orient-toggle" title="Presentation only; stored coordinates are never rotated. Click to switch to ${orientation === 'auto' ? 'ORIGINAL' : 'AUTO'}.">Orientation: ${orientation === 'auto' ? 'AUTO' : 'ORIGINAL'}</button>` : '';
   return `<section class="panel map-panel" aria-label="Track map and race control"><div class="map-head"><h2>Track Map</h2>
-    ${learning ? `<span class="rc-badge rc-muted">${esc(learning)}</span>` : ''}${storedBadges}${stale}${toggle}
+    ${learning ? `<span class="rc-badge rc-muted">${esc(learning)}</span>` : ''}${storedBadges}${stale}${finishNote}${toggle}
     <div class="rc-badges">${storedOnly ? '' : raceControlBadges(rc)}</div></div>
     <div class="map-area">${trackMapSvg(track, focusId, orientation, trackRoles(d.participants || [], focusId), trackMapSize)}</div>${flagOnly}</section>`;
 }

@@ -2236,3 +2236,67 @@ test('driver live shows the race prep summary and keeps rendering when the plan 
     else assert.doesNotMatch(root.innerHTML, /Race prep/);
   }
 });
+
+// --- Start/finish marker (#71): drawn only from a valid server marker; AUTO/ORIGINAL, stored sessions, label clearance ---
+const sfLineOf = html => { const m = html.match(/<line class="trk-sf" x1="(-?[\d.]+)" y1="(-?[\d.]+)" x2="(-?[\d.]+)" y2="(-?[\d.]+)"/);
+  return m ? {centre: [(+m[1] + +m[3]) / 2, (+m[2] + +m[4]) / 2], from: [+m[1], +m[2]], to: [+m[3], +m[4]]} : null; };
+const sfMarker = ring => ({point: ring[0], direction: [0, 1], arc_m: 24.5, basis: 'lap_distance'});
+function sfPanel(field, over = {}, mode = 'original', extra = {}) {
+  const track = v2Track(field, {...extra});
+  track.geometry = {...track.geometry, start_finish_marker: sfMarker(ellipse(250, 600, 0, 40)), ...over};
+  return helpersWith().trackMapPanel({track_map: track, participants: field, session: {track_name: 'T'}}, field[1].id, mode);
+}
+
+test('trackmap #71: the start/finish line is labelled, sits at the server point and follows AUTO/ORIGINAL', () => {
+  const field = v2Field([1, 2, 3]), ring = ellipse(250, 600, 0, 40);
+  const original = sfPanel(field, {}, 'original');
+  assert.match(original, /Start\/Ziel \(aus Rundenabstand\)/);
+  assert.match(original, /class="trk-sf-dash"/);
+  const line = sfLineOf(original);
+  assert.deepEqual(line.centre.map(v => +v.toFixed(1)), [+ring[0][0].toFixed(1), +(-ring[0][1]).toFixed(1)]);   // ORIGINAL: identity (x, -z)
+  const auto = sfPanel(field, {}, 'auto'), autoLine = sfLineOf(auto), base = baseVertices(auto);
+  assert.ok(base.some(b => Math.hypot(b[0] - autoLine.centre[0], b[1] - autoLine.centre[1]) < 40), 'AUTO line stays on the rotated centerline');
+  // The line is longer than a sector tick: it is recognisably not one.
+  const tick = (html) => { const m = html.match(/<line class="trk-sector" x1="(-?[\d.]+)" y1="(-?[\d.]+)" x2="(-?[\d.]+)" y2="(-?[\d.]+)"/); return Math.hypot(+m[1] - +m[3], +m[2] - +m[4]); };
+  assert.ok(Math.hypot(line.from[0] - line.to[0], line.from[1] - line.to[1]) > tick(original));
+});
+
+test('trackmap #71: missing, invalid, learning or non-lap-distance markers draw no start/finish line', () => {
+  const field = v2Field([1, 2, 3]), ring = ellipse(250, 600, 0, 40), good = sfMarker(ring);
+  const drawn = over => /trk-sf"/.test(sfPanel(field, over));
+  assert.equal(drawn({}), true);
+  for (const bad of [null, undefined, [], 'x', {...good, basis: 'guess'}, {...good, basis: undefined}, {...good, point: [NaN, 0]}, {...good, point: [1]},
+    {...good, direction: [0, 0]}, {...good, direction: [5, 5]}, {...good, arc_m: 0}, {...good, arc_m: -3}, {...good, arc_m: null}, {...good, arc_m: Infinity}])
+    assert.equal(drawn({start_finish_marker: bad}), false, JSON.stringify(bad));
+  assert.equal(drawn({complete: false, closed: false, state: 'learning'}), false);
+  assert.equal(drawn({closed: false}), false);
+  const none = sfPanel(field, {start_finish_marker: null});
+  assert.doesNotMatch(none, /Rundenabstand/);       // no label either
+});
+
+test('trackmap #71: a stored (static-only) session draws the line without vehicles; a new session carries nothing over', () => {
+  const field = v2Field([1, 2, 3]);
+  const stored = sfPanel(field, {}, 'original', {static_only: true, vehicles: [], vehicles_fresh: false, vehicles_age_s: null});
+  assert.match(stored, /trk-sf"/); assert.match(stored, /STORED TRACK/); assert.equal(circlesOf(stored).length, 0);
+  const next = helpersWith().trackMapPanel({track_map: {geometry: {state: 'unknown', complete: false, closed: false, points: []}, vehicles: [], vehicles_fresh: false},
+    participants: v2Field([1, 2]), session: {track_name: 'Other'}}, syntheticId(1), 'auto');
+  assert.doesNotMatch(next, /trk-sf|Rundenabstand/);
+});
+
+test('trackmap #71: labels keep clear of the start/finish line and the sector ticks', () => {
+  const h = helpersWith();
+  const obstacle = {x0: 101, x1: 220, y0: 40, y1: 160};   // everything right of the focus is taken
+  const items = [{key: 0, role: 'focus', at: [100, 100], r: 8, text: 'P12'}];
+  const placed = h.layoutTrackLabels(items, 14, [{key: 0, at: [100, 100], r: 6}], [obstacle])[0];
+  assert.ok(!(placed.x0 < obstacle.x1 && obstacle.x0 < placed.x1 && placed.y0 < obstacle.y1 && obstacle.y0 < placed.y1), 'label does not cover the line');
+  // With the real panel: neither the focus label box nor the line centre is covered when vehicles sit on the line.
+  const field = v2Field([1, 2, 3]), ring = ellipse(250, 600, 0, 40);
+  const html = sfPanel(field, {}, 'original', {vehicles: field.map((p, i) => ({participant_id: p.id, x: ring[i][0], z: ring[i][1], in_pits: false, position: p.position, name: p.display_name}))});
+  const line = sfLineOf(html), texts = [...html.matchAll(/<text class="trk-label (\w+)" x="(-?[\d.]+)" y="(-?[\d.]+)" text-anchor="(\w+)" font-size="([\d.]+)">([^<]*)</g)];
+  assert.ok(texts.length >= 1);
+  for (const [, , x, y, anchor, size, label] of texts) {
+    const em = +size, width = (label.length * 0.6 + 0.6) * em, x0 = anchor === 'start' ? +x : anchor === 'end' ? +x - width : +x - width / 2;
+    const inside = line.centre[0] >= x0 && line.centre[0] <= x0 + width && line.centre[1] >= +y - em && line.centre[1] <= +y + 0.3 * em;
+    assert.equal(inside, false, `label ${label} covers the start/finish line`);
+  }
+});

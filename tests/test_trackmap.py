@@ -10,9 +10,11 @@ from server.app.trackmap import (
     TrackModel,
     TrackStore,
     attach_track,
+    geometry_record,
     normalize_lap_distance,
     public_geometry,
     track_key,
+    validate_record,
 )
 from tests.track_fixtures import LENGTH, circuit, lap_samples
 
@@ -207,3 +209,59 @@ def test_sector_markers_are_omitted_for_unknown_unplaceable_or_incomplete_geomet
     observe(SectorTracker(contradictory), 2, drift=0.0)
     contradictory.sector_observations[1] = [100.0, 900.0]
     assert public_geometry(contradictory)["sector_markers"] is None
+
+
+# --- Start/finish marker (#71): derived from closed geometry + lap distance only -----------------------------
+
+def test_start_finish_marker_lies_on_the_line_and_points_in_the_direction_of_travel():
+    model, _, _ = learn(lap_samples(start=2.0, end=LENGTH + 40))
+    marker = public_geometry(model)["start_finish_marker"]
+    assert marker["basis"] == "lap_distance"
+    assert math.dist(marker["point"], circuit(0.0)) < 12                  # lap distance 0, within the closing gap
+    assert marker["direction"] == pytest.approx([1.0, 0.0], abs=0.15)     # the bottom straight is driven towards +x
+    assert math.hypot(*marker["direction"]) == pytest.approx(1.0)
+    assert 0 < marker["arc_m"] <= 80                                      # accuracy bound: the gap it was interpolated across
+
+
+def test_start_finish_marker_interpolates_by_lap_distance_on_the_closing_arc():
+    model = TrackModel(1000.0)
+    model.points = [[10.0, 0.0], [500.0, 300.0], [-10.0, 0.0]]
+    model.distances = [10.0, 500.0, 990.0]                                 # arc 20 m: 10 m before the line, 10 m after
+    marker = model.start_finish_marker()
+    assert marker["arc_m"] == pytest.approx(20.0)
+    assert marker["point"] == pytest.approx([0.0, 0.0])                    # halfway: the line is 10 m after the last point
+    assert marker["direction"] == pytest.approx([1.0, 0.0])                # chord last -> first, the direction of travel
+    model.distances = [10.0, 500.0, 970.0]                                 # arc 40 m: the line is 30 m after the last point
+    assert model.start_finish_marker()["point"] == pytest.approx([-10.0 + 20.0 * 0.75, 0.0])
+
+
+def test_start_finish_marker_is_never_guessed():
+    assert TrackModel(LENGTH).start_finish_marker() is None                # nothing learned
+    assert public_geometry(None)["start_finish_marker"] is None
+    learning = TrackModel(LENGTH)
+    learner = CenterlineLearner(learning)
+    for sample in lap_samples(start=2.0, end=800):
+        learner.add(*sample)
+    assert public_geometry(learning, learner)["start_finish_marker"] is None   # partial outline
+    def with_geometry(points, distances, length=1000.0):
+        model = TrackModel(length)
+        model.points, model.distances = points, distances
+        return model.start_finish_marker()
+    assert with_geometry([[0.0, 0.0]], [5.0]) is None                              # single point
+    assert with_geometry([[5.0, 5.0], [50.0, 0.0], [5.0, 5.0]], [10.0, 50.0, 990.0]) is None   # degenerate: zero chord
+    assert with_geometry([[0.0, 0.0], [50.0, 0.0], [0.4, 0.0]], [10.0, 50.0, 990.0]) is None    # chord below 1 m: no direction
+    assert with_geometry([[10.0, 0.0], [50.0, 0.0], [12.0, 0.0]], [10.0, 50.0, 990.0]) is None  # chord far below the arc
+    assert with_geometry([[0.0, 0.0], [50.0, 0.0], [900.0, 0.0]], [10.0, 50.0, 990.0]) is None  # chord far above the arc
+    assert with_geometry([[10.0, 0.0], [50.0, 0.0], [20.0, 0.0]], [300.0, 400.0, 500.0]) is None  # arc is half the track
+    assert with_geometry([[10.0, 0.0], [50.0, 0.0], [20.0, 0.0]], [0.0, 50.0, 1000.0]) is None    # last point at/after the length
+    assert with_geometry([[10.0, 0.0], [50.0, math.nan], [20.0, 0.0]], [10.0, 50.0, 990.0]) is not None  # interior NaN is not used
+    assert with_geometry([[math.nan, 0.0], [50.0, 0.0], [20.0, 0.0]], [10.0, 50.0, 990.0]) is None
+
+
+def test_start_finish_marker_of_stored_geometry_needs_no_persistence_and_survives_a_reload():
+    model, _, _ = learn(lap_samples(start=2.0, end=LENGTH + 40))
+    record = geometry_record(model)
+    assert "start_finish_marker" not in record                              # derived, never stored
+    restored = TrackModel(record["length_m"])
+    restored.adopt(validate_record(record))
+    assert restored.start_finish_marker() == model.start_finish_marker()
