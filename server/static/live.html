@@ -193,6 +193,7 @@ function render(d) {
   lastHtml = html;
   const scroll = document.querySelector('#standings-scroll');
   const keep = {left: scroll?.scrollLeft || 0, top: scroll?.scrollTop || 0};
+  const sideTop = document.querySelector('.side-col')?.scrollTop || 0;   // short viewports scroll this column
   const activeId = PRESERVED.includes(document.activeElement?.id) ? document.activeElement.id
     : document.activeElement?.parentElement?.id === 'weather-forecast' ? 'weather-summary' : null;
   const forecastOpen = document.querySelector('#weather-forecast')?.open || false;
@@ -202,6 +203,8 @@ function render(d) {
   if (forecast) forecast.open = forecastOpen;
   const next = document.querySelector('#standings-scroll');
   if (next) { next.scrollLeft = keep.left; next.scrollTop = keep.top; }
+  const side = document.querySelector('.side-col');
+  if (side) side.scrollTop = sideTop;
   const target = activeId === 'weather-summary' ? document.querySelector('#weather-forecast > summary')
     : activeId ? document.querySelector('#' + activeId) : null;
   target?.focus?.({preventScroll:true});

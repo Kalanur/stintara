@@ -137,6 +137,13 @@ async function verifyDriverLive(channel) {
       console.log(JSON.stringify({where,docH:m.docH,rows:m.rows,sideHidden:m.sideHidden}));
     }
 
+    // The side column scrolls on Chromebook heights: its offset survives the 500 ms live rebuild (Codex review of #79).
+    await page.setViewportSize({width:1366,height:768}); await page.waitForTimeout(400);
+    await page.evaluate(() => { window.previousSide = document.querySelector('.side-col'); const c = window.previousSide; c.scrollTop = c.scrollHeight; });
+    const sideTop = await page.evaluate(() => document.querySelector('.side-col').scrollTop);
+    assert.ok(sideTop > 0,'1366x768: side column scrolls (fixture too short to prove preservation)');
+    await page.waitForFunction(() => !window.previousSide.isConnected,null,{timeout:4000});
+    assert.equal(await page.evaluate(() => document.querySelector('.side-col').scrollTop),sideTop,'side column scroll position kept across the refresh');
     // Small touch displays (assumed test sizes, not measured devices): the page scrolls; Race prep stays reachable and unclipped.
     for (const [width,height] of [[960,600],[1024,640],[600,960]]) {
       await page.setViewportSize({width,height}); await page.waitForTimeout(500);
