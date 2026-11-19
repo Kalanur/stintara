@@ -97,6 +97,7 @@ class IntervalHistory:
         self.key, self.clock, self.length = key, None, None
         self.tracks = {}
         self.snapshot = {}                     # vehicle id -> content row of the newest accepted snapshot
+        self.last_pairs = {}                   # pairs of the newest result at self.clock (what a consumer may still hold)
         self.fingerprint = None                # content of that snapshot, to tell repeats from changes
         # vehicle id -> clock of its newest in-pit (or unknown-pit) sample; survives history clears
         self.pit_clock, self.pit_all, self.pending_ids, self.pending_all = pits
@@ -106,7 +107,7 @@ class IntervalHistory:
     def _invalidate(self):
         """Drop every measured history and remembered content (the observation continues, its pit memory too)."""
         self.tracks.clear()
-        self.snapshot, self.fingerprint = {}, None
+        self.snapshot, self.fingerprint, self.last_pairs = {}, None, {}
 
     def sample_count(self):
         return sum(len(t) for t in self.tracks.values())
@@ -151,8 +152,9 @@ class IntervalHistory:
                 self._reset(key)
             elif clock < self.clock:
                 self.stats["ignored_older"] += 1
-                self._register_pits(clock, vehicles, flush=False)     # an ignored packet may still show a pit stop
-                return None
+                # an ignored packet may still show a pit stop: that withdraws the numbers of the current result
+                pairs = self._apply_new_pits(self._register_pits(clock, vehicles, flush=False))
+                return None if pairs is None else self._current(session_id, epoch, pairs)
             elif clock == self.clock:
                 return self._repeat(result, clock, vehicles, track_length)
             elif clock - self.clock > MAX_PACKET_GAP_SECONDS:
@@ -239,22 +241,63 @@ class IntervalHistory:
         return flag is True or type(flag) is not bool
 
     def _flush_pending(self, clock):
+        changed = set()
         for vid in self.pending_ids:
-            self.pit_clock[vid] = max(self.pit_clock.get(vid, -math.inf), clock)
+            if clock > self.pit_clock.get(vid, -math.inf):
+                self.pit_clock[vid] = clock
+                changed.add(vid)
+        unattributed = self.pending_all and clock > self.pit_all
         if self.pending_all:
             self.pit_all = max(self.pit_all, clock)
         self.pending_ids, self.pending_all = set(), False
+        return None if unattributed else changed
 
     def _register_pits(self, clock, vehicles, flush=True):
-        """Record pit activity of every row (duplicates and rows without a usable distance included)."""
+        """Record pit activity of every row (duplicates and rows without a usable distance included).
+
+        Returns the pit knowledge that is new: a set of vehicle ids, or None when a row without a usable id (or
+        the whole field) is affected. An empty set means nothing changed.
+        """
+        changed = set()
         if flush:
-            self._flush_pending(clock)
+            changed = self._flush_pending(clock)
+            if changed is None:
+                changed = set()
+                unattributed = True
+            else:
+                unattributed = False
+        else:
+            unattributed = False
         for v in vehicles:
             if isinstance(v, dict) and self._pit_suspect(v):
                 if count(v.get("id")):
-                    self.pit_clock[v["id"]] = max(self.pit_clock.get(v["id"], -math.inf), clock)
-                else:
-                    self.pit_all = max(self.pit_all, clock)       # a row we cannot attribute to a vehicle
+                    if clock > self.pit_clock.get(v["id"], -math.inf):
+                        self.pit_clock[v["id"]] = clock
+                        changed.add(v["id"])
+                elif clock > self.pit_all:
+                    self.pit_all = clock                      # a row we cannot attribute to a vehicle
+                    unattributed = True
+        return None if unattributed else changed
+
+    def _apply_new_pits(self, changed):
+        """New pit knowledge may disallow what was already measured: history and the exposed result go with it.
+
+        Every path that learns about pit activity without producing a fresh result (older packet, identical repeat)
+        ends here. Returns None when nothing is new, else a result-pairs dict: same pairs and clock as before, but
+        every number withdrawn (reason pit). Histories of the affected vehicles (all of them for unattributable
+        activity) must be rebuilt from new samples; the 60 s quarantine itself is untouched.
+        """
+        if changed is not None and not changed:
+            return None
+        if changed is None:
+            self.tracks.clear()
+        else:
+            for vid in changed:
+                self.tracks.pop(vid, None)
+        self.fingerprint = None                                # nothing remembered may vouch for the old number
+        self.stats["pit_invalidated"] += 1
+        self.last_pairs = {b: dict(e, value=None, reason=PIT) for b, e in self.last_pairs.items()}
+        return self.last_pairs
 
     def _defer_pits(self, vehicles):
         """Pit activity in a packet without a usable clock: remembered, dated at the next usable clock."""
@@ -299,7 +342,8 @@ class IntervalHistory:
             return result()
         valid, duplicated = self._index(vehicles)
         # Safety first: pit flags of every row (duplicates included) are recorded before anything can return early.
-        self._register_pits(clock, vehicles)
+        # New pit knowledge also drops the remembered content, so this can no longer be taken for an identical repeat.
+        self._apply_new_pits(self._register_pits(clock, vehicles))
         length = track_length if finite(track_length) and track_length > 0 else None
         if (length is None) != (self.length is None) or (
                 length is not None and abs(length - self.length) > LENGTH_TOLERANCE_METERS):
@@ -327,6 +371,14 @@ class IntervalHistory:
         self._remember(valid, duplicated, vehicles)
         return result(self._pairs(valid, duplicated, {}, clock, self._claims(vehicles), force=CONFLICT))
 
+    def pit_blocked(self, a, b, clock):
+        return clock - self.pit_all <= PIT_GUARD_SECONDS or any(
+            clock - self.pit_clock.get(x, -math.inf) <= PIT_GUARD_SECONDS for x in (a, b))
+
+    def _current(self, session_id, epoch, pairs):
+        """Result at the newest accepted clock (never the clock of an older packet)."""
+        return dict(session_id=session_id, epoch=epoch, clock=self.clock, pairs=pairs)
+
     def _pairs(self, vehicles, duplicated, usable, clock, claims, force=None):
         by_position = {}
         for vid, v in vehicles.items():
@@ -349,6 +401,7 @@ class IntervalHistory:
                          deficit=deficit)
             pairs[b] = entry
             entry["reason"] = force or self._measure(entry, a, b, usable, duplicated, vb, va, clock)
+        self.last_pairs = pairs
         return pairs
 
     def _measure(self, entry, a, b, usable, duplicated, vb, va, clock):
@@ -408,4 +461,9 @@ def current_pairs(state, session_id, now):
             or not finite(result.get("clock")) or result["clock"] != scoring.get("session_time")
             or not 0 <= now - state.get("last_scoring_at", -1e9) <= MAX_AGE_SECONDS):
         return {}
-    return result["pairs"]
+    history = state.get("interval_history")
+    if history is None:
+        return result["pairs"]
+    # Last line of defence: a number is never exposed that the pit memory of the observation disallows.
+    return {b: e if e["value"] is None or not history.pit_blocked(e["ahead_id"], b, result["clock"])
+            else dict(e, value=None, reason=PIT) for b, e in result["pairs"].items()}

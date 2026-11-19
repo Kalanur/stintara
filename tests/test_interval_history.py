@@ -892,7 +892,8 @@ def test_missing_session_or_epoch_does_not_erase_the_quarantine_of_the_same_obse
 
 def test_pit_flag_in_an_ignored_older_packet_is_still_recorded():
     h, _ = built()
-    assert step(h, 9.0, [car(1, 1, 100 + 60 * 9.0), dict(car(2, 2, 60 * 9.0), in_pits=True)]) is None
+    r = step(h, 9.0, [car(1, 1, 100 + 60 * 9.0), dict(car(2, 2, 60 * 9.0), in_pits=True)])
+    assert r["clock"] == 10.0 and entry(r)["value"] is None       # round 4: the news withdraws the cached number
     assert h.stats["ignored_older"] == 1 and h.pit_clock[2] == 9.0
     step(h, 10.2, frame_at(10.2))
     assert h.pit_clock[2] == 9.0                       # never lowered or lost by later packets
@@ -995,3 +996,82 @@ def test_position_claims_are_also_checked_on_a_repeated_clock():
     h, _ = tri_history()
     r = step(h, 10.0, tri(10.0, [car(3, 2, 5), car(3, 5, 6)]))
     assert r is not None and all(p["value"] is None for p in r["pairs"].values())
+
+
+# ---- #77 round 4: pit knowledge learned from an older packet or a repeat withdraws what was measured -----------
+
+def older_pit_packet(h, t=9.0, ident=2, **kw):
+    return step(h, t, [car(1, 1, 100 + 60 * t), dict(car(2, 2, 60 * t), in_pits=(ident == 2)),
+                       *([car(3, 3, 60 * t - 50, pit=True)] if ident == 3 else [])], **kw)
+
+
+def test_older_packet_with_pit_activity_withdraws_the_number_and_a_repeat_cannot_restore_it():
+    h, last = built()
+    assert entry(last)["value"] == pytest.approx(100 / 60, abs=1e-6)
+    r = older_pit_packet(h)
+    assert r is not None and r["clock"] == 10.0                     # the clock never goes back
+    assert entry(r)["value"] is None and entry(r)["reason"] == ih.PIT
+    assert h.pit_clock[2] == 9.0 and h.clock == 10.0
+    for _ in range(2):                                              # replaying the original newest packet
+        again = step(h, 10.0, frame_at(10.0))
+        assert again is None or entry(again)["value"] is None
+    assert entry(step(h, 10.2, frame_at(10.2)))["value"] is None   # still inside the quarantine
+
+
+def test_state_level_older_pit_packet_then_identical_repeat_never_exposes_the_old_number():
+    sid = uuid7()
+    state = observed(sid, clock_end=10)
+    scoring = dict(state["scoring"])
+    assert current_pairs(state, sid, 100.0)[2]["value"] is not None
+    for payload in (dict(scoring, session_time=9.0, vehicles=frame_at(9.0, in_pits=True)), scoring, scoring):
+        observe(state, payload, epoch="e1")                         # state["scoring"] stays the t=10 packet
+        assert current_pairs(state, sid, 100.0)[2]["value"] is None
+    assert state["interval_pairs"]["clock"] == 10.0
+
+
+def test_current_pairs_refuses_a_number_the_pit_memory_disallows():
+    sid = uuid7()
+    state = observed(sid, clock_end=10)
+    state["interval_history"].pit_clock[2] = 9.0                    # knowledge that bypassed every update path
+    e = current_pairs(state, sid, 100.0)[2]
+    assert e["value"] is None and e["reason"] == ih.PIT
+
+
+def test_late_pit_reports_accumulate_and_never_shorten_the_quarantine():
+    h, _ = built()
+    older_pit_packet(h, 9.0)
+    older_pit_packet(h, 9.5)
+    assert h.pit_clock[2] == 9.5
+    older_pit_packet(h, 9.2)
+    assert h.pit_clock[2] == 9.5
+    t = 10.2
+    seen = after_pit(h, t, 69.4)
+    assert all(e["value"] is None for e in seen.values())           # quarantine until 9.5 + 60
+
+
+def test_late_pit_of_the_car_ahead_and_of_an_unattributable_row():
+    h, _ = built()
+    r = step(h, 9.0, [dict(car(1, 1, 100 + 60 * 9.0), in_pits=True), car(2, 2, 60 * 9.0)])
+    assert entry(r)["value"] is None and h.pit_clock[1] == 9.0
+    h, _ = built()
+    r = step(h, 9.0, frame_at(9.0) + [dict(car(0, 5, 0), id=None, in_pits=True)])
+    assert entry(r)["value"] is None and h.pit_all == 9.0 and not h.tracks
+
+
+def test_older_packet_without_new_pit_knowledge_is_still_ignored_cheaply():
+    h, last = built()
+    assert step(h, 9.0, frame_at(9.0)) is None
+    assert step(h, 10.0, frame_at(10.0)) is None and h.stats["ignored_identical"] == 1
+    assert h.stats["pit_invalidated"] == 0 and entry(last)["value"] is not None
+    older_pit_packet(h, 9.0)
+    assert older_pit_packet(h, 9.0) is None                         # the same news twice changes nothing more
+
+
+def test_quarantine_ends_and_new_contiguous_history_recovers_the_value():
+    h, _ = built()
+    older_pit_packet(h, 9.0)
+    seen = after_pit(h, 10.2, 70.8)
+    assert all(e["value"] is None for t, e in seen.items() if t <= 69.0)
+    assert seen[69.2]["value"] is None or seen[69.2]["value"] == pytest.approx(100 / 60, abs=1e-6)
+    assert entry_ok(seen[70.8])
+
