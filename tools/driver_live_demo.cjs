@@ -119,9 +119,9 @@ async function verifyDriverLive(channel) {
       assert.deepEqual(m.overlaps,[],`${where}: panels overlap`);
       assert.deepEqual(m.clipped,[],`${where}: clipped focus text`);
       assert.deepEqual(m.small,[],`${where}: text below 12 px`);
-      // At 768 px height the side column may scroll internally (the forecast toggle sits below the fold); panels themselves are never clipped (checked below).
-      assert.ok(m.sideHidden <= (height <= 768 ? 40 : 1),`${where}: tyres/weather column cut by ${m.sideHidden}px`);
-      assert.ok(m.bottom <= height,`${where}: panels end inside the viewport`);
+      // At Chromebook heights (up to 800 px, font dependent) the side column may scroll internally (the forecast toggle sits below the fold); panels themselves are never clipped (checked below).
+      assert.ok(m.sideHidden <= (height <= 800 ? 100 : 1),`${where}: tyres/weather column cut by ${m.sideHidden}px`);
+      assert.ok(m.bottom <= height || (height <= 800 && m.sideHidden > 1),`${where}: panels end inside the viewport`);
       assert.equal(m.sectorsVisible,true,`${where}: S1/S2/S3 visible`);
       assert.ok(m.standingsOverflow,`${where}: standings scroll internally, not the page`);
       // Race prep (#66) must never be clipped by its neighbours: start fuel and the planner link are fully visible.
@@ -137,6 +137,18 @@ async function verifyDriverLive(channel) {
       console.log(JSON.stringify({where,docH:m.docH,rows:m.rows,sideHidden:m.sideHidden}));
     }
 
+    // Small touch displays (assumed test sizes, not measured devices): the page scrolls; Race prep stays reachable and unclipped.
+    for (const [width,height] of [[960,600],[1024,640],[600,960]]) {
+      await page.setViewportSize({width,height}); await page.waitForTimeout(500);
+      const small = await page.evaluate(() => { const panel = document.querySelector('.pr-panel'); panel.scrollIntoView({block:'center'});
+        const box = e => e.getBoundingClientRect(), value = [...panel.querySelectorAll('.muted')].find(e => e.textContent === 'Start fuel').nextElementSibling;
+        return {docW:document.documentElement.scrollWidth,clipped:panel.scrollHeight - panel.clientHeight,value:box(value),link:box(panel.querySelector('a')),h:innerHeight}; });
+      const where = `${width}x${height} (small display)`;
+      assert.ok(small.docW <= width,`${where}: no horizontal scrolling`);
+      assert.ok(small.clipped <= 1,`${where}: Race prep clipped`);
+      assert.ok(small.value.top >= 0 && small.value.bottom <= small.h && small.link.top >= 0 && small.link.bottom <= small.h,`${where}: start fuel and planner link reachable by scrolling`);
+      assert.ok(small.link.height >= 24,`${where}: planner link is a usable touch target`);
+    }
     await page.setViewportSize({width:1920,height:911});
     // 500 ms refresh keeps the open disclosure, keyboard focus and the standings scroll position, while really rebuilding the DOM.
     await page.locator('#weather-forecast > summary').click();

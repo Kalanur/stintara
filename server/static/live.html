@@ -50,8 +50,9 @@ tr.me{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus)}
 details summary{cursor:pointer}
 section[aria-label="Weather"] p{margin:2px 0}
 section[aria-label="Weather"] ul{margin:2px 0;padding-left:18px}
+@media(min-width:1101px) and (max-width:1440px){.big{font-size:23px}.sector .big{font-size:19px}.focus-strip{gap:8px}.card{padding-left:8px}}   /* Chromebook widths: values must not clip, also with wider fonts */
 .pr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:8px;margin-bottom:6px}
-.pr-panel .value{font-size:18px}.pr-title{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.pr-title h2{margin:0}
+.pr-panel .value{font-size:18px}.pr-title{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.pr-title h2{margin:0}.pr-title a{padding:8px 6px;margin:-8px -6px}   /* touch target */
 .pr-ok{color:var(--ok)}.pr-warn{color:var(--pit)}.pr-bad{color:var(--live)}
 .pr-notes{margin:4px 0;padding-left:18px}.pr-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px}
 .pr-form>p,.pr-form>.pr-actions,.pr-mode{grid-column:1/-1}.pr-field{display:flex;flex-direction:column;gap:2px}.pr-hint{font-size:12px}
