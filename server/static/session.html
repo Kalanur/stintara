@@ -228,7 +228,7 @@ h1{font-size:22px}
 .pr-notes{margin:4px 0;padding-left:18px}.pr-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px}
 .pr-form>p,.pr-form>.pr-actions,.pr-mode{grid-column:1/-1}.pr-field{display:flex;flex-direction:column;gap:2px}.pr-hint{font-size:12px}
 .pr-overlay{position:fixed;z-index:30;top:48px;right:12px;width:min(640px,calc(100vw - 24px));max-height:calc(100vh - 64px);overflow:auto;box-shadow:0 6px 24px rgba(0,0,0,.55)}
-.pr-overlay[hidden]{display:none}.pr-head{display:flex;justify-content:space-between;align-items:center}
+.pr-overlay[hidden]{display:none}.pr-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.pr-head a{padding:8px 4px}.pr-head a[hidden]{display:none}
 .pr-mode{border:0;padding:0;display:flex;gap:16px}.pr-dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px}.pr-dl dd{margin:0}
 </style></head><body>
 <nav class="toolbar" aria-label="Engineer controls"><a class="brand" href="/">STINTARA <small>RACE ENGINEER</small></a>
@@ -241,7 +241,7 @@ h1{font-size:22px}
 <div id="fuel">Choose a participant to inspect resource data.</div></section>
 </main>
 <section class="panel pr-overlay" id="prerace-panel" aria-label="Pre-race planner" hidden>
-<div class="pr-head"><h2>Pre-Race <small class="muted">· Experimental planner</small></h2><button type="button" id="prerace-close">Close</button></div>
+<div class="pr-head"><h2>Pre-Race <small class="muted">· Experimental planner</small></h2><a id="prerace-back" href="/" hidden>← Driver Live</a><button type="button" id="prerace-close">Close</button></div>
 <div id="prerace" class="muted">Choose a registered driver as focus to plan the race.</div></section>
 <footer>__BUILD_LABEL__</footer>
 <script>
@@ -822,6 +822,14 @@ let planStorage = null;
 try { planStorage = typeof localStorage==='undefined'?null:localStorage; } catch { /* Storage may be blocked by browser policy. */ }
 let preraceKey = null, preraceAt = 0, preraceRun = 0, preraceBound = false, preraceResp = null;
 const preraceContext = () => ({track_name: latestData?.session?.track_name, car_name: participantById(latestData?.participants || [], focusId)?.car_name});
+// "← Driver Live" goes back to the focused participant's driver page; without a usable driver slug it stays hidden.
+function updatePreraceBack(slug) {
+  const link = document.querySelector('#prerace-back');
+  if (!link) return;
+  const ok = typeof slug === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,100}$/.test(slug);
+  link.hidden = !ok;
+  if (ok) link.href = `/drivers/${encodeURIComponent(slug)}/live`;
+}
 function renderPrerace() {
   const box = document.querySelector('#prerace');
   if (!preraceResp || !preraceKey || !box) return;
@@ -837,6 +845,7 @@ async function refreshPrerace(force = false) {
     const box = document.querySelector('#prerace');
     const me = latestData && focusId ? participantById(latestData.participants, focusId) : null;
     const slug = me?.driver_slug || null;
+    updatePreraceBack(slug);
     if (!preraceBound) {
       PreRaceUI.bind(box, {storage: planStorage, slug: () => preraceKey, refresh: refreshPrerace, rerender: renderPrerace,
         context: preraceContext, sessionId: () => sessionId});

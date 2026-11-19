@@ -128,7 +128,7 @@ const PreRaceUI = (() => {
     const cls = plan.status === 'ready' && !stale ? 'pr-ok' : plan.status === 'ready' || plan.status === 'ready_capacity_unchecked' ? 'pr-warn' : 'pr-bad';
     const lines = quality(plan, state, resp.context);
     // The link sits in the heading row: on a short display (Chromebook) it must stay reachable above the details.
-    return `<section class="panel pr-panel" aria-label="Race prep"><div class="pr-title"><h2>Race prep <small class="muted">· estimate</small></h2>${link}</div>
+    return `<section class="panel pr-panel" id="race-prep" aria-label="Race prep"><div class="pr-title"><h2>Race prep <small class="muted">· estimate</small></h2>${link}</div>
       <div class="pr-grid"><div><div class="muted">Race</div><div class="value">${e(lengthText(plan))}</div></div>
       <div><div class="muted">Expected laps</div><div class="value">${e(lapsText(plan))}</div></div>
       <div><div class="muted">Start fuel</div><div class="value ${cls}">${e(startText(plan))}</div></div>

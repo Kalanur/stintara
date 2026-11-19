@@ -155,8 +155,17 @@ async function verifyDriverLive(channel) {
       assert.ok(small.clipped <= 1,`${where}: Race prep clipped`);
       assert.ok(small.value.top >= 0 && small.value.bottom <= small.h && small.link.top >= 0 && small.link.bottom <= small.h,`${where}: start fuel and planner link reachable by scrolling`);
       assert.ok(small.link.height >= 24,`${where}: planner link is a usable touch target`);
+      // Direct access: from the top of the page one tap on "Race prep ↓" brings start fuel into view without scrolling the standings.
+      await page.evaluate(() => scrollTo(0,0));
+      const jump = page.locator('a.jump-prep');
+      assert.equal(await jump.count(),1,`${where}: Race prep shortcut present`);
+      const jb = await jump.boundingBox(); assert.ok(jb && jb.y >= 0 && jb.y + jb.height <= height && jb.height >= 24,`${where}: shortcut visible at the top and touch-sized`);
+      await jump.click(); await page.waitForTimeout(200);
+      const jumped = await page.evaluate(() => { const v = [...document.querySelector('.pr-panel').querySelectorAll('.muted')].find(e => e.textContent === 'Start fuel').nextElementSibling.getBoundingClientRect(); return {top:v.top,bottom:v.bottom,h:innerHeight}; });
+      assert.ok(jumped.top >= 0 && jumped.bottom <= jumped.h,`${where}: shortcut shows start fuel`);
     }
-    await page.setViewportSize({width:1920,height:911});
+    await page.setViewportSize({width:1920,height:911}); await page.waitForTimeout(300);
+    assert.equal(await page.locator('a.jump-prep').isVisible(),false,'1920x911: the shortcut is only for the stacked layout');
     // 500 ms refresh keeps the open disclosure, keyboard focus and the standings scroll position, while really rebuilding the DOM.
     await page.locator('#weather-forecast > summary').click();
     await page.evaluate(() => { window.previousFocusCard = document.querySelector('.focus-strip'); document.querySelector('#standings-scroll').scrollTop = 160; });
