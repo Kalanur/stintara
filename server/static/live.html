@@ -115,7 +115,7 @@ function gapText(f) {
   if (int(f.gap_laps, 1) !== null) return `${f.gap_laps} L`;
   return Number.isFinite(f.gap_to_leader) && f.gap_to_leader >= 0 ? (f.position === 1 ? 'Leader' : seconds(f.gap_to_leader)) : '—';
 }
-const intervalText = f => !int(f.gap_laps, 1) && Number.isFinite(f.interval) && f.interval >= 0 ? seconds(f.interval) : '—';
+const intervalText = f => (!int(f.gap_laps, 1) || f.interval_source === 'history') && Number.isFinite(f.interval) && f.interval >= 0 ? seconds(f.interval) : '—';
 const intervalNote = f => intervalText(f) === '—' && f.interval_reason === 'lapped'
   ? 'lapped: not computable' : 'to car ahead';
 function stopsText(f) {

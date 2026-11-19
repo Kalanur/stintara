@@ -348,6 +348,36 @@ test('lapped full-field interval is a dash with a visible reason and never a fab
   assert.equal(h.intervalCell({interval:null,interval_reason:'<x>'},true),'—');
 });
 
+test('#68 measured lapped interval (interval_source history) is shown; every other lapped case stays a dash', async () => {
+  const h = helpers();
+  const lapped = {gap_laps:2, gap_to_leader:null, interval_reason:null, interval_source:'history'};
+  assert.equal(h.intervalText({...lapped, interval:4.25}, true), '4.3 s');
+  assert.equal(h.intervalText({...lapped, interval:0}, true), '0.0 s');
+  for (const bad of [null, undefined, -0.1, NaN, Infinity, '4.2', true]) assert.equal(h.intervalText({...lapped, interval:bad}, true), '—');
+  // only the exact source value unlocks a lapped interval
+  for (const src of [null, undefined, 'leader_gap', 'History', 'gap_ahead', '']) assert.equal(h.intervalText({...lapped, interval_source:src, interval:4.25}, true), '—');
+  assert.equal(h.intervalText({...lapped, interval:4.25}, false), '—');                       // never outside a race
+  // lead-lap behaviour is unchanged
+  assert.equal(h.intervalText({gap_laps:null, gap_to_leader:3, interval:.5, interval_source:'leader_gap'}, true), '0.5 s');
+  assert.equal(h.intervalReason({...lapped, interval:4.25, interval_reason:'lapped'}, true), '');
+  // Head-to-Head sign logic keeps working for a measured lapped pair
+  const a = {id:'a', interval:null, interval_preceding_id:null}, b = {id:'b', ...lapped, interval:4.25, interval_preceding_id:'a'};
+  assert.equal(h.intervalToFocus(b, a, true), 4.25); assert.equal(h.intervalToFocus(a, b, true), -4.25);
+  // Driver Live card
+  const html = (await render('live.html', focusFixture({...baseFocus, ...lapped, interval:4.25}))).innerHTML;
+  assert.match(html, /Gap 2 L/); assert.match(html, /\+4\.250 s/); assert.doesNotMatch(html, /lapped: not computable|NaN|undefined/);
+  const none = (await render('live.html', focusFixture({...baseFocus, gap_laps:2, gap_to_leader:null, interval:null, interval_reason:'lapped', interval_source:null}))).innerHTML;
+  assert.match(none, /lapped: not computable/);
+  // Full-field row
+  const base = syntheticField(3);
+  const field = base.map((p,i)=>({...p, position:i+1, total_laps:i?4:5, laps_behind_leader:i?1:0, gap_laps:i?1:null,
+    gap_to_leader:i?null:0, interval:i===2?7.5:null, interval_preceding_id:i===2?base[1].id:null,
+    interval_source:i===2?'history':null, interval_reason:['leader','lapped',null][i]}));
+  const page = await sessionHarness({...sessionData(field), session:{session_type:'Race', track_name:'Synthetic Circuit'}});
+  assert.match(page.root.innerHTML, /<td class="num" aria-describedby="interval-help">7\.5 s<\/td>/);
+  assert.match(page.root.innerHTML, /<td class="num" aria-describedby="interval-help">— <span class="why">lapped<\/span><\/td>/);
+});
+
 test('driver focus: FIN, DNF, DSQ and PIT badges, no current sector outside live scoring', async () => {
   for (const [status, cls] of [['FIN','finished'],['DNF','retired'],['DSQ','disqualified'],['PIT','pit']]) {
     const html = (await render('live.html', focusFixture({...baseFocus,status,current_lap:null,player_sector:null}))).innerHTML;

@@ -21,7 +21,8 @@ def position(value):
 def newest_state(session_id, live, states, now):
     candidates = [s for s in states if live and s.get("session_id") == session_id
                   and 0 <= now - s.get("last_scoring_at", 0) < 15 and s.get("scoring")]
-    return max(candidates, key=lambda s: s["last_scoring_at"], default={})
+    # Equal receive times are broken by the global arrival sequence, never by registration order.
+    return max(candidates, key=lambda s: (s["last_scoring_at"], s.get("scoring_seq", 0)), default={})
 
 
 def newest_scoring(session_id, live, states, now):
@@ -67,6 +68,29 @@ def interval_unavailable(previous, current):
     return None
 
 
+def history_interval(previous, current):
+    """Measured interval seconds of lapped ``current`` to lapped ``previous`` (the unique P-1), else None.
+
+    The value comes from ``interval_history`` (backward-looking passage times of one scoring observation) and is
+    attached to ``current`` as ``history_interval``. It is accepted only when it describes exactly this pair at
+    these positions with this lap deficit: same deficit on both cars (not necessarily the same completed laps),
+    the recorded P-1 vehicle is the participant now at P-1, and both positions and the deficit are those of the
+    scoring currently displayed. Anything else stays unknown/"lapped"; nothing is combined across observations.
+    """
+    entry = current.get("history_interval")
+    deficit = current.get("laps_behind_leader")
+    if (not isinstance(entry, dict) or not lap_count(deficit) or deficit <= 0
+            or previous.get("laps_behind_leader") != deficit):
+        return None
+    value = entry.get("value")
+    if (not nonnegative(value) or type(entry.get("ahead_id")) is not int
+            or entry["ahead_id"] != previous.get("local_vehicle_id")
+            or entry.get("position") != current.get("position") or entry.get("ahead_position") != previous.get("position")
+            or entry.get("deficit") != deficit):
+        return None
+    return value
+
+
 def preceding_interval(previous, current):
     if interval_unavailable(previous, current) is not None:
         return None
@@ -106,7 +130,7 @@ def project_timing(participants, session_type):
     race = session_type == "Race"
     for p in participants:
         p["gap_to_leader"], p["gap_laps"] = race_gap(p, race)
-        p.update(interval=None, interval_preceding_id=None, interval_reason="not_race")
+        p.update(interval=None, interval_preceding_id=None, interval_reason="not_race", interval_source=None)
         for sector in ("sector1", "sector2", "sector3"):
             value = p.get(sector)
             p[sector] = value if nonnegative(value) and value > 0 else None
@@ -118,7 +142,13 @@ def project_timing(participants, session_type):
             reason = "leader" if pos == 1 else interval_unavailable(previous, p)
             p["interval_reason"] = reason
             if reason is None:
-                p.update(interval=p["gap_to_leader"] - previous["gap_to_leader"], interval_preceding_id=previous["id"])
+                p.update(interval=p["gap_to_leader"] - previous["gap_to_leader"], interval_preceding_id=previous["id"],
+                         interval_source="leader_gap")
+            elif reason == "lapped":
+                measured = history_interval(previous, p)
+                if measured is not None:
+                    p.update(interval=measured, interval_preceding_id=previous["id"], interval_reason=None,
+                             interval_source="history")
     classify_lap_times(participants)
 
 
