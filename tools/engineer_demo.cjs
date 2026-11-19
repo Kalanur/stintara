@@ -419,7 +419,7 @@ async function verifyPrerace(channel) {
     await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
     await page.locator('#prerace-toggle').waitFor();
     const layout=()=>page.evaluate(()=>({h:document.documentElement.scrollHeight,fuel:document.querySelector('.fuel-panel').getBoundingClientRect().top}));
-    for (const [width,height] of [[1920,900],[1366,768]]) {
+    for (const [width,height] of [[1920,900],[1366,768],[1024,640],[960,600]]) {
       await page.setViewportSize({width,height});
       await page.waitForTimeout(300);
       const before=await layout();
@@ -456,6 +456,17 @@ async function verifyPrerace(channel) {
     await page.waitForFunction(()=>/observed/.test(document.querySelector('label[for="pr-lap_time_s"]')?.textContent||'')&&!/unsaved/.test(document.querySelector('label[for="pr-lap_time_s"]').textContent),null,{timeout:4000});
     assert.equal(await page.locator('#pr-duration_minutes').inputValue(),'45','saved value shown after Calculate');
     assert.match(await page.locator('label[for="pr-lap_time_s"]').innerText(),/observed/);
+    // "← Driver Live" returns to the focused driver; without a driver slug it is not offered.
+    const back=page.locator('#prerace-back');
+    assert.equal(await back.isVisible(),true,'back link visible for a registered focus driver');
+    assert.equal(await back.getAttribute('href'),'/drivers/synthetic/live');
+    demo.data.participants=demo.data.participants.map(p=>p.id===demo.focus?{...p,driver_slug:null}:p);
+    await page.locator('#prerace-close').click(); await page.locator('#prerace-toggle').click();
+    await page.waitForFunction(()=>document.querySelector('#prerace-back').hidden,null,{timeout:6000});
+    demo.data.participants=demo.data.participants.map(p=>p.id===demo.focus?{...p,driver_slug:'synthetic'}:p);
+    await page.locator('#prerace-close').click(); await page.locator('#prerace-toggle').click();
+    await page.waitForFunction(()=>!document.querySelector('#prerace-back').hidden,null,{timeout:6000});
+    await Promise.all([page.waitForURL('**/drivers/synthetic/live'),back.click()]);
     assert.deepEqual(problems,[],'no JavaScript errors');
     console.log('engineer pre-race gate passed');
   } finally { await browser.close(); }

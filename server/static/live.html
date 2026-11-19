@@ -37,6 +37,7 @@ a:focus-visible,summary:focus-visible,.table-scroll:focus-visible{outline:2px so
 .standings h2{padding:10px 12px 0}
 .table-scroll{overflow:auto;min-height:0;min-width:0;flex:1;scrollbar-color:var(--line) var(--panel)}
 .side-col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0;overflow:auto}
+.side-col>.panel{flex:none}   /* panels keep their height: a short viewport scrolls the column instead of clipping a panel */
 table{width:100%;border-collapse:separate;border-spacing:0}
 th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
 th{font-size:12px;color:var(--muted);background:var(--raised);position:sticky;top:0;z-index:1}
@@ -49,7 +50,9 @@ tr.me{background:var(--focus-bg);box-shadow:inset 3px 0 var(--focus)}
 details summary{cursor:pointer}
 section[aria-label="Weather"] p{margin:2px 0}
 section[aria-label="Weather"] ul{margin:2px 0;padding-left:18px}
-.pr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:6px}
+@media(min-width:1101px) and (max-width:1440px){.big{font-size:23px}.sector .big{font-size:19px}.focus-strip{gap:8px}.card{padding-left:8px}}   /* Chromebook widths: values must not clip, also with wider fonts */
+.pr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:8px;margin-bottom:6px}
+.pr-panel .value{font-size:18px}.pr-title{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.jump-prep{display:none}.pr-title h2{margin:0}.pr-title a{padding:8px 6px;margin:-8px -6px}   /* touch target */
 .pr-ok{color:var(--ok)}.pr-warn{color:var(--pit)}.pr-bad{color:var(--live)}
 .pr-notes{margin:4px 0;padding-left:18px}.pr-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px}
 .pr-form>p,.pr-form>.pr-actions,.pr-mode{grid-column:1/-1}.pr-field{display:flex;flex-direction:column;gap:2px}.pr-hint{font-size:12px}
@@ -61,6 +64,7 @@ footer{margin-top:4px;font-size:12px;overflow-wrap:anywhere}
   .card:first-child,.card{border-left:0;padding-left:0}
   .standings .table-scroll{max-height:60vh}
   .side-col{overflow:visible}
+  .jump-prep{display:inline-block;padding:10px 8px;margin:-10px -4px;font-weight:700}
 }
 </style></head><body>
 <div id="root" class="muted plain">Loading…</div>
@@ -173,7 +177,7 @@ function render(d) {
   const s = d.strategy || {};
   const html = `<header class="panel head"><div class="context"><h1>${esc(d.driver.display_name)}</h1>
       <div>${esc(d.session.track_name)} · ${esc(d.session.session_type)} · ${esc(vehicleText(me))}</div></div>
-      <div class="side"><span class="live">● LIVE</span><a id="full-field-link" href="/sessions/${esc(encodeURIComponent(d.session.id))}/live${esc(focusQuery)}">Watch full field →</a><a href="/">← Stintara</a></div></header>
+      <div class="side"><span class="live">● LIVE</span>${preraceHtml ? '<a class="jump-prep" href="#race-prep">Race prep ↓</a>' : ''}<a id="full-field-link" href="/sessions/${esc(encodeURIComponent(d.session.id))}/live${esc(focusQuery)}">Watch full field →</a><a href="/">← Stintara</a></div></header>
     ${focusStrip(d, me)}
     <section class="panel standings" aria-label="Standings"><h2>Standings</h2><div class="table-scroll" id="standings-scroll" tabindex="0"><table><thead><tr><th>P</th><th>Driver</th><th>Vehicle / entry</th>
       <th>Gap</th><th>Last</th><th>Best</th><th>Laps</th><th>Pit</th></tr></thead><tbody>
@@ -190,6 +194,7 @@ function render(d) {
   lastHtml = html;
   const scroll = document.querySelector('#standings-scroll');
   const keep = {left: scroll?.scrollLeft || 0, top: scroll?.scrollTop || 0};
+  const sideTop = document.querySelector('.side-col')?.scrollTop || 0;   // short viewports scroll this column
   const activeId = PRESERVED.includes(document.activeElement?.id) ? document.activeElement.id
     : document.activeElement?.parentElement?.id === 'weather-forecast' ? 'weather-summary' : null;
   const forecastOpen = document.querySelector('#weather-forecast')?.open || false;
@@ -199,6 +204,8 @@ function render(d) {
   if (forecast) forecast.open = forecastOpen;
   const next = document.querySelector('#standings-scroll');
   if (next) { next.scrollLeft = keep.left; next.scrollTop = keep.top; }
+  const side = document.querySelector('.side-col');
+  if (side) side.scrollTop = sideTop;
   const target = activeId === 'weather-summary' ? document.querySelector('#weather-forecast > summary')
     : activeId ? document.querySelector('#' + activeId) : null;
   target?.focus?.({preventScroll:true});
