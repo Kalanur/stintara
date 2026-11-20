@@ -158,8 +158,10 @@ async function verifyDriverLive(channel) {
       // Direct access: from the top of the page one tap on "Race prep ↓" brings start fuel into view without scrolling the standings.
       await page.evaluate(() => scrollTo(0,0));
       const jump = page.locator('a.jump-prep');
-      assert.equal(await jump.count(),1,`${where}: Race prep shortcut present`);
-      const jb = await jump.boundingBox(); assert.ok(jb && jb.y >= 0 && jb.y + jb.height <= height && jb.height >= 24,`${where}: shortcut visible at the top and touch-sized`);
+      // The page rebuilds its DOM every 500 ms: check presence, position and size in one step inside the page, retried until it holds.
+      await page.waitForFunction(h => { const links = document.querySelectorAll('a.jump-prep'); if (links.length !== 1) return false;
+        const r = links[0].getBoundingClientRect(); return r.top >= 0 && r.bottom <= h && r.height >= 24; },height,{timeout:5000})
+        .catch(() => assert.fail(`${where}: shortcut visible at the top and touch-sized`));
       await jump.click(); await page.waitForTimeout(200);
       const jumped = await page.evaluate(() => { const v = [...document.querySelector('.pr-panel').querySelectorAll('.muted')].find(e => e.textContent === 'Start fuel').nextElementSibling.getBoundingClientRect(); return {top:v.top,bottom:v.bottom,h:innerHeight}; });
       assert.ok(jumped.top >= 0 && jumped.bottom <= jumped.h,`${where}: shortcut shows start fuel`);
