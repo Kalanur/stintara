@@ -1,7 +1,7 @@
 # Future test plan – multiple agents and concurrent sessions
 
 These scenarios need two or more Stintara agents (or two machines) and are **not** part of the Sunday 2026-11-22 field test, in
-which Marcel is the only driver with LMU, Pitwall and a Stintara agent (see [2026-11-22.md](2026-11-22.md)). The basic mapping of
+which a single driver is the only person with LMU, Pitwall and a Stintara agent (see [2026-11-22.md](2026-11-22.md)). The basic mapping of
 the single active agent to its driver stays in the Sunday test (`#63` single-agent rows). This file only collects what to test later.
 
 Nothing here is verified. Each item needs its own preparation, evidence and, where behaviour changes, automated tests.
