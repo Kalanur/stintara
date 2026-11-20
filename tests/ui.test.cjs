@@ -2300,3 +2300,87 @@ test('trackmap #71: labels keep clear of the start/finish line and the sector ti
     assert.equal(inside, false, `label ${label} covers the start/finish line`);
   }
 });
+
+// --- #72 Strategy UX: state explanations come only from the API status, the resource states and known session facts ---
+test('strategy hints name the waiting resource and what to check, per real state', () => {
+  const h = helpers();
+  const d = strategyDemo(); d.status = 'collecting_or_stale'; d.provider_pit_settings = null; d.at_pit = [];
+  Object.assign(d.resources[0], {state: 'collecting', available: false, sample_count: 2, consumption_per_lap: null, range_laps: null});
+  Object.assign(d.resources[1], {state: 'stale', available: false, fresh: false, range_laps: null});
+  const html = h.strategyWidget(d);
+  assert.match(html, /Waiting for: Fuel is collecting laps \(2\/3 valid\); VE has no fresh telemetry\./);
+  assert.match(html, /A valid lap is a full lap without a pit stop\./);
+  assert.match(html, /Check that the agent is connected and the car is live\./);
+  Object.assign(d.resources[0], {state: 'ready', available: true, fresh: true});
+  Object.assign(d.resources[1], {state: 'no_current_value', current: null, fresh: true});
+  const unknown = h.strategyWidget(d);
+  assert.match(unknown, /Waiting for: VE has no valid current value\./);
+  assert.doesNotMatch(unknown, /collecting laps|A valid lap is/);          // nothing is explained that is not the case
+  assert.doesNotMatch(unknown, /NaN|undefined|null/);
+});
+
+test('inactive strategy explains why from known session facts and never guesses', () => {
+  const h = helpers(), d = strategyDemo(); d.status = 'inactive'; d.provider_pit_settings = null;
+  assert.match(h.strategyWidget(d, {live: false, sessionType: 'Race'}), /session is not live: stored data only/);
+  const practice = h.strategyWidget(d, {live: true, sessionType: 'Qualifying'});
+  assert.match(practice, /Qualifying session: the next-stop plan runs only in a live Race\. For the start load use the Pre-Race planner/);
+  assert.match(h.strategyWidget(d, {live: true, sessionType: 'Race', finishStatus: 1}), /finished or is out/);
+  assert.match(h.strategyWidget(d, {live: true, sessionType: 'Race', finishStatus: 0}), /No fresh scoring for the focused car yet/);
+  assert.match(h.strategyWidget(d), /No fresh scoring for the focused car yet/);           // no context: the generic remaining cause
+  assert.doesNotMatch(h.strategyWidget(d, {live: true, sessionType: '<img onerror=x>'}), /<img/);
+});
+
+test('capability, finish and stop states carry one plain sentence; unknown statuses carry none', () => {
+  const h = helpers(), d = strategyDemo(); d.provider_pit_settings = null;
+  d.status = 'capability_unknown'; assert.match(h.strategyWidget(d), /not reported yet whether this car uses Virtual Energy\. No stop is planned until it does/);
+  d.status = 'finish_unknown'; assert.match(h.strategyWidget(d), /confirmed lap limit, or the session end time plus at least 3 clean laps/);
+  d.status = 'stop_required'; d.plan_source = 'auto'; assert.match(h.strategyWidget(d), /stop no later than the latest resource-safe stop lap/);
+  d.status = 'no_stop_required'; assert.match(h.strategyWidget(d), /range covers the finish including the reserve/);
+  d.status = 'something_new'; const other = h.strategyWidget(d);
+  assert.match(other, /Resource strategy unavailable/); assert.doesNotMatch(other, /strategy-why/);
+});
+
+test('resource cards label now, per lap and range; the legend separates in-race from pre-race and stays provider-aware', () => {
+  const h = helpers(), d = strategyDemo(), html = h.strategyWidget(d);
+  assert.match(html, /63\.0%<\/strong> <small class="muted">now<\/small> · 10\.2%\/lap/);
+  assert.match(html, /range 6\.2 laps/);
+  assert.match(html, /id="strategy-help"[^>]*>[\s\S]*How to read this panel/);
+  for (const text of ['median of the last 5 valid laps', 'at least 3 are needed', 'LIMIT', 'Latest resource-safe stop', 'LMU PIT SETTINGS',
+    'Expected added', 'information only', 'Collecting', 'Stale', 'UNKNOWN', 'Not the pre-race plan', 'Pre-Race planner']) assert.ok(html.includes(text), text);
+  const unavailable = structuredClone(d); unavailable.resources[1] = {...unavailable.resources[1], available: false, range_laps: null};
+  assert.match(h.strategyWidget(unavailable), /range —/);
+  // fuel-only LMU car: no VE wording in the legend; another provider: no LMU pit-settings wording.
+  const fuelOnly = strategyDemo(); fuelOnly.resources = fuelOnly.resources.slice(0, 1); fuelOnly.provider_pit_settings = {provider: 'lmu', energy_kind: 'NONE', fuel_target_l: 42, expected_fuel_added_l: 20};
+  assert.doesNotMatch(h.strategyWidget(fuelOnly), /Virtual Energy|VE/);
+  const other = strategyDemo(); other.simulator_provider = 'synthetic-provider'; other.provider_pit_settings = null;
+  assert.doesNotMatch(h.strategyWidget(other), /LMU PIT SETTINGS/);
+});
+
+test('the Strategy refresh passes session facts to the widget and keeps the legend open across refreshes', () => {
+  const source = spectatorScript();
+  assert.match(source, /strategyWidget\(data,\{live:latestData\?\.live,sessionType:latestData\?\.session\?\.session_type,finishStatus:own\?\.finish_status\}\)/);
+  assert.match(source, /helpOpen=document\.querySelector\('#strategy-help'\)\?\.open/);
+  assert.match(source, /helpDetails\.open=helpOpen/);
+});
+
+test('Fuel collecting progress comes from the estimate diagnostics, like the real API response (review of #83)', () => {
+  const h = helpers(), d = strategyDemo(); d.status = 'collecting_or_stale'; d.provider_pit_settings = null; d.at_pit = [];
+  d.diagnostics = {fuel: {estimate: {status: 'collecting', consumption_l_per_lap: null, sample_count: 0, available_sample_count: 2, minimum_samples: 3, window_size: 5}, samples: [], current: {fuel_l: 70, capacity_l: 100, fresh: true}, provider: {}},
+    energy_history_samples: 0, energy: {sample_count: 3, minimum_samples: 3}};
+  Object.assign(d.resources[0], {state: 'collecting', available: false, sample_count: 0, consumption_per_lap: null, range_laps: null});   // as lmu_resources copies the zero count
+  const html = h.strategyWidget(d);
+  assert.match(html, /Waiting for: Fuel is collecting laps \(2\/3 valid\)/);
+  assert.match(html, /Collecting laps · 2\/3 valid/);
+  assert.doesNotMatch(html, /\(0\/3 valid\)/);
+  delete d.diagnostics.fuel;   // diagnostics missing: fall back to the resource count, never NaN/undefined
+  assert.match(h.strategyWidget(d), /Fuel is collecting laps \(0\/3 valid\)/); assert.doesNotMatch(h.strategyWidget(d), /NaN|undefined/);
+});
+
+test('stop_required does not claim a range shortfall for a manually planned stop (review of #83)', () => {
+  const h = helpers(), d = strategyDemo(); d.provider_pit_settings = null; d.status = 'stop_required';
+  d.plan_source = 'manual'; d.planned_stop_lap = 20; d.effective_range_laps = 50;
+  const manual = h.strategyWidget(d);
+  assert.match(manual, /A stop is planned \(see Plan\)/); assert.doesNotMatch(manual, /range ends before the finish/);
+  d.plan_source = 'auto';
+  assert.match(h.strategyWidget(d), /The range ends before the finish: stop no later than the latest resource-safe stop lap/);
+});
