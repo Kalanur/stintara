@@ -119,6 +119,7 @@ caption{text-align:left;color:var(--muted);padding:8px;font-size:12px}
 .strategy-safe{color:var(--ok)}
 .strategy-attention{color:var(--pit)}
 .strategy-danger{color:var(--live)}
+.strategy-why{margin:2px 0 6px}.strategy-legend{margin:4px 0;padding-left:18px}.strategy-legend li{margin:2px 0}
 .plan-control{display:flex;align-items:center;gap:8px;margin:6px 0;flex-wrap:wrap}
 .plan-control input{width:75px}
 .plan-control input,.plan-control button{font:inherit;background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:3px 6px}
@@ -508,7 +509,8 @@ function savePlan(storage, session, participant, value) {
     return true;
   } catch { return false; }
 }
-function strategyWidget(d) {
+// ctx: facts the page already holds about the viewed session ({live, sessionType, finishStatus}); never invented.
+function strategyWidget(d, ctx = {}) {
   const lmu=d.simulator_provider==='lmu';
   const energy=d.resources?.find(r=>r.resource_kind==='energy');
   const ve=lmu && energy?.energy_kind==='VIRTUAL_ENERGY';
@@ -530,7 +532,33 @@ function strategyWidget(d) {
     ${settings.capacity_feasible===false?'<p class="strategy-danger">Tank capacity insufficient · calculated settings infeasible</p>':''}
     ${settings.capacity_feasible===null?'<p class="muted">Tank capacity unknown · feasibility unverified</p>':''}
     ${settings.additional_stop_required?'<p class="strategy-danger">ADDITIONAL STOP REQUIRED</p>':''}</div>` : '';
-  return `<p class="${tone}"><strong>${esc(statuses[d.status] || 'Resource strategy unavailable')}</strong></p>
+  // One plain sentence for the state, from the API status, the per-resource states and the session facts only.
+  const minimum=kind=>d.diagnostics?.[kind==='fuel'?'fuel':'energy']?.minimum_samples ?? 3;
+  const waiting=(d.resources||[]).filter(r=>r.available===false).map(r=>{
+    const state=r.state??(r.fresh===false?'stale':'collecting');
+    return `${label(r.resource_kind)} ${state==='no_current_value'?'has no valid current value':state==='stale'?'has no fresh telemetry':`is collecting laps (${esc(r.sample_count)}/${esc(minimum(r.resource_kind))} valid)`}`;});
+  const states=(d.resources||[]).map(r=>r.state);
+  const hints={
+    collecting_or_stale:()=>`Waiting for: ${waiting.join('; ')||'resource data'}.${states.includes('collecting')?` A valid lap is a full lap without a pit stop.`:''}${states.includes('stale')||states.includes('no_current_value')?' Check that the agent is connected and the car is live.':''}`,
+    inactive:()=>ctx.live===false?'The session is not live: stored data only, no pit recommendation.'
+      :ctx.sessionType&&ctx.sessionType!=='Race'?`${esc(ctx.sessionType)} session: the next-stop plan runs only in a live Race. For the start load use the Pre-Race planner.`
+      :Number.isInteger(ctx.finishStatus)&&ctx.finishStatus>0?'This participant has finished or is out: no further stop is planned.'
+      :'No fresh scoring for the focused car yet. Check that the agent is connected.',
+    capability_unknown:()=>'The agent has not reported yet whether this car uses Virtual Energy. No stop is planned until it does.',
+    finish_unknown:()=>'The finish lap is unknown: it needs a confirmed lap limit, or the session end time plus at least 3 clean laps for the pace.',
+    stop_required:()=>'The range ends before the finish: stop no later than the latest resource-safe stop lap.',
+    no_stop_required:()=>'The range covers the finish including the reserve.'};
+  const why=hints[d.status]?`<p class="strategy-why muted">${hints[d.status]()}</p>`:'';
+  const energyName=ve?'Virtual Energy':'Energy', hasEnergy=Boolean(energy);
+  const help=`<details id="strategy-help"><summary id="strategy-help-toggle">How to read this panel</summary><ul class="strategy-legend muted">
+    <li><strong>Now</strong>: current level of the focused car from live telemetry (Fuel in litres${hasEnergy?`, ${energyName} in %`:''}).</li>
+    <li><strong>per lap</strong>: consumption, the median of the last 5 valid laps (consecutive, no pit stop between, level really dropped); at least 3 are needed, until then it is unknown.</li>
+    <li><strong>range</strong>: laps the current level lasts at that consumption.${hasEnergy?` <strong>LIMIT</strong> marks the resource that runs out first; Fuel and ${label('energy')} are separate resources.`:''}</li>
+    <li><strong>Latest resource-safe stop</strong>: last lap on which a stop still keeps the reserve. <strong>Plan</strong>: your own stop lap (Apply) or automatic.</li>
+    ${lmu&&settings?.provider==='lmu'?'<li><strong>LMU PIT SETTINGS</strong>: what to set in the LMU pit menu for the planned stop. <strong>Expected added</strong>: how much that stop adds, information only; Stintara changes nothing in the game.</li>':''}
+    <li><strong>Collecting</strong>: not enough valid laps yet. <strong>Stale</strong>: telemetry older than 15 s. <strong>UNKNOWN</strong>: no valid value reported.</li>
+    <li><strong>Not the pre-race plan</strong>: the Pre-Race planner estimates the start load from manual inputs before the race; this panel plans the next stop from live telemetry during a Race.</li></ul></details>`;
+  return `<p class="${tone}"><strong>${esc(statuses[d.status] || 'Resource strategy unavailable')}</strong></p>${why}
     <div class="resource-grid">${(d.resources || []).map(r=>{
       const name=r.resource_kind==='fuel'?'Fuel':ve?'Virtual Energy':'Energy';
       const state=r.state??(r.fresh===false?'stale':r.available?'ready':'collecting');
@@ -539,8 +567,8 @@ function strategyWidget(d) {
       const rate=r.consumption_per_lap===null||r.consumption_per_lap===undefined?'consumption unknown':`${amount(r.resource_kind,r.consumption_per_lap)}/lap`;
       const note={no_current_value:'No valid current value',stale:'Stale · not live',collecting:r.resource_kind==='energy'?`Collecting laps · ${esc(r.sample_count)}/3 valid`:'Collecting laps',ready:`${esc(r.sample_count)} samples`}[state]||'';
       return `<article><h3>${name} ${d.limiting_resource===r.resource_kind?'<span class="strategy-attention">LIMIT</span>':''}</h3>
-    <strong class="${unknown||state==='stale'?'muted':''}">${current}</strong> · ${rate}
-    <p>${r.available?fuelNumber(r.range_laps,' laps',1):'range —'} · ${note}</p></article>`;}).join('')}</div>
+    <strong class="${unknown||state==='stale'?'muted':''}">${current}</strong> <small class="muted">now</small> · ${rate}
+    <p>${r.available?`range ${fuelNumber(r.range_laps,' laps',1)}`:'range —'} · ${note}</p></article>`;}).join('')}</div>
     <div class="resource-plan"><p>${finish.kind==='timed_estimate'?'Projected finish ≈':'Finish'} ${lap(finish.finish_lap)}</p>
     <p>Latest resource-safe stop ${lap(d.latest_safe_stop_lap)}</p>
     <p>Plan: ${esc(d.plan_source)} ${lap(d.planned_stop_lap)}</p><p>Reserve ${fuelNumber(d.reserve_laps,' lap',1)}${d.balanced?' · BALANCED':''}</p></div>
@@ -550,7 +578,7 @@ function strategyWidget(d) {
     <details id="strategy-diagnostics"><summary id="strategy-toggle">Resource diagnostics / provider comparison</summary>
     <p class="muted">Energy checkpoints are not verified clean laps. LMU current Fuel Ratio is unavailable. Timed finish is estimated.</p>
     ${settings?.measured_fuel_ratio_l_per_percent_ve!==undefined?`<p>Measured LMU Fuel Ratio ${fuelNumber(settings.measured_fuel_ratio_l_per_percent_ve,' L / 1% VE',4)}</p>`:''}
-    ${d.diagnostics?.fuel?fuelWidget(d.diagnostics.fuel):''}</details>`;
+    ${d.diagnostics?.fuel?fuelWidget(d.diagnostics.fuel):''}</details>${help}`;
 }
 
 function mapNumber(value) { return typeof value === 'number' && Number.isFinite(value) ? value : null; }
@@ -948,7 +976,12 @@ async function refreshFuel() {
     const focused = document.activeElement?.id === 'fuel-toggle';
     const strategyOpen=document.querySelector('#strategy-diagnostics')?.open || false;
     const strategyFocused=document.activeElement?.id==='strategy-toggle';
-    root.innerHTML = strategyWidget(data);
+    const helpOpen=document.querySelector('#strategy-help')?.open||false, helpFocused=document.activeElement?.id==='strategy-help-toggle';
+    const own=participantById(latestData?.participants||[],participant);
+    root.innerHTML = strategyWidget(data,{live:latestData?.live,sessionType:latestData?.session?.session_type,finishStatus:own?.finish_status});
+    const helpDetails=document.querySelector('#strategy-help');
+    if(helpDetails) helpDetails.open=helpOpen;
+    if(helpFocused) document.querySelector('#strategy-help-toggle')?.focus({preventScroll:true});
     const strategyDetails=document.querySelector('#strategy-diagnostics');
     if(strategyDetails) strategyDetails.open=strategyOpen;
     if(strategyFocused) document.querySelector('#strategy-toggle')?.focus({preventScroll:true});

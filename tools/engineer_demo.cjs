@@ -485,11 +485,59 @@ async function verifyPrerace(channel) {
   } finally { await browser.close(); }
 }
 
+// Strategy UX (#72): state explanations, now/range captions and the legend in a real browser, also on small displays.
+async function verifyStrategyUx(channel) {
+  const {chromium} = require('playwright');
+  const repo=path.resolve(__dirname,'..');
+  const demo=engineerDemo('ve-collecting');
+  const html=fs.readFileSync(path.join(repo,'server/static/session.html'),'utf8')
+    .replace('__SESSION_ID__',JSON.stringify(demo.data.session.id))
+    .replace('__WEATHER_UI__',fs.readFileSync(path.join(repo,'server/static/weather.js'),'utf8'))
+    .replace('/*__PRERACE_UI__*/',fs.readFileSync(path.join(repo,'server/static/prerace.js'),'utf8'))
+    .replace('__BUILD_LABEL__','Stintara · synthetic demonstration');
+  const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
+  try {
+    const page=await browser.newPage({viewport:{width:1920,height:1080},reducedMotion:'reduce'});
+    const problems=[]; page.on('pageerror',e=>problems.push(e.message));
+    await page.route('**/*',route=>{const url=route.request().url();
+      if(!url.includes('/api/')) return route.fulfill({contentType:'text/html',body:html});
+      if(url.includes('/prerace')) return route.fulfill({status:404,json:{}});
+      return route.fulfill({json:url.includes('/strategy')?demo.strategy:demo.data});});
+    await page.goto(`http://stintara.example.invalid/sessions/synthetic/live?focus=${demo.focus}`);
+    await page.locator('.resource-grid article').nth(1).waitFor();
+    for (const [width,height] of [[1920,1080],[1366,768],[1024,640],[960,600]]) {
+      await page.setViewportSize({width,height}); await page.waitForTimeout(300);
+      const where=`${width}x${height}`;
+      const text=await page.locator('.fuel-panel').innerText();
+      assert.match(text,/Waiting for: VE is collecting laps \(2\/3 valid\)\. A valid lap is a full lap without a pit stop\./,`${where}: collecting explained`);
+      assert.match(text,/63\.0%\s*now/,`${where}: current level captioned`);
+      assert.match(text,/consumption unknown/); assert.doesNotMatch(text,/SET (VE|FUEL) TO/);
+      // Legend: closed by default, opens by touch/click, reachable inside the panel, no horizontal scrolling, survives the live refresh.
+      assert.equal(await page.locator('#strategy-help').evaluate(e=>e.open),false,`${where}: legend closed by default`);
+      await page.locator('#strategy-help-toggle').scrollIntoViewIfNeeded(); await page.locator('#strategy-help-toggle').click();
+      await page.waitForTimeout(150);
+      const open=await page.evaluate(()=>{const d=document.querySelector('#strategy-help'),li=[...d.querySelectorAll('li')].find(e=>/Not the pre-race plan/.test(e.textContent));
+        li.scrollIntoView({block:'nearest'});const r=li.getBoundingClientRect(),panel=document.querySelector('.fuel-panel').getBoundingClientRect();
+        window.__previous=document.querySelector('.resource-grid');
+        return {open:d.open,visible:r.top>=panel.top-1&&r.bottom<=panel.bottom+1,docW:document.documentElement.scrollWidth};});
+      assert.equal(open.open,true); assert.ok(open.visible,`${where}: legend text reachable inside the panel`); assert.ok(open.docW<=width,`${where}: no horizontal scrolling`);
+      await page.waitForFunction(()=>!window.__previous.isConnected,null,{timeout:8000});
+      assert.equal(await page.locator('#strategy-help').evaluate(e=>e.open),true,`${where}: legend stays open across the refresh`);
+      await page.locator('#strategy-help-toggle').click();
+    }
+    // Real session facts reach the widget: a Qualifying session explains why there is no recommendation.
+    demo.strategy.status='inactive'; demo.data.session.session_type='Qualifying';
+    await page.waitForFunction(()=>/Qualifying session: the next-stop plan runs only in a live Race\. For the start load use the Pre-Race planner\./.test(document.querySelector('.fuel-panel').innerText),null,{timeout:8000});
+    assert.deepEqual(problems,[],'no JavaScript errors');
+    console.log('engineer strategy UX gate passed');
+  } finally { await browser.close(); }
+}
+
 module.exports={engineerDemo};
 if(require.main===module) {
   if(process.argv.includes('--viewports')) {
     const index=process.argv.indexOf('--browser');
-    verifyViewports(index<0?undefined:process.argv[index+1]).then(()=>verifyPrerace(index<0?undefined:process.argv[index+1])).catch(error=>{console.error(error);process.exitCode=1;});
+    verifyViewports(index<0?undefined:process.argv[index+1]).then(()=>verifyPrerace(index<0?undefined:process.argv[index+1])).then(()=>verifyStrategyUx(index<0?undefined:process.argv[index+1])).catch(error=>{console.error(error);process.exitCode=1;});
   } else if(process.argv.includes('--screenshot') && process.argv.includes('--track-scenarios')) {
     const index=process.argv.indexOf('--browser');
     screenshotTrackScenarios(index<0?undefined:process.argv[index+1]).catch(error=>{console.error(error);process.exitCode=1;});
