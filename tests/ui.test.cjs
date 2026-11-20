@@ -2334,7 +2334,7 @@ test('capability, finish and stop states carry one plain sentence; unknown statu
   const h = helpers(), d = strategyDemo(); d.provider_pit_settings = null;
   d.status = 'capability_unknown'; assert.match(h.strategyWidget(d), /not reported yet whether this car uses Virtual Energy\. No stop is planned until it does/);
   d.status = 'finish_unknown'; assert.match(h.strategyWidget(d), /confirmed lap limit, or the session end time plus at least 3 clean laps/);
-  d.status = 'stop_required'; assert.match(h.strategyWidget(d), /stop no later than the latest resource-safe stop lap/);
+  d.status = 'stop_required'; d.plan_source = 'auto'; assert.match(h.strategyWidget(d), /stop no later than the latest resource-safe stop lap/);
   d.status = 'no_stop_required'; assert.match(h.strategyWidget(d), /range covers the finish including the reserve/);
   d.status = 'something_new'; const other = h.strategyWidget(d);
   assert.match(other, /Resource strategy unavailable/); assert.doesNotMatch(other, /strategy-why/);
@@ -2361,4 +2361,26 @@ test('the Strategy refresh passes session facts to the widget and keeps the lege
   assert.match(source, /strategyWidget\(data,\{live:latestData\?\.live,sessionType:latestData\?\.session\?\.session_type,finishStatus:own\?\.finish_status\}\)/);
   assert.match(source, /helpOpen=document\.querySelector\('#strategy-help'\)\?\.open/);
   assert.match(source, /helpDetails\.open=helpOpen/);
+});
+
+test('Fuel collecting progress comes from the estimate diagnostics, like the real API response (review of #83)', () => {
+  const h = helpers(), d = strategyDemo(); d.status = 'collecting_or_stale'; d.provider_pit_settings = null; d.at_pit = [];
+  d.diagnostics = {fuel: {estimate: {status: 'collecting', consumption_l_per_lap: null, sample_count: 0, available_sample_count: 2, minimum_samples: 3, window_size: 5}, samples: [], current: {fuel_l: 70, capacity_l: 100, fresh: true}, provider: {}},
+    energy_history_samples: 0, energy: {sample_count: 3, minimum_samples: 3}};
+  Object.assign(d.resources[0], {state: 'collecting', available: false, sample_count: 0, consumption_per_lap: null, range_laps: null});   // as lmu_resources copies the zero count
+  const html = h.strategyWidget(d);
+  assert.match(html, /Waiting for: Fuel is collecting laps \(2\/3 valid\)/);
+  assert.match(html, /Collecting laps · 2\/3 valid/);
+  assert.doesNotMatch(html, /\(0\/3 valid\)/);
+  delete d.diagnostics.fuel;   // diagnostics missing: fall back to the resource count, never NaN/undefined
+  assert.match(h.strategyWidget(d), /Fuel is collecting laps \(0\/3 valid\)/); assert.doesNotMatch(h.strategyWidget(d), /NaN|undefined/);
+});
+
+test('stop_required does not claim a range shortfall for a manually planned stop (review of #83)', () => {
+  const h = helpers(), d = strategyDemo(); d.provider_pit_settings = null; d.status = 'stop_required';
+  d.plan_source = 'manual'; d.planned_stop_lap = 20; d.effective_range_laps = 50;
+  const manual = h.strategyWidget(d);
+  assert.match(manual, /A stop is planned \(see Plan\)/); assert.doesNotMatch(manual, /range ends before the finish/);
+  d.plan_source = 'auto';
+  assert.match(h.strategyWidget(d), /The range ends before the finish: stop no later than the latest resource-safe stop lap/);
 });

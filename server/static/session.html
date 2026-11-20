@@ -533,10 +533,13 @@ function strategyWidget(d, ctx = {}) {
     ${settings.capacity_feasible===null?'<p class="muted">Tank capacity unknown · feasibility unverified</p>':''}
     ${settings.additional_stop_required?'<p class="strategy-danger">ADDITIONAL STOP REQUIRED</p>':''}</div>` : '';
   // One plain sentence for the state, from the API status, the per-resource states and the session facts only.
-  const minimum=kind=>d.diagnostics?.[kind==='fuel'?'fuel':'energy']?.minimum_samples ?? 3;
+  // Collecting progress as the API reports it: Fuel keeps its count in diagnostics.fuel.estimate (the resource count stays 0
+  // until the estimate is ready), Energy in the resource itself.
+  const progress=r=>r.resource_kind==='fuel'?{count:d.diagnostics?.fuel?.estimate?.available_sample_count??r.sample_count,
+    minimum:d.diagnostics?.fuel?.estimate?.minimum_samples??3}:{count:r.sample_count,minimum:d.diagnostics?.energy?.minimum_samples??3};
   const waiting=(d.resources||[]).filter(r=>r.available===false).map(r=>{
     const state=r.state??(r.fresh===false?'stale':'collecting');
-    return `${label(r.resource_kind)} ${state==='no_current_value'?'has no valid current value':state==='stale'?'has no fresh telemetry':`is collecting laps (${esc(r.sample_count)}/${esc(minimum(r.resource_kind))} valid)`}`;});
+    return `${label(r.resource_kind)} ${state==='no_current_value'?'has no valid current value':state==='stale'?'has no fresh telemetry':`is collecting laps (${esc(progress(r).count)}/${esc(progress(r).minimum)} valid)`}`;});
   const states=(d.resources||[]).map(r=>r.state);
   const hints={
     collecting_or_stale:()=>`Waiting for: ${waiting.join('; ')||'resource data'}.${states.includes('collecting')?` A valid lap is a full lap without a pit stop.`:''}${states.includes('stale')||states.includes('no_current_value')?' Check that the agent is connected and the car is live.':''}`,
@@ -546,7 +549,8 @@ function strategyWidget(d, ctx = {}) {
       :'No fresh scoring for the focused car yet. Check that the agent is connected.',
     capability_unknown:()=>'The agent has not reported yet whether this car uses Virtual Energy. No stop is planned until it does.',
     finish_unknown:()=>'The finish lap is unknown: it needs a confirmed lap limit, or the session end time plus at least 3 clean laps for the pace.',
-    stop_required:()=>'The range ends before the finish: stop no later than the latest resource-safe stop lap.',
+    stop_required:()=>d.plan_source==='manual'?'A stop is planned (see Plan). The latest resource-safe stop is the last lap that keeps the reserve.'
+      :'The range ends before the finish: stop no later than the latest resource-safe stop lap.',
     no_stop_required:()=>'The range covers the finish including the reserve.'};
   const why=hints[d.status]?`<p class="strategy-why muted">${hints[d.status]()}</p>`:'';
   const energyName=ve?'Virtual Energy':'Energy', hasEnergy=Boolean(energy);
@@ -565,7 +569,7 @@ function strategyWidget(d, ctx = {}) {
       const unknown=state==='no_current_value';
       const current=unknown?'UNKNOWN':amount(r.resource_kind,r.current);
       const rate=r.consumption_per_lap===null||r.consumption_per_lap===undefined?'consumption unknown':`${amount(r.resource_kind,r.consumption_per_lap)}/lap`;
-      const note={no_current_value:'No valid current value',stale:'Stale · not live',collecting:r.resource_kind==='energy'?`Collecting laps · ${esc(r.sample_count)}/3 valid`:'Collecting laps',ready:`${esc(r.sample_count)} samples`}[state]||'';
+      const note={no_current_value:'No valid current value',stale:'Stale · not live',collecting:r.resource_kind==='energy'?`Collecting laps · ${esc(r.sample_count)}/3 valid`:Number.isFinite(d.diagnostics?.fuel?.estimate?.available_sample_count)?`Collecting laps · ${esc(d.diagnostics.fuel.estimate.available_sample_count)}/${esc(d.diagnostics.fuel.estimate.minimum_samples??3)} valid`:'Collecting laps',ready:`${esc(r.sample_count)} samples`}[state]||'';
       return `<article><h3>${name} ${d.limiting_resource===r.resource_kind?'<span class="strategy-attention">LIMIT</span>':''}</h3>
     <strong class="${unknown||state==='stale'?'muted':''}">${current}</strong> <small class="muted">now</small> · ${rate}
     <p>${r.available?`range ${fuelNumber(r.range_laps,' laps',1)}`:'range —'} · ${note}</p></article>`;}).join('')}</div>
