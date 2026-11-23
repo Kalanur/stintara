@@ -23,3 +23,7 @@ Known limitation
 Compatibility
   Agent 0.2.0 and later require a Stintara server that includes the Track Map /
   Race Control support (PR #39 or newer). Deploy the server first.
+  Agent 0.3.0 and later declare their version and capabilities and send a
+  connection id (source_epoch) with every message. Builds older than 0.3.0 do
+  not; a current server then stores no lap tyre/fuel checkpoints for them.
+  Replace any older build, including unversioned field-test builds.

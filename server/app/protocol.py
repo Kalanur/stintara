@@ -1,5 +1,5 @@
 """Stintara transport contracts, independent of provider wire classes."""
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, FiniteFloat, StrictBool
 
@@ -127,6 +127,10 @@ class Hello(BaseModel):
     protocol: Literal["stintara-agent-v1"]
     token: str = Field(min_length=1, max_length=1024)
     simulator: Literal["lmu"]  # only implemented adapter; domain remains generic
+    # Optional identification and capabilities (agent 0.3.0+). Deliberately untyped here: agent_compat.parse
+    # sanitises them, and a malformed block must never reject an otherwise valid (e.g. older) agent.
+    agent: Any = None
+    capabilities: Any = None
 
 
 PAYLOADS = {"connection": Connection, "session_info": SessionInfo, "scoring": Scoring,

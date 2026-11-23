@@ -19,7 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ValidationError
 
-from . import history, session_meta, track_repo
+from . import agent_compat, history, session_meta, track_repo
 from .build import APP_VERSION, build_info, inject_build_label
 from .chain import CHAIN_COLUMNS, CHAIN_JOINS, pop_chain
 from .domain import sample_due
@@ -73,6 +73,14 @@ if SESSION_TIMEOUT_SECONDS < 15:
 active_agents: set[str] = set()
 ingest_lock = asyncio.Lock()
 logger = logging.getLogger("stintara.ingest")
+# Operator-channel diagnostics about agent connections (version, capabilities, received source_epoch). A separate
+# logger so that invalid-message accounting stays unchanged; INFO is visible even without logging configuration.
+agent_logger = logging.getLogger("stintara.agent")
+agent_logger.setLevel(logging.INFO)
+if not logging.getLogger().handlers and not agent_logger.handlers:
+    _agent_handler = logging.StreamHandler()
+    _agent_handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+    agent_logger.addHandler(_agent_handler)
 MAX_INVALID_PAYLOADS = 10
 INVALID_PAYLOAD_WINDOW_SECONDS = 60
 
@@ -87,6 +95,17 @@ def log_invalid(agent_key, kind, exc, code=None, reason=None):
     logger.warning(json.dumps({"event": "invalid_ingest_message", "agent_id": agent_key,
                               "message_type": kind, "error_class": type(exc).__name__,
                               "validation": errors, "close_code": code, "close_reason": reason}))
+
+
+def log_agent(event, agent_key, **fields):
+    """Operator-channel diagnostics about one agent connection. Only validated, bounded values; no payloads, tokens
+    or free text from the peer. A restriction (no usable source_epoch) is a warning, everything else is info."""
+    restricted = (fields.get("verdict") in ("not_received", "inconsistent")
+                  or "limitations" in fields and bool(fields["limitations"])
+                  or fields.get("compat_status") == "unknown_legacy"
+                  or fields.get("epoch_valid", 0) > 0 and fields.get("epoch_missing", 0) + fields.get("epoch_invalid", 0) > 0)
+    agent_logger.log(logging.WARNING if restricted else logging.INFO,
+               json.dumps({"event": event, "agent_id": agent_key, **fields}))
 
 
 def vehicle_identity(row):
@@ -1136,9 +1155,15 @@ async def ingest(ws: WebSocket):
     await ws.accept()
     agent_key = None
     kind = None
+    audit = agent_compat.EpochAudit(False)
     invalid_payloads = deque()
     try:
-        hello = Hello.model_validate(decode_message(await asyncio.wait_for(ws.receive_text(), timeout=10)))
+        raw_hello = await asyncio.wait_for(ws.receive_text(), timeout=10)
+        if len(raw_hello) > agent_compat.MAX_HELLO_BYTES:
+            log_invalid(None, None, ValueError(), 1009, "message too large")
+            await ws.close(code=1009, reason="message too large")
+            return
+        hello = Hello.model_validate(decode_message(raw_hello))
         agent = await authenticate_agent(hello.token)
         if not agent:
             log_invalid(None, None, ValueError(), 1008, "invalid token")
@@ -1151,7 +1176,18 @@ async def ingest(ws: WebSocket):
             return
         agent_key = key
         active_agents.add(key)
-        await ws.send_json({"type": "agent_welcome", "driver_slug": agent["slug"], "version": APP_VERSION})
+        info = agent_compat.parse(hello.agent, hello.capabilities)
+        audit = agent_compat.EpochAudit("source_epoch" in info.capabilities)
+        welcome = {"type": "agent_welcome", "driver_slug": agent["slug"], "version": APP_VERSION}
+        compat = agent_compat.assess(info)
+        if compat is not None:      # agents that did not identify themselves get the unchanged welcome
+            welcome["compat"] = compat
+        await ws.send_json(welcome)
+        log_agent("agent_connected", agent_key, declared=info.declared, agent_version=info.version,
+                  agent_channel=info.channel, agent_revision=info.revision,
+                  capabilities=sorted(info.capabilities), unknown_capabilities=info.unknown_capabilities,
+                  compat_status=compat["status"] if compat else "unknown_legacy",
+                  limitations=compat["limitations"] if compat else [])
         while True:
             kind = None
             raw = await ws.receive_text()
@@ -1186,10 +1222,12 @@ async def ingest(ws: WebSocket):
                     await ws.close(code=1008, reason=reason)
                     return
                 continue
+            epoch = audit.observe(message.get("source_epoch"))
+            verdict = audit.verdict()
+            if verdict:
+                log_agent("agent_epoch_check", agent_key, verdict=verdict, declared_source_epoch=audit.declared_epoch,
+                          **audit.counts())
             async with ingest_lock:
-                epoch = message.get("source_epoch")
-                if not (isinstance(epoch, str) and re.fullmatch(r"[A-Za-z0-9_-]{8,64}", epoch)):
-                    epoch = None
                 await handle_message(agent, hello.simulator, kind, payload, epoch)
     except WebSocketDisconnect:
         pass
@@ -1198,6 +1236,7 @@ async def ingest(ws: WebSocket):
         await ws.close(code=1008, reason="invalid Stintara message")
     finally:
         if agent_key:
+            log_agent("agent_disconnected", agent_key, declared_source_epoch=audit.declared_epoch, **audit.counts())
             active_agents.discard(agent_key)
             state = runtime.get(agent_key, {})
             state.pop("pending_convergence", None)
