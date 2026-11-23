@@ -3,10 +3,17 @@
 The Agent is versioned independently of the Stintara server. Releases are tagged
 `agent-vX.Y.Z`. The wire protocol is `stintara-agent-v1` for all versions below.
 
-## Unreleased
+## 0.3.0
 
-- Adds `source_epoch` (random per Pitwall socket connection) to the envelope of every forwarded message, so the server can tell a Pitwall restart from a continuous stream (#59). Payloads and the protocol name `stintara-agent-v1` are unchanged.
-- Compatibility: old servers ignore the key. A server with this change treats lap tyre/fuel data of agents without this field as unverified (stored as unknown); update the server first, then the agents.
+Lap tyre/fuel provenance and compatibility reporting. **Agents older than 0.3.0 do not send `source_epoch`**; a current
+server therefore stores no lap tyre/fuel checkpoints and no measured lapped intervals for them (live timing, strategy
+samples and virtual energy are unaffected). Replace older Windows builds, including any unversioned field-test build.
+
+- Adds `source_epoch` (random per Pitwall socket connection, not per Stintara uplink) to the envelope of every forwarded message, so the server can tell a Pitwall restart from a continuous stream (#59). Payloads and the protocol name `stintara-agent-v1` are unchanged.
+- `agent_hello` additionally carries `agent` (version, build channel, full revision) and `capabilities` (`source_epoch`). The fields are additive; older servers ignore them.
+- A server with compatibility reporting answers in `agent_welcome.compat`; the agent prints it (`compatible` = declaration accepted, not a verification, or `limited` with the restricted functions). Older servers send nothing, which is reported as unknown. Only fixed texts are printed.
+- Prints version, build channel and revision at startup (`--version` unchanged in form).
+- Compatibility: old servers ignore the new fields and the `source_epoch` key; a server with this change treats lap tyre/fuel data of agents without `source_epoch` as unverified (stored as unknown). Update the server first, then the agents. A mixed fleet stays supported.
 
 ## 0.2.0
 

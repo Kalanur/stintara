@@ -10,18 +10,20 @@ import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 try:
+    from .compat import compat_lines
     from .config import load_config
     from .pitwall import normalize
-    from .version import PROTOCOL, version_text
+    from .version import CAPABILITIES, PROTOCOL, banner, hello_info, version_text
 except ImportError:  # python agent/stintara_agent.py
+    from compat import compat_lines
     from config import load_config
     from pitwall import normalize
-    from version import PROTOCOL, version_text
+    from version import CAPABILITIES, PROTOCOL, banner, hello_info, version_text
 
 
 async def forward(pitwall, uplink, source_epoch=None):
-    # source_epoch identifies this Pitwall connection; the server uses it to tell a Pitwall restart from a
-    # continuous stream while the Stintara uplink stays open.
+    # source_epoch identifies this Pitwall connection (never the Stintara uplink); the server uses it to tell a
+    # Pitwall restart from a continuous stream while the Stintara uplink stays open.
     last_sent = {}
     async for raw in pitwall:
         if not isinstance(raw, str):
@@ -79,11 +81,16 @@ async def connected_run(config):
         await uplink.send(json.dumps({
             "type": "agent_hello", "protocol": PROTOCOL,
             "token": config.token, "simulator": "lmu",
+            # Additive identification and declared capabilities (older servers ignore them). A declaration is
+            # not proof: the server checks the source_epoch values it actually receives.
+            "agent": hello_info(), "capabilities": list(CAPABILITIES),
         }))
         welcome = json.loads(await asyncio.wait_for(uplink.recv(), timeout=10))
         if not isinstance(welcome, dict) or welcome.get("type") != "agent_welcome":
             raise ValueError("Stintara handshake rejected")
         print(f"Connected to Stintara as {welcome.get('driver_slug')}")
+        for line in compat_lines(welcome):
+            print(line)
         forwarding = asyncio.create_task(bridge(uplink, config))
         closed = asyncio.create_task(uplink.wait_closed())
         try:
@@ -123,6 +130,7 @@ def cli(argv=None):
         config = load_config(args.config)
     except ValueError as exc:
         parser.exit(2, f"Configuration error: {exc}\n")
+    print(banner())
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
