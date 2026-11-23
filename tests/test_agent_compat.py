@@ -96,5 +96,9 @@ def test_agent_shows_only_whitelisted_text_from_the_server():
     assert "source_epoch" in text and "restricted" in text and "secret-token" not in text
     ok = "\n".join(compat.compat_lines({"compat": {"status": "compatible", "limitations": []}}))
     assert "not confirmed" in ok
-    for welcome in ({"type": "agent_welcome"}, {"compat": "x"}, {"compat": {"status": "bogus-status"}}, None, []):
+    odd = compat.compat_lines({"compat": {"status": "limited", "limitations": [[], {}, None, 3]}})
+    assert odd[0].startswith("Server compatibility: limited") and len(odd) == 1
+    for welcome in ({"type": "agent_welcome"}, {"compat": "x"}, {"compat": {"status": "bogus-status"}}, None, [],
+                    {"compat": {"status": []}}, {"compat": {"status": {"a": 1}}}, {"compat": {"status": None}},
+                    {"compat": {"status": ["limited"], "limitations": [[], {}]}}):
         assert compat.compat_lines(welcome) == ["Server compatibility: not reported by this server (unknown)"]

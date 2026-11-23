@@ -19,9 +19,11 @@ LIMITATIONS = {
 def compat_lines(welcome):
     """Lines to print after the handshake. An older server sends no answer; that is reported as unknown."""
     answer = welcome.get("compat") if isinstance(welcome, dict) else None
-    if not isinstance(answer, dict) or answer.get("status") not in STATUS:
+    status = answer.get("status") if isinstance(answer, dict) else None
+    # Type check first: an unhashable value (list, dict) must never raise before forwarding starts.
+    if not isinstance(status, str) or status not in STATUS:
         return ["Server compatibility: not reported by this server (unknown)"]
-    lines = [f"Server compatibility: {answer['status']} - {STATUS[answer['status']]}"]
+    lines = [f"Server compatibility: {status} - {STATUS[status]}"]
     found = answer.get("limitations")
     for code in found if isinstance(found, list) else []:
         if isinstance(code, str) and code in LIMITATIONS:
