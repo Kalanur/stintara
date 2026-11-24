@@ -227,7 +227,7 @@ def test_premise_default_createmutexw_is_denied_for_a_restricted_token():
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = (w.LPVOID, w.BOOL, w.LPCWSTR)
     kernel.CreateMutexW.restype = w.HANDLE
-    name = "Global\StintaraAgent-premise-" + os.urandom(8).hex()
+    name = "Global\\StintaraAgent-premise-" + os.urandom(8).hex()
     first = kernel.CreateMutexW(None, False, name)
     assert first
     try:
