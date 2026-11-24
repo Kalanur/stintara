@@ -6,7 +6,7 @@ Git-ignored ``_build_info.py``; source runs fall back to conservative defaults.
 """
 from __future__ import annotations
 
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.3.1"
 PROTOCOL = "stintara-agent-v1"
 # Capabilities this build really implements and declares in agent_hello. Only add a name once the code does it.
 # source_epoch: every forwarded message carries a random id of the current Pitwall connection (not the uplink).

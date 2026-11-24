@@ -191,7 +191,7 @@ def test_ctrl_c_is_clean_but_unexpected_errors_remain_visible(monkeypatch, capsy
     monkeypatch.setattr(stintara_agent.asyncio, "run", interrupted)
     stintara_agent.cli([])
     assert capsys.readouterr().out == (
-        "Stintara Agent 0.3.0 (build dev, revision unknown)\nStintara agent stopped.\n")
+        "Stintara Agent 0.3.1 (build dev, revision unknown)\nStintara agent stopped.\n")
 
     def broken(coro):
         coro.close()
