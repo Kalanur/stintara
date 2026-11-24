@@ -136,6 +136,16 @@ Implemented and covered by synthetic tests; not yet verified against a released 
 * **Operator channel only.** Per connection the server logs `agent_connected` (validated version/channel/revision, accepted capabilities, status; a legacy or limited agent is a warning), a one-time `agent_epoch_check` after 20 messages (`verified`, `not_received` or `inconsistent`, from the `source_epoch` values actually received, independent of the declaration) and `agent_disconnected` with the counters. Nothing is exposed through public APIs or the database; no schema change, no change to ingest, timing or telemetry computation, and agents are never disconnected for this.
 * `source_epoch` stays bound to the Pitwall socket connection (generated in `bridge` per successful Pitwall connection). Today an uplink reconnect also opens a new Pitwall socket and therefore gets a new value; this feature does not tie the value to the uplink and does not change that lifecycle.
 
+### Agent single-instance protection (unreleased, Windows)
+
+Implemented and covered by unit and Windows integration tests; the built onefile EXE test runs in the `windows-agent` CI job.
+
+* Purpose: one running agent per local identity `(server_ws, token)` on one computer. It prevents accidental double starts that would otherwise reach the server as `agent already connected`. The protection is local and client-side only; the same token on two computers is still decided by the server. No server, protocol or schema change.
+* Mechanism: a named Windows mutex used as an existence marker (`Global\StintaraAgent-<32 hex>`, falling back to `Local\` if `Global\` is denied). The suffix is a truncated SHA-256 over a domain tag and the length-prefixed normalized `server_ws` and token, so the token never appears in the name, messages or logs. The kernel removes the object when the last handle closes, so normal exit, crash and hard kill leave no stale lock.
+* Onefile: only the Python child process takes the lock (after configuration is loaded, before the banner and any network access); the bootloader parent never does, so parent and child are not duplicates. No detection by process name or path. If only the parent is killed, the child keeps running, still connected and still holding the lock.
+* A rejected copy prints a fixed message to stderr and exits with code 3 without signalling, handshaking with or otherwise touching the running instance. `--version`, `--help` and configuration errors exit earlier and never take the lock.
+* Fail-open: if the lock cannot be created for any reason other than "already exists", the agent starts with a fixed warning rather than refusing to run. There is no override switch; use a different token to run two agents in parallel. Non-Windows runs have no lock.
+
 ## Maintaining these decisions
 
 Update this document when an architectural decision changes. Keep intended behavior and verified implementation status distinct. For development rules, read [AGENTS.md](../AGENTS.md).

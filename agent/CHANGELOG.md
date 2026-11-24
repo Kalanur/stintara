@@ -3,6 +3,10 @@
 The Agent is versioned independently of the Stintara server. Releases are tagged
 `agent-vX.Y.Z`. The wire protocol is `stintara-agent-v1` for all versions below.
 
+## Unreleased
+
+- Single-instance protection (Windows): a second start with the same `server_ws` and token on the same computer exits immediately with exit code 3 and a clear message, before any network access. The running instance is not affected. The lock is a named Windows mutex derived from a hash of server URL and token (no secret in the name or output); Windows releases it automatically on normal exit, crash or hard kill. Other configurations (different token or server) can run in parallel. If the lock cannot be created the agent starts anyway with a warning. No change to the protocol, `source_epoch` or forwarding. No version bump yet; the version is set when the release is prepared.
+
 ## 0.3.0
 
 Lap tyre/fuel provenance and compatibility reporting. **Agents older than 0.3.0 do not send `source_epoch`**; a current

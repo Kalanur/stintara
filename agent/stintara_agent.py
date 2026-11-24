@@ -13,11 +13,13 @@ try:
     from .compat import compat_lines
     from .config import load_config
     from .pitwall import normalize
+    from .single_instance import ALREADY_RUNNING_MESSAGE, EXIT_ALREADY_RUNNING, AlreadyRunning, acquire
     from .version import CAPABILITIES, PROTOCOL, banner, hello_info, version_text
 except ImportError:  # python agent/stintara_agent.py
     from compat import compat_lines
     from config import load_config
     from pitwall import normalize
+    from single_instance import ALREADY_RUNNING_MESSAGE, EXIT_ALREADY_RUNNING, AlreadyRunning, acquire
     from version import CAPABILITIES, PROTOCOL, banner, hello_info, version_text
 
 
@@ -130,7 +132,14 @@ def cli(argv=None):
         config = load_config(args.config)
     except ValueError as exc:
         parser.exit(2, f"Configuration error: {exc}\n")
+    # Before any network access or other side effect. --version/--help and configuration errors exit earlier.
+    try:
+        lock = acquire(config.server_ws, config.token)
+    except AlreadyRunning:
+        parser.exit(EXIT_ALREADY_RUNNING, ALREADY_RUNNING_MESSAGE + "\n")
     print(banner())
+    if lock.degraded:
+        print(f"Warning: {lock.degraded}")
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
