@@ -1,9 +1,11 @@
 """Centerline learning, closure plausibility and sector attribution on wholly synthetic geometry."""
 import copy
+import itertools
 import math
 
 import pytest
 
+from server.app import trackmap
 from server.app.trackmap import (
     MAX_POINTS,
     CenterlineLearner,
@@ -231,7 +233,7 @@ def test_start_finish_marker_lies_on_the_line_and_points_in_the_direction_of_tra
     assert math.dist(marker["point"], circuit(0.0)) < 12                  # lap distance 0, within the closing gap
     assert marker["direction"] == pytest.approx([1.0, 0.0], abs=0.15)     # the bottom straight is driven towards +x
     assert math.hypot(*marker["direction"]) == pytest.approx(1.0)
-    assert 0 < marker["arc_m"] <= 80                                      # accuracy bound: the gap it was interpolated across
+    assert 0 < marker["arc_m"] <= 80                                      # the closing arc: lap distance between the end points
 
 
 def test_start_finish_marker_sits_at_lap_distance_zero_of_a_consistent_closing_arc():
@@ -261,19 +263,39 @@ def test_start_finish_marker_recovers_from_a_closing_chord_far_below_the_arc():
     assert marker is not None and math.dist(marker["point"], circuit(0.0)) < 6.0
 
 
+def tail_ahead(amount):
+    """Displacement for closed_geometry: the whole stretch before the line sits `amount` metres further along the
+    track than its lap distance says, so tail and head extrapolate to different places."""
+    return lambda d: amount if d > LENGTH - 120 else 0.0
+
+
 def test_start_finish_marker_refuses_a_position_the_two_sides_contradict():
-    # Daytona-like: the whole stretch before the line sits about one closing arc further along the track than its lap
-    # distance says, so the tail and the head extrapolate to different places. No marker, no invented position.
-    def lag(d):
-        return 12.0 if d > LENGTH - 120 else 0.0
-    points, distances = closed_geometry(arc=11.3, along=lag)
-    model = model_from(points, distances)
-    assert model.start_finish_marker() is None
-    assert public_geometry(model)["start_finish_marker"] is None
-    assert public_geometry(model)["complete"] is True                      # the outline itself stays usable
-    # one side moved by less than the closing arc is within the published accuracy and still accepted
-    mild = model_from(*closed_geometry(arc=11.3, along=lambda d: 5.0 if d > LENGTH - 120 else 0.0))
-    assert mild.start_finish_marker() is not None
+    # Daytona-like: head and tail extrapolations 11.5-14.2 m apart for an 11.3 m closing arc. No marker, and nothing is
+    # invented to replace it.
+    for amount in (13.0, 14.0, 16.0):
+        model = model_from(*closed_geometry(arc=11.3, along=tail_ahead(amount)))
+        assert model.start_finish_marker() is None
+        assert public_geometry(model)["start_finish_marker"] is None
+        assert public_geometry(model)["complete"] is True                  # the outline itself stays usable
+    # a smaller disagreement is within what consistent real geometry shows and is accepted, with the spread reported
+    mild = model_from(*closed_geometry(arc=11.3, along=tail_ahead(5.0))).start_finish_marker()
+    assert mild is not None and 4.0 < mild["evidence_spread_m"] < 6.0
+
+
+def test_closing_arc_is_neither_an_error_bound_nor_a_tolerance():
+    # The closing arc only says how much lap distance lies between the end points. It must neither tighten nor widen
+    # what is accepted, and it must not be read as the size of the position error.
+    tiny = model_from(*closed_geometry(arc=0.2, along=tail_ahead(4.0))).start_finish_marker()
+    assert tiny is not None and tiny["arc_m"] == pytest.approx(0.2)
+    error = math.dist(tiny["point"], circuit(0.0))
+    assert error > 5 * tiny["arc_m"]                                      # the real error is far larger than the arc
+    assert error <= tiny["evidence_spread_m"] and tiny["evidence_spread_m"] == pytest.approx(4.0, abs=0.5)
+    for arc in (0.2, 11.3, 40.0):                                         # the same disagreement for any arc
+        spread = model_from(*closed_geometry(arc=arc, along=tail_ahead(20.0)))
+        assert spread.start_finish_marker() is None                       # a big arc does not make 20 m acceptable
+    for arc in (0.2, 11.3, 40.0):
+        marker = model_from(*closed_geometry(arc=arc, along=tail_ahead(6.0))).start_finish_marker()
+        assert marker is not None and 5.0 < marker["evidence_spread_m"] < 9.5   # and a small arc does not forbid 6 m
 
 
 def test_start_finish_marker_needs_more_than_a_good_closing_chord():
@@ -283,6 +305,103 @@ def test_start_finish_marker_needs_more_than_a_good_closing_chord():
     points, distances = closed_geometry(arc=11.3, along=jump)
     assert math.dist(points[-1], points[0]) == pytest.approx(11.3, abs=3.0)   # the chord alone looks fine
     assert model_from(points, distances).start_finish_marker() is None
+
+
+# --- Each protective condition is pinned by a case in which only that condition decides ------------------------
+
+def loadable(points, distances):
+    """The geometry survives the persistence validation, i.e. a stored record like this can really exist."""
+    return validate_record(geometry_record(model_from(points, distances))) is not None
+
+
+def marker_of(points, distances):
+    return model_from(points, distances).start_finish_marker()
+
+
+def eight_fits(points, distances):
+    """The tail and head fit of every window size, as the marker derivation builds them."""
+    fits = []
+    for size in trackmap.SF_WINDOW_SIZES:
+        fits.append((trackmap._fit_window(points[-size:], distances[-size:], 0.0),
+                     trackmap._fit_window(points[:size], distances[:size], LENGTH)))
+    return fits
+
+
+def angle(a, b):
+    return math.degrees(math.acos(max(-1.0, min(1.0, a.unit[0] * b.unit[0] + a.unit[1] * b.unit[1]))))
+
+
+def head_tail_pairs_agree(points, distances, arc):
+    """The weaker comparison of the reviewed first version: head against tail of the SAME window size only."""
+    return all(tail is not None and head is not None and angle(tail, head) <= 20.0
+               and math.dist(tail.at(LENGTH), head.at(LENGTH)) <= max(arc, 5.0) for tail, head in eight_fits(points, distances))
+
+
+def kinked(degrees, arc=12.0):
+    """Both sides are exactly straight and meet exactly at the line, but their directions differ by `degrees`."""
+    points, distances = closed_geometry(arc=arc)
+    line, half, n = circuit(0.0), math.radians(degrees / 2), len(points)
+    for i in range(6):
+        points[i] = [line[0] + distances[i] * math.cos(half), line[1] + distances[i] * math.sin(half)]
+        j = n - 1 - i
+        points[j] = [line[0] + (distances[j] - LENGTH) * math.cos(-half), line[1] + (distances[j] - LENGTH) * math.sin(-half)]
+    return points, distances
+
+
+def test_the_direction_check_alone_refuses_straight_sides_that_point_25_degrees_apart(monkeypatch):
+    points, distances = kinked(25.0)
+    assert loadable(points, distances)
+    fits = eight_fits(points, distances)
+    assert all(t is not None and h is not None for t, h in fits)           # straight, plausible speed, tiny residual
+    assert max(math.dist(t.at(LENGTH), h.at(LENGTH)) for t, h in fits) < 0.01   # positions agree exactly
+    assert angle(*fits[0]) == pytest.approx(25.0, abs=0.5)
+    assert marker_of(points, distances) is None                            # only the direction can be the reason
+    monkeypatch.setattr(trackmap, "SF_MAX_DIRECTION_DEG", 30.0)
+    assert marker_of(points, distances) is not None                        # lifting just that limit accepts it
+    monkeypatch.setattr(trackmap, "SF_MAX_DIRECTION_DEG", 20.0)
+    assert marker_of(*kinked(15.0)) is not None                            # a smaller kink is within the limit
+
+
+def test_the_residual_check_alone_refuses_a_window_that_is_not_a_straight_stretch(monkeypatch):
+    # zigzag of 10 m at the points before the line: the fitted directions and positions still agree, the window is not a line
+    zigzag = [(0.0, 10.0 if i % 2 == 0 else -10.0) for i in range(6)]
+    points, distances = closed_geometry(arc=12.0, tail=zigzag)
+    assert loadable(points, distances)
+    assert marker_of(points, distances) is None
+    monkeypatch.setattr(trackmap, "SF_MAX_RESIDUAL_M", 50.0)
+    marker = marker_of(points, distances)
+    assert marker is not None and marker["evidence_spread_m"] < trackmap.SF_MAX_POSITION_SPREAD_M   # only the residual objected
+
+
+# Offsets (metres, nearest to the line first) found by searching for geometry that the reviewed first version accepted
+# because head and tail of every single window size agree, while the window sizes contradict each other.
+DIRECTION_FAN = [-0.2, 10.0, 10.0, -5.5, 1.1, -12.0, 3.2, 2.0, -1.8, 2.0, -6.7, 1.8]
+POSITION_FAN = [-7.5, 3.1, 6.6, 6.9, -4.3, -2.4, 3.3, 6.0, 8.1, 5.5, -2.6, -8.0]
+
+
+def test_directions_of_different_window_sizes_must_agree_too(monkeypatch):
+    sideways = [(0.0, v) for v in DIRECTION_FAN]
+    points, distances = closed_geometry(arc=8.0, spacing=8.0, head=sideways[:6], tail=sideways[6:])
+    assert loadable(points, distances)
+    assert head_tail_pairs_agree(points, distances, 8.0)                   # the per-size comparison alone is satisfied
+    flat = [fit for pair in eight_fits(points, distances) for fit in pair]
+    assert max(angle(a, b) for a, b in itertools.combinations(flat, 2)) > 45.0   # but the eight directions fan out
+    assert marker_of(points, distances) is None
+    monkeypatch.setattr(trackmap, "SF_MAX_DIRECTION_DEG", 60.0)           # without that check the mean would be shown
+    assert marker_of(points, distances) is not None
+
+
+def test_positions_of_different_window_sizes_must_agree_too(monkeypatch):
+    along = [(v, 0.0) for v in POSITION_FAN]
+    points, distances = closed_geometry(arc=12.0, head=along[:6], tail=along[6:])
+    assert loadable(points, distances)
+    assert head_tail_pairs_agree(points, distances, 12.0)
+    flat = [fit for pair in eight_fits(points, distances) for fit in pair]
+    assert max(angle(a, b) for a, b in itertools.combinations(flat, 2)) < 20.0     # directions are fine
+    assert max(math.dist(a.at(LENGTH), b.at(LENGTH)) for a, b in itertools.combinations(flat, 2)) > 15.0
+    assert marker_of(points, distances) is None
+    monkeypatch.setattr(trackmap, "SF_MAX_POSITION_SPREAD_M", 25.0)
+    assert marker_of(points, distances) is not None
 
 
 def test_start_finish_marker_is_never_guessed():
@@ -337,7 +456,7 @@ def test_start_finish_marker_of_stored_geometry_needs_no_persistence_and_survive
 
 
 def test_reloaded_stored_geometry_is_judged_on_its_own_evidence_and_never_rewritten():
-    for along, expected in ((lambda d: 0.0, True), (lambda d: 12.0 if d > LENGTH - 120 else 0.0, False)):
+    for along, expected in ((lambda d: 0.0, True), (tail_ahead(14.0), False)):
         original = model_from(*closed_geometry(arc=11.3, along=along))
         record = geometry_record(original)
         snapshot = copy.deepcopy(record)

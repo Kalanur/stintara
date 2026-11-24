@@ -21,13 +21,21 @@ STEP_FACTOR, STEP_SLACK_M = 1.5, 10.0   # euclidean step <= travelled * factor +
 SECTOR_MIN_OBSERVATIONS = 2
 SECTOR_MAX_SPREAD_M = 60.0
 MAX_TRACKS = 16
-# Start/finish marker: position and direction come from straight-line fits of the points just before and just after
-# the lap-distance wrap, never from the single closing chord, and the two sides must agree independently.
-SF_WINDOW_SIZES = (3, 4, 5, 6)     # points per side; every size must pass, so one noisy point cannot decide
+# Start/finish marker: position and direction come from straight-line fits of the points just before (tail) and just
+# after (head) the lap-distance wrap, never from the single closing chord. Eight fits (tail and head, each for four
+# window sizes) are compared with each other; the marker exists only if ALL of them agree. These limits decide
+# whether the evidence is consistent. They are acceptance limits, not a measured or promised position accuracy.
+SF_WINDOW_SIZES = (3, 4, 5, 6)     # points per side
 SF_MIN_SPEED, SF_MAX_SPEED = 0.6, 1.6   # metres of position per metre of lap distance inside a window
 SF_MAX_RESIDUAL_M = 8.0            # a window that is not a straight line (corner) or too noisy gives no marker
-SF_MAX_DIRECTION_DEG = 20.0        # head and tail directions must agree
-SF_MIN_POSITION_TOLERANCE_M = 5.0  # head and tail position must agree within max(this, closing arc)
+# Largest angle between ANY two of the eight fitted directions. A 30 m and a 75 m window of the same bend differ by
+# about 20 degrees at a radius of 65 m; anything sharper is not a straight stretch to extrapolate through the arc.
+SF_MAX_DIRECTION_DEG = 20.0
+# Largest distance between ANY two of the eight positions extrapolated to lap distance 0. Sample positions of the
+# stored geometries disagree with their lap distance by several metres (the per-sample step is 15 m +- 3-4 m), so two
+# honest extrapolations can differ by about 5-12 m (eight stored geometries of other tracks: 4.7-11.7 m); one stored
+# geometry whose head and tail contradict each other is 14.2 m apart.
+SF_MAX_POSITION_SPREAD_M = 12.0
 GEOMETRY_SCHEMA_VERSION = 1    # persisted track_geometries layout; unknown versions are never interpreted
 MIN_TRACK_LENGTH_M, MAX_TRACK_LENGTH_M = 200.0, 60000.0
 
@@ -178,14 +186,20 @@ class TrackModel:
         """Start/finish line derived from the closed geometry and the lap distance, never from a position guess.
 
         Lap distance 0 (= the track length) lies on the closing arc between the last and the first stored point.
-        Both sides of that arc are judged independently: for several window sizes a straight line (position as a
-        function of lap distance) is fitted to the last points before and to the first points after the wrap, and
-        each fit is extrapolated to lap distance 0. The marker is the mean of the two extrapolations and the
-        direction the mean direction of travel. It exists only if every window is a plausible straight stretch,
-        head and tail directions agree, and the two extrapolated positions agree within max(closing arc, 5 m), the
-        published accuracy bound `arc_m`. Contradictory evidence (for example the provider's lap distance and the
-        positions disagree at the line) gives no marker. The single closing chord is not used: it is as noisy as
-        two samples, and a stored geometry is never re-learned or rewritten here.
+        For each window size a straight line (position as a function of lap distance) is fitted to the last points
+        before (tail) and to the first points after (head) the wrap, and every fit is extrapolated to lap distance 0.
+        That gives eight directions and eight positions. The marker exists only if every window is a plausible
+        straight stretch AND all eight directions agree pairwise (not only head with tail of one size) AND all eight
+        positions agree pairwise. Only then are they combined: the point is the mean position, the direction the
+        normalised sum of directions that already agree. Contradictory evidence (windows of different size pointing
+        different ways, or the lap distance and the positions disagreeing at the line) gives no marker, and nothing is
+        estimated. The single closing chord is not used: it is as noisy as two samples. A stored geometry is never
+        re-learned or rewritten here.
+
+        Returned fields: `arc_m` is the length of the closing arc, i.e. how much lap distance lies between the last
+        and the first stored point. It is NOT an error bound. `evidence_spread_m` is the largest distance between
+        two of the eight extrapolations: how much the evidence disagrees with itself, an observation and not a
+        guaranteed accuracy. The real error of the line is not known here.
         """
         if not self.complete or len(self.points) < 2 * max(SF_WINDOW_SIZES):
             return None
@@ -193,25 +207,27 @@ class TrackModel:
         arc = (self.length - last) + first
         if not finite(arc) or not 0 < arc <= arc_limit(self.length) or not 0 <= self.length - last <= arc:
             return None
-        tolerance = max(arc, SF_MIN_POSITION_TOLERANCE_M)
-        limit = math.cos(math.radians(SF_MAX_DIRECTION_DEG))
-        positions, directions = [], []
+        fits = []
         for size in SF_WINDOW_SIZES:
             tail = _fit_window(self.points[-size:], self.distances[-size:], 0.0)
             head = _fit_window(self.points[:size], self.distances[:size], self.length)
             if tail is None or head is None:
                 return None
-            a, b = tail.at(self.length), head.at(self.length)
-            if math.dist(a, b) > tolerance or tail.unit[0] * head.unit[0] + tail.unit[1] * head.unit[1] < limit:
-                return None
-            positions.append([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2])
-            directions += [tail.unit, head.unit]
-        dx, dz = sum(u[0] for u in directions), sum(u[1] for u in directions)
+            fits += [tail, head]
+        smallest_cosine = math.cos(math.radians(SF_MAX_DIRECTION_DEG))
+        if any(a.unit[0] * b.unit[0] + a.unit[1] * b.unit[1] < smallest_cosine for a, b in itertools.combinations(fits, 2)):
+            return None
+        positions = [fit.at(self.length) for fit in fits]
+        spread = max(math.dist(a, b) for a, b in itertools.combinations(positions, 2))
+        if not spread <= SF_MAX_POSITION_SPREAD_M:
+            return None
+        dx, dz = sum(fit.unit[0] for fit in fits), sum(fit.unit[1] for fit in fits)
         norm = math.hypot(dx, dz)
         if not norm > 0:
             return None
         point = [sum(p[0] for p in positions) / len(positions), sum(p[1] for p in positions) / len(positions)]
-        return dict(point=point, direction=[dx / norm, dz / norm], arc_m=arc, basis="lap_distance")
+        return dict(point=point, direction=[dx / norm, dz / norm], arc_m=arc, evidence_spread_m=spread,
+                    basis="lap_distance")
 
     def point_sectors(self, distances=None, boundaries=None):
         boundaries = boundaries if boundaries is not None else self.sector_boundaries()
