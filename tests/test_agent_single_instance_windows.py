@@ -39,6 +39,7 @@ while not (ctl / f"stop-{tag}").exists():
     time.sleep(0.02)
 """
 PROCS = []
+PIDS = []
 
 
 def wait_for(predicate, timeout=20.0, what="condition"):
@@ -65,6 +66,9 @@ def reap_processes():
         if proc.poll() is None:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     PROCS.clear()
+    for pid in PIDS:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+    PIDS.clear()
 
 
 @pytest.fixture
@@ -98,14 +102,67 @@ def is_elevated():
     return bool(ctypes.windll.shell32.IsUserAnAdmin())
 
 
+def spawn_deelevated(argv):
+    """Start a process with a LUA-restricted copy of this process's token (Administrators becomes deny-only, medium
+    integrity), i.e. what a normal, non-elevated start looks like next to an elevated one. Returns the pid.
+    A restricted version of the caller's own primary token needs no extra privilege."""
+    import ctypes
+    from ctypes import wintypes as w
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class SID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Sid", w.LPVOID), ("Attributes", w.DWORD)]
+
+    class STARTUPINFOW(ctypes.Structure):
+        _fields_ = [("cb", w.DWORD), ("lpReserved", w.LPWSTR), ("lpDesktop", w.LPWSTR), ("lpTitle", w.LPWSTR),
+                    ("dwX", w.DWORD), ("dwY", w.DWORD), ("dwXSize", w.DWORD), ("dwYSize", w.DWORD),
+                    ("dwXCountChars", w.DWORD), ("dwYCountChars", w.DWORD), ("dwFillAttribute", w.DWORD),
+                    ("dwFlags", w.DWORD), ("wShowWindow", w.WORD), ("cbReserved2", w.WORD),
+                    ("lpReserved2", w.LPVOID), ("hStdInput", w.HANDLE), ("hStdOutput", w.HANDLE),
+                    ("hStdError", w.HANDLE)]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [("hProcess", w.HANDLE), ("hThread", w.HANDLE), ("dwProcessId", w.DWORD), ("dwThreadId", w.DWORD)]
+
+    kernel.GetCurrentProcess.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = (w.HANDLE,)
+    adv.OpenProcessToken.argtypes = (w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE))
+    adv.CreateRestrictedToken.argtypes = (w.HANDLE, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.LPVOID, w.DWORD,
+                                          w.LPVOID, ctypes.POINTER(w.HANDLE))
+    adv.ConvertStringSidToSidW.argtypes = (w.LPCWSTR, ctypes.POINTER(w.LPVOID))
+    adv.SetTokenInformation.argtypes = (w.HANDLE, w.DWORD, w.LPVOID, w.DWORD)
+    adv.CreateProcessAsUserW.argtypes = (w.HANDLE, w.LPCWSTR, w.LPWSTR, w.LPVOID, w.LPVOID, w.BOOL, w.DWORD,
+                                         w.LPVOID, w.LPCWSTR, ctypes.POINTER(STARTUPINFOW),
+                                         ctypes.POINTER(PROCESS_INFORMATION))
+
+    def check(ok, what):
+        if not ok:
+            raise OSError(ctypes.get_last_error(), what)
+
+    current, restricted, sid = w.HANDLE(), w.HANDLE(), w.LPVOID()
+    check(adv.OpenProcessToken(kernel.GetCurrentProcess(), 0xF01FF, ctypes.byref(current)), "OpenProcessToken")
+    check(adv.CreateRestrictedToken(current, 4, 0, None, 0, None, 0, None, ctypes.byref(restricted)),
+          "CreateRestrictedToken")  # 4 = LUA_TOKEN
+    check(adv.ConvertStringSidToSidW("S-1-16-8192", ctypes.byref(sid)), "ConvertStringSidToSidW")  # medium
+    label = SID_AND_ATTRIBUTES(sid, 0x20)  # SE_GROUP_INTEGRITY
+    check(adv.SetTokenInformation(restricted, 25, ctypes.byref(label), ctypes.sizeof(label)), "SetTokenInformation")
+    startup, info = STARTUPINFOW(), PROCESS_INFORMATION()
+    startup.cb = ctypes.sizeof(startup)
+    command = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+    check(adv.CreateProcessAsUserW(restricted, None, command, None, None, False, 0x08000000, None, None,
+                                   ctypes.byref(startup), ctypes.byref(info)), "CreateProcessAsUserW")
+    for handle in (info.hThread, info.hProcess, restricted, current):
+        kernel.CloseHandle(handle)
+    PIDS.append(info.dwProcessId)
+    return info.dwProcessId
+
+
 def start_deelevated_holder(ctl, tag, ws=WS, token=TOKEN):
-    """Start the holder with a de-elevated token (Safer basic-user level): Administrators becomes deny-only, which is
-    what a normal (non-elevated) start of the same user looks like to an object created by an elevated process."""
     script = ctl / "holder.py"
     script.write_text(HOLDER.replace("sys.argv[1]", repr(str(ROOT))).replace("sys.argv[2:6]", "sys.argv[1:5]"),
                       encoding="utf-8")
-    command = subprocess.list2cmdline([sys.executable, str(script), ws, token, str(ctl), tag])
-    subprocess.run(["runas", "/trustlevel:0x20000", command], capture_output=True, timeout=30, check=True)
+    spawn_deelevated([sys.executable, str(script), ws, token, str(ctl), tag])
     (ctl / "go").write_text("1")
 
 
