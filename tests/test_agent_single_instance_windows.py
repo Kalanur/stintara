@@ -40,6 +40,7 @@ while not (ctl / f"stop-{tag}").exists():
 """
 PROCS = []
 PIDS = []
+HANDLES = {}
 
 
 def wait_for(predicate, timeout=20.0, what="condition"):
@@ -154,9 +155,10 @@ def spawn_deelevated(argv, stderr_file):
         f'cmd.exe /c ""{argv[0]}" {subprocess.list2cmdline(argv[1:])} 2>"{stderr_file}""')
     check(adv.CreateProcessAsUserW(restricted, None, command, None, None, False, 0x08000000, None, None,
                                    ctypes.byref(startup), ctypes.byref(info)), "CreateProcessAsUserW")
-    for handle in (info.hThread, info.hProcess, restricted, current):
+    for handle in (info.hThread, restricted, current):
         kernel.CloseHandle(handle)
     PIDS.append(info.dwProcessId)
+    HANDLES[info.dwProcessId] = info.hProcess
     return info.dwProcessId
 
 
@@ -164,18 +166,27 @@ def start_deelevated_holder(ctl, tag, ws=WS, token=TOKEN):
     script = ctl / "holder.py"
     script.write_text(HOLDER.replace("sys.argv[1]", repr(str(ROOT))).replace("sys.argv[2:6]", "sys.argv[1:5]"),
                       encoding="utf-8")
-    spawn_deelevated([sys.executable, str(script), ws, token, str(ctl), tag], ctl / f"stderr-{tag}.txt")
+    pid = spawn_deelevated([sys.executable, str(script), ws, token, str(ctl), tag], ctl / f"stderr-{tag}.txt")
     (ctl / "go").write_text("1")
+    return pid
 
 
-def deelevated_decision(ctl, tag):
+def exit_code(pid):
+    import ctypes
+    from ctypes import wintypes as w
+    code = w.DWORD()
+    ctypes.windll.kernel32.GetExitCodeProcess(w.HANDLE(HANDLES[pid]), ctypes.byref(code))
+    return "running" if code.value == 259 else hex(code.value)
+
+
+def deelevated_decision(ctl, tag, pid):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if status(ctl, tag):
             return status(ctl, tag)
         time.sleep(0.05)
     err = ctl / f"stderr-{tag}.txt"
-    pytest.fail("de-elevated process never decided; stderr: " + (err.read_text(errors="replace") if err.exists() else "<none>"))
+    pytest.fail(f"de-elevated process never decided (state: {exit_code(pid)}); stderr: " + (err.read_text(errors="replace") if err.exists() else "<none>"))
 
 
 def agent_config(tmp_path, server_ws=WS, token=TOKEN, pitwall_ws="ws://127.0.0.1:1"):
@@ -236,8 +247,8 @@ def test_deelevated_second_start_detects_the_first_instance(ctl):
     """Normal first instance, de-elevated second one: detected via the real DACL/SYNCHRONIZE path."""
     start_holder(ctl, "a")
     wait_for(lambda: status(ctl, "a") == "HELD")
-    start_deelevated_holder(ctl, "b")
-    assert deelevated_decision(ctl, "b") == "DENIED"
+    pid = start_deelevated_holder(ctl, "b")
+    assert deelevated_decision(ctl, "b", pid) == "DENIED"
 
 
 @pytest.mark.skipif(sys.platform == "win32" and not is_elevated(), reason="needs an elevated first process")
@@ -245,8 +256,8 @@ def test_elevated_first_unelevated_second_is_detected_not_bypassed(ctl):
     """P2 regression: the elevated first instance's object must still be detected by a normal second start."""
     start_holder(ctl, "a")                      # inherits the elevated token of this test process
     wait_for(lambda: status(ctl, "a") == "HELD")
-    start_deelevated_holder(ctl, "b")
-    assert deelevated_decision(ctl, "b") == "DENIED"
+    pid = start_deelevated_holder(ctl, "b")
+    assert deelevated_decision(ctl, "b", pid) == "DENIED"
     assert status(ctl, "a") == "HELD"
 
 
