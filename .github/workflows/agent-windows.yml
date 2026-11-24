@@ -30,6 +30,14 @@ jobs:
         run: |
           ./dist/StintaraAgent.exe --help
           if ($LASTEXITCODE -ne 0) { throw 'Agent help failed' }
+      - name: Single-instance tests (real kernel mutexes and the built onefile EXE)
+        shell: pwsh
+        run: |
+          # Loopback fake server/Pitwall with synthetic data only; no real infrastructure, no secrets.
+          python -m pip install "pytest>=8,<10" "pytest-asyncio>=1,<2"
+          $env:STINTARA_AGENT_EXE = (Resolve-Path dist/StintaraAgent.exe).Path
+          python -m pytest --noconftest -p no:cacheprovider -v tests/test_agent_single_instance.py tests/test_agent_single_instance_windows.py
+          if ($LASTEXITCODE -ne 0) { throw 'Single-instance tests failed' }
       - name: Package and verify (version, revision, ZIP content, SHA256)
         shell: pwsh
         run: |

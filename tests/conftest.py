@@ -51,3 +51,10 @@ async def scoring_session(pool, name="one"):
                             {"id": 8, "driver_name": "Same Name", "position": 2, "total_laps": 1}]}
     await main.handle_message(agent, "lmu", "scoring", scoring)
     return agent, main.runtime[str(agent["id"])]["session_id"], scoring
+
+
+@pytest.fixture(autouse=True)
+def no_real_instance_lock(monkeypatch):
+    """cli() must never claim a real Windows mutex inside the test process; tests of the lock opt in explicitly."""
+    from agent import single_instance, stintara_agent
+    monkeypatch.setattr(stintara_agent, "acquire", lambda server_ws, token: single_instance.InstanceLock())

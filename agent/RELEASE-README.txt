@@ -10,6 +10,13 @@ Setup
      Keep this file private; never share or publish it.
   3. Start LMU with the Pitwall bridge, then run StintaraAgent.exe.
 
+Only one agent per configuration
+  A second StintaraAgent.exe started with the same server URL and token on the
+  same computer exits with code 3 and the message "already running"; the
+  running agent is not affected. Task Manager shows two StintaraAgent.exe
+  entries for one running agent (normal). To run two agents in parallel, use
+  different tokens.
+
 Check the build (no configuration or network required)
   StintaraAgent.exe --version
 
