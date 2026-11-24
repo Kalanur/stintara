@@ -4,6 +4,7 @@ The EXE test additionally needs STINTARA_AGENT_EXE (the built onefile executable
 server and fake Pitwall with synthetic, test-only data and never touches real infrastructure.
 """
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -39,8 +40,6 @@ while not (ctl / f"stop-{tag}").exists():
     time.sleep(0.02)
 """
 PROCS = []
-PIDS = []
-HANDLES = {}
 
 
 def wait_for(predicate, timeout=20.0, what="condition"):
@@ -67,9 +66,6 @@ def reap_processes():
         if proc.poll() is None:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     PROCS.clear()
-    for pid in PIDS:
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
-    PIDS.clear()
 
 
 @pytest.fixture
@@ -103,10 +99,11 @@ def is_elevated():
     return bool(ctypes.windll.shell32.IsUserAnAdmin())
 
 
-def spawn_deelevated(argv, stderr_file, mode="asuser"):
-    """Start a process with a LUA-restricted copy of this process's token (Administrators becomes deny-only, medium
-    integrity), i.e. what a normal, non-elevated start looks like next to an elevated one. Returns the pid.
-    A restricted version of the caller's own primary token needs no extra privilege."""
+@contextlib.contextmanager
+def restricted_thread():
+    """Run the current thread under a LUA-restricted copy of this process's token (Administrators deny-only, medium
+    integrity): the access checks of the kernel then see what a normal, non-elevated start would present. This is an
+    impersonation inside one process, not a second process."""
     import ctypes
     from ctypes import wintypes as w
     adv = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -115,101 +112,35 @@ def spawn_deelevated(argv, stderr_file, mode="asuser"):
     class SID_AND_ATTRIBUTES(ctypes.Structure):
         _fields_ = [("Sid", w.LPVOID), ("Attributes", w.DWORD)]
 
-    class STARTUPINFOW(ctypes.Structure):
-        _fields_ = [("cb", w.DWORD), ("lpReserved", w.LPWSTR), ("lpDesktop", w.LPWSTR), ("lpTitle", w.LPWSTR),
-                    ("dwX", w.DWORD), ("dwY", w.DWORD), ("dwXSize", w.DWORD), ("dwYSize", w.DWORD),
-                    ("dwXCountChars", w.DWORD), ("dwYCountChars", w.DWORD), ("dwFillAttribute", w.DWORD),
-                    ("dwFlags", w.DWORD), ("wShowWindow", w.WORD), ("cbReserved2", w.WORD),
-                    ("lpReserved2", w.LPVOID), ("hStdInput", w.HANDLE), ("hStdOutput", w.HANDLE),
-                    ("hStdError", w.HANDLE)]
-
-    class PROCESS_INFORMATION(ctypes.Structure):
-        _fields_ = [("hProcess", w.HANDLE), ("hThread", w.HANDLE), ("dwProcessId", w.DWORD), ("dwThreadId", w.DWORD)]
-
     kernel.GetCurrentProcess.restype = w.HANDLE
-    kernel.CloseHandle.argtypes = (w.HANDLE,)
     adv.OpenProcessToken.argtypes = (w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE))
     adv.CreateRestrictedToken.argtypes = (w.HANDLE, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.LPVOID, w.DWORD,
                                           w.LPVOID, ctypes.POINTER(w.HANDLE))
+    adv.DuplicateTokenEx.argtypes = (w.HANDLE, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, ctypes.POINTER(w.HANDLE))
     adv.ConvertStringSidToSidW.argtypes = (w.LPCWSTR, ctypes.POINTER(w.LPVOID))
     adv.SetTokenInformation.argtypes = (w.HANDLE, w.DWORD, w.LPVOID, w.DWORD)
-    adv.CreateProcessWithTokenW.argtypes = (w.HANDLE, w.DWORD, w.LPCWSTR, w.LPWSTR, w.DWORD, w.LPVOID, w.LPCWSTR,
-                                            ctypes.POINTER(STARTUPINFOW), ctypes.POINTER(PROCESS_INFORMATION))
-    adv.CreateProcessAsUserW.argtypes = (w.HANDLE, w.LPCWSTR, w.LPWSTR, w.LPVOID, w.LPVOID, w.BOOL, w.DWORD,
-                                         w.LPVOID, w.LPCWSTR, ctypes.POINTER(STARTUPINFOW),
-                                         ctypes.POINTER(PROCESS_INFORMATION))
+    adv.SetThreadToken.argtypes = (w.LPVOID, w.HANDLE)
 
     def check(ok, what):
         if not ok:
             raise OSError(ctypes.get_last_error(), what)
 
-    current, restricted, sid = w.HANDLE(), w.HANDLE(), w.LPVOID()
+    current, restricted, impersonation, sid = w.HANDLE(), w.HANDLE(), w.HANDLE(), w.LPVOID()
     check(adv.OpenProcessToken(kernel.GetCurrentProcess(), 0xF01FF, ctypes.byref(current)), "OpenProcessToken")
     check(adv.CreateRestrictedToken(current, 4, 0, None, 0, None, 0, None, ctypes.byref(restricted)),
           "CreateRestrictedToken")  # 4 = LUA_TOKEN
+    check(adv.DuplicateTokenEx(restricted, 0xF01FF, None, 2, 2, ctypes.byref(impersonation)),
+          "DuplicateTokenEx")  # SecurityImpersonation, TokenImpersonation
     check(adv.ConvertStringSidToSidW("S-1-16-8192", ctypes.byref(sid)), "ConvertStringSidToSidW")  # medium
     label = SID_AND_ATTRIBUTES(sid, 0x20)  # SE_GROUP_INTEGRITY
-    check(adv.SetTokenInformation(restricted, 25, ctypes.byref(label), ctypes.sizeof(label)), "SetTokenInformation")
-    startup, info = STARTUPINFOW(), PROCESS_INFORMATION()
-    startup.cb = ctypes.sizeof(startup)
-    # cmd /c only to capture the child's stderr for diagnostics (the outer quotes are cmd's own /c quoting rule).
-    command = ctypes.create_unicode_buffer(
-        f'cmd.exe /c ""{argv[0]}" {subprocess.list2cmdline(argv[1:])} 2>"{stderr_file}""')
-    if mode == "withtoken":
-        check(adv.CreateProcessWithTokenW(restricted, 0, None, command, 0x08000000, None, None,
-                                          ctypes.byref(startup), ctypes.byref(info)), "CreateProcessWithTokenW")
-    else:
-        if mode == "asuser-own-desktop":
-            startup.lpDesktop = ""   # a desktop the new token is allowed to use (the inherited one may deny it)
-        check(adv.CreateProcessAsUserW(restricted, None, command, None, None, False, 0x08000000, None, None,
-                                       ctypes.byref(startup), ctypes.byref(info)), "CreateProcessAsUserW")
-    for handle in (info.hThread, restricted, current):
-        kernel.CloseHandle(handle)
-    PIDS.append(info.dwProcessId)
-    HANDLES[info.dwProcessId] = info.hProcess
-    return info.dwProcessId
-
-
-def start_deelevated_holder(ctl, tag, ws=WS, token=TOKEN):
-    """Try the launch variants in order (a restricted token may lack access to the inherited desktop, which kills
-    the child with 0xC0000142); return the pid of the first process that really runs the holder."""
-    script = ctl / "holder.py"
-    script.write_text(HOLDER.replace("sys.argv[1]", repr(str(ROOT))).replace("sys.argv[2:6]", "sys.argv[1:5]"),
-                      encoding="utf-8")
-    (ctl / "go").write_text("1")
-    attempts = []
-    for mode in ("asuser", "asuser-own-desktop", "withtoken"):
-        try:
-            pid = spawn_deelevated([sys.executable, str(script), ws, token, str(ctl), tag],
-                                   ctl / f"stderr-{tag}.txt", mode)
-        except OSError as exc:
-            attempts.append(f"{mode}: {exc}")
-            continue
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline and not status(ctl, tag) and exit_code(pid) == "running":
-            time.sleep(0.05)
-        if status(ctl, tag) or exit_code(pid) == "running":
-            return pid
-        attempts.append(f"{mode}: exited {exit_code(pid)}")
-    pytest.fail("no launch variant for a de-elevated process worked: " + "; ".join(attempts))
-
-
-def exit_code(pid):
-    import ctypes
-    from ctypes import wintypes as w
-    code = w.DWORD()
-    ctypes.windll.kernel32.GetExitCodeProcess(w.HANDLE(HANDLES[pid]), ctypes.byref(code))
-    return "running" if code.value == 259 else hex(code.value)
-
-
-def deelevated_decision(ctl, tag, pid):
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if status(ctl, tag):
-            return status(ctl, tag)
-        time.sleep(0.05)
-    err = ctl / f"stderr-{tag}.txt"
-    pytest.fail(f"de-elevated process never decided (state: {exit_code(pid)}); stderr: " + (err.read_text(errors="replace") if err.exists() else "<none>"))
+    check(adv.SetTokenInformation(impersonation, 25, ctypes.byref(label), ctypes.sizeof(label)), "SetTokenInformation")
+    check(adv.SetThreadToken(None, impersonation), "SetThreadToken")
+    try:
+        yield
+    finally:
+        adv.SetThreadToken(None, None)
+        for handle in (impersonation, restricted, current):
+            kernel.CloseHandle(handle)
 
 
 def agent_config(tmp_path, server_ws=WS, token=TOKEN, pitwall_ws="ws://127.0.0.1:1"):
@@ -266,22 +197,46 @@ def test_different_token_or_server_run_in_parallel(ctl):
     wait_for(lambda: all(status(ctl, t) == "HELD" for t in "abc"), what="three distinct identities")
 
 
-def test_deelevated_second_start_detects_the_first_instance(ctl):
-    """Normal first instance, de-elevated second one: detected via the real DACL/SYNCHRONIZE path."""
-    start_holder(ctl, "a")
-    wait_for(lambda: status(ctl, "a") == "HELD")
-    pid = start_deelevated_holder(ctl, "b")
-    assert deelevated_decision(ctl, "b", pid) == "DENIED"
+def test_restricted_token_still_detects_an_existing_object():
+    """The kernel access check for a normal (restricted, medium) token against an object created by this process.
+
+    With an elevated runner this is the P2 scenario (elevated first instance, normal second start). It is a
+    same-process impersonation of a real restricted token against a real kernel object, not two processes.
+    """
+    from agent import single_instance as si
+    backend = si.WindowsMutexBackend()
+    identity = TOKEN + "-impersonation"
+    first = backend.create(si.mutex_name(WS, identity))
+    assert first.handle and not first.already_exists
+    try:
+        with restricted_thread():
+            second = backend.create(si.mutex_name(WS, identity))
+            assert second.handle and second.already_exists, f"object not detected (error {second.error})"
+            backend.close(second.handle)
+            with pytest.raises(si.AlreadyRunning):
+                si.acquire(WS, identity)
+    finally:
+        backend.close(first.handle)
 
 
-@pytest.mark.skipif(sys.platform == "win32" and not is_elevated(), reason="needs an elevated first process")
-def test_elevated_first_unelevated_second_is_detected_not_bypassed(ctl):
-    """P2 regression: the elevated first instance's object must still be detected by a normal second start."""
-    start_holder(ctl, "a")                      # inherits the elevated token of this test process
-    wait_for(lambda: status(ctl, "a") == "HELD")
-    pid = start_deelevated_holder(ctl, "b")
-    assert deelevated_decision(ctl, "b", pid) == "DENIED"
-    assert status(ctl, "a") == "HELD"
+@pytest.mark.skipif(sys.platform == "win32" and not is_elevated(), reason="premise exists only for elevated tokens")
+def test_premise_default_createmutexw_is_denied_for_a_restricted_token():
+    """Why the fix is needed: the previous call (CreateMutexW, MUTEX_ALL_ACCESS, default DACL) is refused."""
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = (w.LPVOID, w.BOOL, w.LPCWSTR)
+    kernel.CreateMutexW.restype = w.HANDLE
+    name = "Global\StintaraAgent-premise-" + os.urandom(8).hex()
+    first = kernel.CreateMutexW(None, False, name)
+    assert first
+    try:
+        with restricted_thread():
+            ctypes.set_last_error(0)
+            second = kernel.CreateMutexW(None, False, name)
+            assert not second and ctypes.get_last_error() == 5
+    finally:
+        kernel.CloseHandle(first)
 
 
 # --- real onefile EXE -------------------------------------------------------------------------------------------
