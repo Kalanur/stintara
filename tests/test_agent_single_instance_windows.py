@@ -103,7 +103,7 @@ def is_elevated():
     return bool(ctypes.windll.shell32.IsUserAnAdmin())
 
 
-def spawn_deelevated(argv, stderr_file):
+def spawn_deelevated(argv, stderr_file, mode="asuser"):
     """Start a process with a LUA-restricted copy of this process's token (Administrators becomes deny-only, medium
     integrity), i.e. what a normal, non-elevated start looks like next to an elevated one. Returns the pid.
     A restricted version of the caller's own primary token needs no extra privilege."""
@@ -133,6 +133,8 @@ def spawn_deelevated(argv, stderr_file):
                                           w.LPVOID, ctypes.POINTER(w.HANDLE))
     adv.ConvertStringSidToSidW.argtypes = (w.LPCWSTR, ctypes.POINTER(w.LPVOID))
     adv.SetTokenInformation.argtypes = (w.HANDLE, w.DWORD, w.LPVOID, w.DWORD)
+    adv.CreateProcessWithTokenW.argtypes = (w.HANDLE, w.DWORD, w.LPCWSTR, w.LPWSTR, w.DWORD, w.LPVOID, w.LPCWSTR,
+                                            ctypes.POINTER(STARTUPINFOW), ctypes.POINTER(PROCESS_INFORMATION))
     adv.CreateProcessAsUserW.argtypes = (w.HANDLE, w.LPCWSTR, w.LPWSTR, w.LPVOID, w.LPVOID, w.BOOL, w.DWORD,
                                          w.LPVOID, w.LPCWSTR, ctypes.POINTER(STARTUPINFOW),
                                          ctypes.POINTER(PROCESS_INFORMATION))
@@ -153,8 +155,14 @@ def spawn_deelevated(argv, stderr_file):
     # cmd /c only to capture the child's stderr for diagnostics (the outer quotes are cmd's own /c quoting rule).
     command = ctypes.create_unicode_buffer(
         f'cmd.exe /c ""{argv[0]}" {subprocess.list2cmdline(argv[1:])} 2>"{stderr_file}""')
-    check(adv.CreateProcessAsUserW(restricted, None, command, None, None, False, 0x08000000, None, None,
-                                   ctypes.byref(startup), ctypes.byref(info)), "CreateProcessAsUserW")
+    if mode == "withtoken":
+        check(adv.CreateProcessWithTokenW(restricted, 0, None, command, 0x08000000, None, None,
+                                          ctypes.byref(startup), ctypes.byref(info)), "CreateProcessWithTokenW")
+    else:
+        if mode == "asuser-own-desktop":
+            startup.lpDesktop = ""   # a desktop the new token is allowed to use (the inherited one may deny it)
+        check(adv.CreateProcessAsUserW(restricted, None, command, None, None, False, 0x08000000, None, None,
+                                       ctypes.byref(startup), ctypes.byref(info)), "CreateProcessAsUserW")
     for handle in (info.hThread, restricted, current):
         kernel.CloseHandle(handle)
     PIDS.append(info.dwProcessId)
@@ -163,12 +171,27 @@ def spawn_deelevated(argv, stderr_file):
 
 
 def start_deelevated_holder(ctl, tag, ws=WS, token=TOKEN):
+    """Try the launch variants in order (a restricted token may lack access to the inherited desktop, which kills
+    the child with 0xC0000142); return the pid of the first process that really runs the holder."""
     script = ctl / "holder.py"
     script.write_text(HOLDER.replace("sys.argv[1]", repr(str(ROOT))).replace("sys.argv[2:6]", "sys.argv[1:5]"),
                       encoding="utf-8")
-    pid = spawn_deelevated([sys.executable, str(script), ws, token, str(ctl), tag], ctl / f"stderr-{tag}.txt")
     (ctl / "go").write_text("1")
-    return pid
+    attempts = []
+    for mode in ("asuser", "asuser-own-desktop", "withtoken"):
+        try:
+            pid = spawn_deelevated([sys.executable, str(script), ws, token, str(ctl), tag],
+                                   ctl / f"stderr-{tag}.txt", mode)
+        except OSError as exc:
+            attempts.append(f"{mode}: {exc}")
+            continue
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not status(ctl, tag) and exit_code(pid) == "running":
+            time.sleep(0.05)
+        if status(ctl, tag) or exit_code(pid) == "running":
+            return pid
+        attempts.append(f"{mode}: exited {exit_code(pid)}")
+    pytest.fail("no launch variant for a de-elevated process worked: " + "; ".join(attempts))
 
 
 def exit_code(pid):
