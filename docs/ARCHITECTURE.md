@@ -125,7 +125,7 @@ Operator provisioning is an internal `python -m app.provision_agent` CLI, not an
 
 ### Agent versioning and release distribution
 
-The Windows agent has its own SemVer (`agent/version.py`, currently 0.3.0), independent of server version/revision; the wire protocol stays `stintara-agent-v1`. Build channel and full git revision are injected at build time into a generated, ignored `_build_info.py` (no runtime `.git` dependency); source runs report `dev`/`unknown`, CI/release builds require a 40-character revision. `--version` prints version, build, revision and protocol without config or network. Releases are component-scoped `agent-vX.Y.Z` tags and produce a draft pre-release with `StintaraAgent-<version>-windows-x64.zip` (EXE, public example config, README) and `SHA256SUMS.txt`; server/GHCR releases are unaffected. The EXE is unsigned. Agent 0.2.0 needs a server with PR #39 or newer (`race_control` message type). Agent 0.1.0 is a retroactive, pre-release baseline built from the original CI artifact, not a rebuild.
+The Windows agent has its own SemVer (`agent/version.py`, currently 0.3.1), independent of server version/revision; the wire protocol stays `stintara-agent-v1`. Build channel and full git revision are injected at build time into a generated, ignored `_build_info.py` (no runtime `.git` dependency); source runs report `dev`/`unknown`, CI/release builds require a 40-character revision. `--version` prints version, build, revision and protocol without config or network. Releases are component-scoped `agent-vX.Y.Z` tags and produce a draft pre-release with `StintaraAgent-<version>-windows-x64.zip` (EXE, public example config, README) and `SHA256SUMS.txt`; server/GHCR releases are unaffected. The EXE is unsigned. Agent 0.2.0 needs a server with PR #39 or newer (`race_control` message type). Agent 0.1.0 is a retroactive, pre-release baseline built from the original CI artifact, not a rebuild.
 
 ### Agent identification and compatibility reporting (agent 0.3.0)
 
@@ -136,7 +136,7 @@ Implemented and covered by synthetic tests; not yet verified against a released 
 * **Operator channel only.** Per connection the server logs `agent_connected` (validated version/channel/revision, accepted capabilities, status; a legacy or limited agent is a warning), a one-time `agent_epoch_check` after 20 messages (`verified`, `not_received` or `inconsistent`, from the `source_epoch` values actually received, independent of the declaration) and `agent_disconnected` with the counters. Nothing is exposed through public APIs or the database; no schema change, no change to ingest, timing or telemetry computation, and agents are never disconnected for this.
 * `source_epoch` stays bound to the Pitwall socket connection (generated in `bridge` per successful Pitwall connection). Today an uplink reconnect also opens a new Pitwall socket and therefore gets a new value; this feature does not tie the value to the uplink and does not change that lifecycle.
 
-### Agent single-instance protection (unreleased, Windows)
+### Agent single-instance protection (agent 0.3.1, Windows)
 
 Implemented and covered by unit and Windows integration tests; the built onefile EXE test runs in the `windows-agent` CI job.
 

@@ -3,9 +3,17 @@
 The Agent is versioned independently of the Stintara server. Releases are tagged
 `agent-vX.Y.Z`. The wire protocol is `stintara-agent-v1` for all versions below.
 
-## Unreleased
+## 0.3.1
 
-- Single-instance protection (Windows): a second start with the same `server_ws` and token on the same computer exits immediately with exit code 3 and a clear message, before any network access. The running instance is not affected. The lock is a named Windows mutex derived from a hash of server URL and token (no secret in the name or output); Windows releases it automatically on normal exit, crash or hard kill. Other configurations (different token or server) can run in parallel. If the lock cannot be created the agent starts anyway with a warning. No change to the protocol, `source_epoch` or forwarding. No version bump yet; the version is set when the release is prepared.
+Windows single-instance protection. No protocol, server, schema or telemetry change: the wire protocol stays
+`stintara-agent-v1`, `source_epoch`, Pitwall forwarding and session behaviour are exactly as in 0.3.0. Servers and
+other agents need no change; 0.3.1 can replace 0.3.0 in place (keep the old EXE until the new one is verified).
+
+- A second start with the same `server_ws` and token on the same computer exits immediately with **exit code 3** and a clear message, before any network access. The running instance is not signalled or affected. Different tokens or servers can still run in parallel; there is no override switch.
+- The lock is a named Windows mutex (`Global\StintaraAgent-<hash>`) derived from a truncated SHA-256 of the server URL and token, so no secret appears in the name, messages or logs. Windows releases it on normal exit, crash or hard kill (no stale lock). In the onefile build only the Python child holds it, so the bootloader parent and child are not duplicates; Task Manager shows two `StintaraAgent.exe` entries per running agent (normal).
+- The mutex is opened with `SYNCHRONIZE` only and an explicit DACL, so an elevated first instance is still detected by a normal second start and vice versa. If `Global\` access is denied while the object exists, the start is refused instead of falling back to an independent `Local\` lock; if nothing exists, protection falls back to the logon session. Any other lock error lets the agent start with a warning (fail-open).
+- Not covered: the same token on two different computers (the server still answers `agent already connected`); a process that knows the token-derived name could block starts.
+- Verification: unit tests, Windows kernel tests, the built onefile EXE in CI, and a manual two-process UAC test (elevated and normal, both start orders) with the Python agent. The UAC test was not repeated with the frozen EXE.
 
 ## 0.3.0
 

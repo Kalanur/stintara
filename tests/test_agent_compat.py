@@ -84,10 +84,10 @@ def test_agent_declares_only_what_it_implements():
     assert version.CAPABILITIES == ("source_epoch",)
     assert set(version.CAPABILITIES) <= ac.KNOWN_CAPABILITIES
     info = version.hello_info("release", SHA)
-    assert info == {"version": "0.3.0", "channel": "release", "revision": SHA}
+    assert info == {"version": "0.3.1", "channel": "release", "revision": SHA}
     assert ac.parse(info, list(version.CAPABILITIES)).capabilities == {"source_epoch"}
     assert ac.assess(ac.parse(version.hello_info(), list(version.CAPABILITIES)))["status"] == "compatible"
-    assert version.banner("dev", "unknown") == "Stintara Agent 0.3.0 (build dev, revision unknown)"
+    assert version.banner("dev", "unknown") == "Stintara Agent 0.3.1 (build dev, revision unknown)"
 
 
 def test_agent_shows_only_whitelisted_text_from_the_server():

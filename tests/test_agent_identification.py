@@ -189,7 +189,7 @@ async def test_agent_sends_identification_and_prints_the_server_answer(capsys):
     async with websockets.serve(uplink, "127.0.0.1", 0) as server:
         config = AgentConfig(f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}", "test-secret", "ws://127.0.0.1:1")
         await asyncio.wait_for(stintara_agent.run_once(config), 3)
-    assert seen["hello"]["agent"] == {"version": "0.3.0", "channel": "dev", "revision": "unknown"}
+    assert seen["hello"]["agent"] == {"version": "0.3.1", "channel": "dev", "revision": "unknown"}
     assert seen["hello"]["capabilities"] == ["source_epoch"] and seen["hello"]["token"] == "test-secret"
     output = capsys.readouterr().out
     assert "Server compatibility: limited" in output and "no source_epoch support declared" in output

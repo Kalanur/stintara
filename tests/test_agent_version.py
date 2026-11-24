@@ -21,11 +21,11 @@ def run_cli(*args, cwd=None):
 
 
 def test_version_constants_and_source_defaults():
-    assert version.AGENT_VERSION == "0.3.0"
+    assert version.AGENT_VERSION == "0.3.1"
     assert version.PROTOCOL == "stintara-agent-v1"
     assert version.DEFAULT_CHANNEL == "dev" and version.DEFAULT_REVISION == "unknown"
     assert version.version_text("release", SHA) == (
-        f"Stintara Agent 0.3.0\nBuild: release\nRevision: {SHA}\nProtocol: stintara-agent-v1")
+        f"Stintara Agent 0.3.1\nBuild: release\nRevision: {SHA}\nProtocol: stintara-agent-v1")
 
 
 def test_protocol_matches_server():
@@ -37,7 +37,7 @@ def test_version_flag_without_config_or_network(tmp_path):
     result = run_cli("--version", cwd=tmp_path)
     assert result.returncode == 0
     assert result.stdout.splitlines() == [
-        "Stintara Agent 0.3.0", "Build: dev", "Revision: unknown", "Protocol: stintara-agent-v1"]
+        "Stintara Agent 0.3.1", "Build: dev", "Revision: unknown", "Protocol: stintara-agent-v1"]
 
 
 def test_version_flag_ignores_broken_config(tmp_path):
