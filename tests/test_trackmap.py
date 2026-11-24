@@ -1,4 +1,5 @@
 """Centerline learning, closure plausibility and sector attribution on wholly synthetic geometry."""
+import copy
 import math
 
 import pytest
@@ -16,7 +17,17 @@ from server.app.trackmap import (
     track_key,
     validate_record,
 )
-from tests.track_fixtures import LENGTH, circuit, lap_samples
+from tests.track_fixtures import LENGTH, circuit, closed_geometry, lap_samples, model_from
+
+
+def end_points_displaced(arc, amount):
+    """Displacement for closed_geometry: the last point lags and the first one leads by `amount` metres along the
+    track, so the closing chord shrinks by twice that while the rest of the outline stays consistent."""
+    def along(d):
+        if abs(d - arc / 2) < 1e-6:
+            return -amount
+        return amount if abs(d - (LENGTH - arc / 2)) < 1e-6 else 0.0
+    return along
 
 
 def learn(samples, model=None):
@@ -223,16 +234,55 @@ def test_start_finish_marker_lies_on_the_line_and_points_in_the_direction_of_tra
     assert 0 < marker["arc_m"] <= 80                                      # accuracy bound: the gap it was interpolated across
 
 
-def test_start_finish_marker_interpolates_by_lap_distance_on_the_closing_arc():
-    model = TrackModel(1000.0)
-    model.points = [[10.0, 0.0], [500.0, 300.0], [-10.0, 0.0]]
-    model.distances = [10.0, 500.0, 990.0]                                 # arc 20 m: 10 m before the line, 10 m after
-    marker = model.start_finish_marker()
-    assert marker["arc_m"] == pytest.approx(20.0)
-    assert marker["point"] == pytest.approx([0.0, 0.0])                    # halfway: the line is 10 m after the last point
-    assert marker["direction"] == pytest.approx([1.0, 0.0])                # chord last -> first, the direction of travel
-    model.distances = [10.0, 500.0, 970.0]                                 # arc 40 m: the line is 30 m after the last point
-    assert model.start_finish_marker()["point"] == pytest.approx([-10.0 + 20.0 * 0.75, 0.0])
+def test_start_finish_marker_sits_at_lap_distance_zero_of_a_consistent_closing_arc():
+    for arc in (8.0, 20.0, 40.0):
+        marker = model_from(*closed_geometry(arc=arc)).start_finish_marker()
+        assert marker["arc_m"] == pytest.approx(arc)
+        assert math.dist(marker["point"], circuit(0.0)) < 3.0             # the line, not just somewhere in the gap
+        assert marker["direction"] == pytest.approx([1.0, 0.0], abs=0.15)
+
+
+def test_start_finish_marker_survives_noisy_closing_points_when_the_neighbouring_segments_agree():
+    # Sebring-like (chord about 0.55 of the arc) and Algarve-like (about 0.65): the last point lags and the first one
+    # leads by a few metres. The closing chord alone looks short, but the fitted neighbouring segments still agree.
+    for arc, lag in ((16.4, 3.7), (14.8, 2.8)):
+        points, distances = closed_geometry(arc=arc, along=end_points_displaced(arc, lag))
+        chord = math.dist(points[-1], points[0])
+        assert chord < 0.7 * arc                                          # a failing case for the former chord rule
+        marker = model_from(points, distances).start_finish_marker()
+        assert marker is not None and math.dist(marker["point"], circuit(0.0)) < 5.0
+
+
+def test_start_finish_marker_recovers_from_a_closing_chord_far_below_the_arc():
+    # chord below a quarter of a 12 m arc, yet head and tail windows agree on the line: the position is reliable
+    points, distances = closed_geometry(arc=12.0, along=end_points_displaced(12.0, 5.0))
+    assert math.dist(points[-1], points[0]) < 0.25 * 12.0
+    marker = model_from(points, distances).start_finish_marker()
+    assert marker is not None and math.dist(marker["point"], circuit(0.0)) < 6.0
+
+
+def test_start_finish_marker_refuses_a_position_the_two_sides_contradict():
+    # Daytona-like: the whole stretch before the line sits about one closing arc further along the track than its lap
+    # distance says, so the tail and the head extrapolate to different places. No marker, no invented position.
+    def lag(d):
+        return 12.0 if d > LENGTH - 120 else 0.0
+    points, distances = closed_geometry(arc=11.3, along=lag)
+    model = model_from(points, distances)
+    assert model.start_finish_marker() is None
+    assert public_geometry(model)["start_finish_marker"] is None
+    assert public_geometry(model)["complete"] is True                      # the outline itself stays usable
+    # one side moved by less than the closing arc is within the published accuracy and still accepted
+    mild = model_from(*closed_geometry(arc=11.3, along=lambda d: 5.0 if d > LENGTH - 120 else 0.0))
+    assert mild.start_finish_marker() is not None
+
+
+def test_start_finish_marker_needs_more_than_a_good_closing_chord():
+    # the last point and the first point are consistent with each other, but the points around them are not
+    def jump(d):
+        return 15.0 if LENGTH - 90 < d < LENGTH - 20 else 0.0
+    points, distances = closed_geometry(arc=11.3, along=jump)
+    assert math.dist(points[-1], points[0]) == pytest.approx(11.3, abs=3.0)   # the chord alone looks fine
+    assert model_from(points, distances).start_finish_marker() is None
 
 
 def test_start_finish_marker_is_never_guessed():
@@ -243,19 +293,38 @@ def test_start_finish_marker_is_never_guessed():
     for sample in lap_samples(start=2.0, end=800):
         learner.add(*sample)
     assert public_geometry(learning, learner)["start_finish_marker"] is None   # partial outline
-    def with_geometry(points, distances, length=1000.0):
-        model = TrackModel(length)
-        model.points, model.distances = points, distances
-        return model.start_finish_marker()
-    assert with_geometry([[0.0, 0.0]], [5.0]) is None                              # single point
-    assert with_geometry([[5.0, 5.0], [50.0, 0.0], [5.0, 5.0]], [10.0, 50.0, 990.0]) is None   # degenerate: zero chord
-    assert with_geometry([[0.0, 0.0], [50.0, 0.0], [0.4, 0.0]], [10.0, 50.0, 990.0]) is None    # chord below 1 m: no direction
-    assert with_geometry([[10.0, 0.0], [50.0, 0.0], [12.0, 0.0]], [10.0, 50.0, 990.0]) is None  # chord far below the arc
-    assert with_geometry([[0.0, 0.0], [50.0, 0.0], [900.0, 0.0]], [10.0, 50.0, 990.0]) is None  # chord far above the arc
-    assert with_geometry([[10.0, 0.0], [50.0, 0.0], [20.0, 0.0]], [300.0, 400.0, 500.0]) is None  # arc is half the track
-    assert with_geometry([[10.0, 0.0], [50.0, 0.0], [20.0, 0.0]], [0.0, 50.0, 1000.0]) is None    # last point at/after the length
-    assert with_geometry([[10.0, 0.0], [50.0, math.nan], [20.0, 0.0]], [10.0, 50.0, 990.0]) is not None  # interior NaN is not used
-    assert with_geometry([[math.nan, 0.0], [50.0, 0.0], [20.0, 0.0]], [10.0, 50.0, 990.0]) is None
+    points, distances = closed_geometry(arc=12.0)
+
+    def marker(points=points, distances=distances, length=LENGTH):
+        return model_from(points, distances, length).start_finish_marker()
+    assert marker() is not None
+    assert marker(points[:1], distances[:1]) is None                       # single point
+    assert marker(points[:8], distances[:8]) is None                       # too few points for two windows
+    assert marker(distances=[distances[0]] + [d + 150 for d in distances[1:]]) is None   # arc is not a closing arc
+    assert marker(distances=[0.0] + distances[1:-1] + [LENGTH]) is None    # last point at the length: no closing arc
+    assert marker(distances=distances[:-1] + [LENGTH + 5]) is None         # last point beyond the length
+    assert marker(distances=[1.0] + distances[1:-1] + [LENGTH - 90.0]) is None            # arc above the limit
+
+
+def test_start_finish_marker_ignores_degenerate_or_non_finite_neighbours():
+    points, distances = closed_geometry(arc=12.0)
+    same = [[points[-1][0], points[-1][1]] for _ in points[-6:]]
+    assert model_from(points[:-6] + same, distances).start_finish_marker() is None         # no movement at all
+    twice = distances[:-1] + [distances[-2]]
+    assert model_from(points, twice).start_finish_marker() is None                         # repeated lap distance
+    backwards = distances[:-3] + [distances[-2], distances[-3], distances[-1]]
+    assert model_from(points, backwards).start_finish_marker() is None                     # distances not increasing
+    for index in (0, 1, 2, -1, -3, -6):
+        bad = [list(p) for p in points]
+        bad[index] = [math.nan, 0.0]
+        assert model_from(bad, distances).start_finish_marker() is None                    # NaN inside a window
+    bad = [list(p) for p in points]
+    bad[len(bad) // 2] = [math.nan, math.nan]
+    assert model_from(bad, distances).start_finish_marker() is not None                    # interior NaN is not used
+    corner = [list(p) for p in points]
+    for i in range(1, 7):                                                                  # a sharp bend at the line
+        corner[-i] = [corner[-7][0] + 12.0 * i * 0.2, corner[-7][1] + 90.0 * i / 6]
+    assert model_from(corner, distances).start_finish_marker() is None                     # not a straight stretch
 
 
 def test_start_finish_marker_of_stored_geometry_needs_no_persistence_and_survives_a_reload():
@@ -265,3 +334,19 @@ def test_start_finish_marker_of_stored_geometry_needs_no_persistence_and_survive
     restored = TrackModel(record["length_m"])
     restored.adopt(validate_record(record))
     assert restored.start_finish_marker() == model.start_finish_marker()
+
+
+def test_reloaded_stored_geometry_is_judged_on_its_own_evidence_and_never_rewritten():
+    for along, expected in ((lambda d: 0.0, True), (lambda d: 12.0 if d > LENGTH - 120 else 0.0, False)):
+        original = model_from(*closed_geometry(arc=11.3, along=along))
+        record = geometry_record(original)
+        snapshot = copy.deepcopy(record)
+        restored = TrackModel(record["length_m"])
+        restored.adopt(validate_record(record))
+        assert (restored.start_finish_marker() is not None) is expected
+        assert (original.start_finish_marker() is not None) is expected
+        assert restored.complete and restored.source == "stored"          # the geometry is kept either way
+        assert (restored.points, restored.distances) == (original.points, original.distances)
+        assert record == snapshot                                         # reading the marker writes nothing back
+        assert restored.start_finish_marker() == restored.start_finish_marker()   # deterministic
+

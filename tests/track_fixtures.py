@@ -35,3 +35,23 @@ def lap_samples(start=0.0, end=LENGTH, step=12.0, pits=lambda d: False, skip=lam
             out.append((ld, x, z, bool(pits(d))))
         d += step
     return out
+
+
+def closed_geometry(arc=12.0, spacing=15.0, along=lambda d: 0.0, length=LENGTH):
+    """(points, distances) of a closed stored geometry on the synthetic circuit with a closing arc of `arc` metres.
+
+    The line (lap distance 0) lies in the middle of the arc. `along(d)` displaces the position that belongs to lap
+    distance d by that many metres along the track, which models a position that disagrees with the lap distance
+    (the provider's two values are not guaranteed to agree to the metre at the line). Entirely synthetic."""
+    count = max(2, round((length - arc) / spacing))
+    step = (length - arc) / count
+    distances = [arc / 2 + i * step for i in range(count + 1)]
+    return [list(circuit(d + along(d), length)) for d in distances], distances
+
+
+def model_from(points, distances, length=LENGTH):
+    """A TrackModel that holds the given closed geometry, as it would after adopting a stored record."""
+    from server.app.trackmap import TrackModel
+    model = TrackModel(length)
+    model.points, model.distances = [list(p) for p in points], list(distances)
+    return model
