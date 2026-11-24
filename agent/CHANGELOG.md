@@ -13,7 +13,7 @@ other agents need no change; 0.3.1 can replace 0.3.0 in place (keep the old EXE 
 - The lock is a named Windows mutex (`Global\StintaraAgent-<hash>`) derived from a truncated SHA-256 of the server URL and token, so no secret appears in the name, messages or logs. Windows releases it on normal exit, crash or hard kill (no stale lock). In the onefile build only the Python child holds it, so the bootloader parent and child are not duplicates; Task Manager shows two `StintaraAgent.exe` entries per running agent (normal).
 - The mutex is opened with `SYNCHRONIZE` only and an explicit DACL, so an elevated first instance is still detected by a normal second start and vice versa. If `Global\` access is denied while the object exists, the start is refused instead of falling back to an independent `Local\` lock; if nothing exists, protection falls back to the logon session. Any other lock error lets the agent start with a warning (fail-open).
 - Not covered: the same token on two different computers (the server still answers `agent already connected`); a process that knows the token-derived name could block starts.
-- Verification: unit tests, Windows kernel tests, the built onefile EXE in CI, and a manual two-process UAC test (elevated and normal, both start orders) with the Python agent. The UAC test was not repeated with the frozen EXE.
+- Validation: Windows single-instance protection was successfully tested with the Agent 0.3.1 CI-built Onefile executable on a Windows desktop, including both UAC elevation scenarios (elevated → standard and standard → elevated). The final release executable was built separately from the same source revision and has not undergone this combined UAC test.
 
 ## 0.3.0
 
