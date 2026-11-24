@@ -11,9 +11,10 @@ TOKEN = "test-only-secret-token"
 
 
 class FakeBackend:
-    def __init__(self, *results):
+    def __init__(self, *results, probe=single_instance.MISSING):
         self.results = list(results)
-        self.names, self.closed = [], []
+        self.names, self.closed, self.probed = [], [], []
+        self.probe_result = probe
 
     def create(self, name):
         self.names.append(name)
@@ -21,6 +22,12 @@ class FakeBackend:
         if isinstance(result, Exception):
             raise result
         return result
+
+    def probe(self, name):
+        self.probed.append(name)
+        if isinstance(self.probe_result, Exception):
+            raise self.probe_result
+        return self.probe_result
 
     def close(self, handle):
         self.closed.append(handle)
@@ -63,11 +70,42 @@ def test_second_instance_is_rejected_and_only_closes_its_own_handle():
     assert backend.closed == ["h2"] and single_instance._held == []
 
 
-def test_access_denied_on_global_falls_back_to_local():
+def test_access_denied_with_nothing_existing_falls_back_to_local():
     backend = FakeBackend(CreateResult(None, False, ERROR_ACCESS_DENIED), CreateResult("h", False))
     lock = single_instance.acquire(WS, TOKEN, backend=backend)
     assert [n.split("\\")[0] for n in backend.names] == ["Global", "Local"]
+    assert backend.probed == [backend.names[0]]
     assert lock.active and "logon session" in lock.degraded
+
+
+@pytest.mark.parametrize("found", [single_instance.DENIED, single_instance.PRESENT])
+def test_access_denied_on_an_existing_global_object_blocks_instead_of_falling_back(found):
+    backend = FakeBackend(CreateResult(None, False, ERROR_ACCESS_DENIED), probe=found)
+    with pytest.raises(AlreadyRunning):
+        single_instance.acquire(WS, TOKEN, backend=backend)
+    assert len(backend.names) == 1, "no independent Local object may be created"
+    assert single_instance._held == []
+
+
+@pytest.mark.parametrize("probe", [6, OSError("boom")])
+def test_access_denied_with_an_unclear_probe_fails_open_without_local_object(probe):
+    backend = FakeBackend(CreateResult(None, False, ERROR_ACCESS_DENIED), probe=probe)
+    lock = single_instance.acquire(WS, TOKEN, backend=backend)
+    assert not lock.active and lock.degraded and "boom" not in lock.degraded
+    assert len(backend.names) == 1
+
+
+def test_access_denied_on_local_is_not_probed_and_fails_open():
+    backend = FakeBackend(CreateResult(None, False, ERROR_ACCESS_DENIED), CreateResult(None, False, ERROR_ACCESS_DENIED))
+    lock = single_instance.acquire(WS, TOKEN, backend=backend)
+    assert not lock.active and len(backend.probed) == 1
+
+
+def test_windows_backend_requests_synchronize_only_and_explicit_dacl():
+    # The access mask is what makes an existing, differently-privileged object detectable.
+    assert single_instance.WindowsMutexBackend.SYNCHRONIZE == 0x00100000
+    sddl = single_instance.WindowsMutexBackend.SDDL
+    assert "(A;;0x00100000;;;WD)" in sddl and sddl.count("0x00100000") == 1   # others: SYNCHRONIZE only
 
 
 @pytest.mark.parametrize("results", [

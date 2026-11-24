@@ -93,6 +93,22 @@ def start_holder(ctl, tag, ws=WS, token=TOKEN, go=True):
     return proc
 
 
+def is_elevated():
+    import ctypes
+    return bool(ctypes.windll.shell32.IsUserAnAdmin())
+
+
+def start_deelevated_holder(ctl, tag, ws=WS, token=TOKEN):
+    """Start the holder with a de-elevated token (Safer basic-user level): Administrators becomes deny-only, which is
+    what a normal (non-elevated) start of the same user looks like to an object created by an elevated process."""
+    script = ctl / "holder.py"
+    script.write_text(HOLDER.replace("sys.argv[1]", repr(str(ROOT))).replace("sys.argv[2:6]", "sys.argv[1:5]"),
+                      encoding="utf-8")
+    command = subprocess.list2cmdline([sys.executable, str(script), ws, token, str(ctl), tag])
+    subprocess.run(["runas", "/trustlevel:0x20000", command], capture_output=True, timeout=30, check=True)
+    (ctl / "go").write_text("1")
+
+
 def agent_config(tmp_path, server_ws=WS, token=TOKEN, pitwall_ws="ws://127.0.0.1:1"):
     path = tmp_path / "stintara-agent.json"
     path.write_text(json.dumps({"server_ws": server_ws, "token": token, "pitwall_ws": pitwall_ws}), encoding="utf-8")
@@ -145,6 +161,24 @@ def test_different_token_or_server_run_in_parallel(ctl):
     start_holder(ctl, "b", token=TOKEN + "-other")
     start_holder(ctl, "c", ws="ws://127.0.0.1:2/ws/ingest")
     wait_for(lambda: all(status(ctl, t) == "HELD" for t in "abc"), what="three distinct identities")
+
+
+def test_deelevated_second_start_detects_the_first_instance(ctl):
+    """Normal first instance, de-elevated second one: detected via the real DACL/SYNCHRONIZE path."""
+    start_holder(ctl, "a")
+    wait_for(lambda: status(ctl, "a") == "HELD")
+    start_deelevated_holder(ctl, "b")
+    assert wait_for(lambda: status(ctl, "b"), 30, "second instance decision") == "DENIED"
+
+
+@pytest.mark.skipif(sys.platform == "win32" and not is_elevated(), reason="needs an elevated first process")
+def test_elevated_first_unelevated_second_is_detected_not_bypassed(ctl):
+    """P2 regression: the elevated first instance's object must still be detected by a normal second start."""
+    start_holder(ctl, "a")                      # inherits the elevated token of this test process
+    wait_for(lambda: status(ctl, "a") == "HELD")
+    start_deelevated_holder(ctl, "b")
+    assert wait_for(lambda: status(ctl, "b"), 30, "second instance decision") == "DENIED"
+    assert status(ctl, "a") == "HELD"
 
 
 # --- real onefile EXE -------------------------------------------------------------------------------------------
