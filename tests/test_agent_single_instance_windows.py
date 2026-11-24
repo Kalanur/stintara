@@ -102,7 +102,7 @@ def is_elevated():
     return bool(ctypes.windll.shell32.IsUserAnAdmin())
 
 
-def spawn_deelevated(argv):
+def spawn_deelevated(argv, stderr_file):
     """Start a process with a LUA-restricted copy of this process's token (Administrators becomes deny-only, medium
     integrity), i.e. what a normal, non-elevated start looks like next to an elevated one. Returns the pid.
     A restricted version of the caller's own primary token needs no extra privilege."""
@@ -149,7 +149,9 @@ def spawn_deelevated(argv):
     check(adv.SetTokenInformation(restricted, 25, ctypes.byref(label), ctypes.sizeof(label)), "SetTokenInformation")
     startup, info = STARTUPINFOW(), PROCESS_INFORMATION()
     startup.cb = ctypes.sizeof(startup)
-    command = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+    # cmd /c only to capture the child's stderr for diagnostics (the outer quotes are cmd's own /c quoting rule).
+    command = ctypes.create_unicode_buffer(
+        f'cmd.exe /c ""{argv[0]}" {subprocess.list2cmdline(argv[1:])} 2>"{stderr_file}""')
     check(adv.CreateProcessAsUserW(restricted, None, command, None, None, False, 0x08000000, None, None,
                                    ctypes.byref(startup), ctypes.byref(info)), "CreateProcessAsUserW")
     for handle in (info.hThread, info.hProcess, restricted, current):
@@ -162,8 +164,18 @@ def start_deelevated_holder(ctl, tag, ws=WS, token=TOKEN):
     script = ctl / "holder.py"
     script.write_text(HOLDER.replace("sys.argv[1]", repr(str(ROOT))).replace("sys.argv[2:6]", "sys.argv[1:5]"),
                       encoding="utf-8")
-    spawn_deelevated([sys.executable, str(script), ws, token, str(ctl), tag])
+    spawn_deelevated([sys.executable, str(script), ws, token, str(ctl), tag], ctl / f"stderr-{tag}.txt")
     (ctl / "go").write_text("1")
+
+
+def deelevated_decision(ctl, tag):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if status(ctl, tag):
+            return status(ctl, tag)
+        time.sleep(0.05)
+    err = ctl / f"stderr-{tag}.txt"
+    pytest.fail("de-elevated process never decided; stderr: " + (err.read_text(errors="replace") if err.exists() else "<none>"))
 
 
 def agent_config(tmp_path, server_ws=WS, token=TOKEN, pitwall_ws="ws://127.0.0.1:1"):
@@ -225,7 +237,7 @@ def test_deelevated_second_start_detects_the_first_instance(ctl):
     start_holder(ctl, "a")
     wait_for(lambda: status(ctl, "a") == "HELD")
     start_deelevated_holder(ctl, "b")
-    assert wait_for(lambda: status(ctl, "b"), 30, "second instance decision") == "DENIED"
+    assert deelevated_decision(ctl, "b") == "DENIED"
 
 
 @pytest.mark.skipif(sys.platform == "win32" and not is_elevated(), reason="needs an elevated first process")
@@ -234,7 +246,7 @@ def test_elevated_first_unelevated_second_is_detected_not_bypassed(ctl):
     start_holder(ctl, "a")                      # inherits the elevated token of this test process
     wait_for(lambda: status(ctl, "a") == "HELD")
     start_deelevated_holder(ctl, "b")
-    assert wait_for(lambda: status(ctl, "b"), 30, "second instance decision") == "DENIED"
+    assert deelevated_decision(ctl, "b") == "DENIED"
     assert status(ctl, "a") == "HELD"
 
 
