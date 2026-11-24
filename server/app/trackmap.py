@@ -21,14 +21,61 @@ STEP_FACTOR, STEP_SLACK_M = 1.5, 10.0   # euclidean step <= travelled * factor +
 SECTOR_MIN_OBSERVATIONS = 2
 SECTOR_MAX_SPREAD_M = 60.0
 MAX_TRACKS = 16
-MIN_SF_CHORD_M = 1.0              # shorter chord: the direction of the start/finish line is not defined
-MIN_SF_CHORD_RATIO = 0.5       # chord much shorter than the closing arc: the arc is not a straight gap
+# Start/finish marker: position and direction come from straight-line fits of the points just before (tail) and just
+# after (head) the lap-distance wrap, never from the single closing chord. Eight fits (tail and head, each for four
+# window sizes) are compared with each other; the marker exists only if ALL of them agree. These limits decide
+# whether the evidence is consistent. They are acceptance limits, not a measured or promised position accuracy.
+SF_WINDOW_SIZES = (3, 4, 5, 6)     # points per side
+SF_MIN_SPEED, SF_MAX_SPEED = 0.6, 1.6   # metres of position per metre of lap distance inside a window
+SF_MAX_RESIDUAL_M = 8.0            # a window that is not a straight line (corner) or too noisy gives no marker
+# Largest angle between ANY two of the eight fitted directions. A 30 m and a 75 m window of the same bend differ by
+# about 20 degrees at a radius of 65 m; anything sharper is not a straight stretch to extrapolate through the arc.
+SF_MAX_DIRECTION_DEG = 20.0
+# Largest distance between ANY two of the eight positions extrapolated to lap distance 0. Sample positions of the
+# stored geometries disagree with their lap distance by several metres (the per-sample step is 15 m +- 3-4 m), so two
+# honest extrapolations can differ by about 5-12 m (eight stored geometries of other tracks: 4.7-11.7 m); one stored
+# geometry whose head and tail contradict each other is 14.2 m apart.
+SF_MAX_POSITION_SPREAD_M = 12.0
 GEOMETRY_SCHEMA_VERSION = 1    # persisted track_geometries layout; unknown versions are never interpreted
 MIN_TRACK_LENGTH_M, MAX_TRACK_LENGTH_M = 200.0, 60000.0
 
 
 def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+class _Window:
+    """Least-squares line through consecutive (lap distance, x, z) points: position = centre + slope * (d - mean)."""
+
+    def __init__(self, mean, centre, slope):
+        self.mean, self.centre, self.slope = mean, centre, slope
+        speed = math.hypot(*slope)
+        self.unit = [slope[0] / speed, slope[1] / speed]
+
+    def at(self, distance):
+        return [self.centre[c] + self.slope[c] * (distance - self.mean) for c in (0, 1)]
+
+
+def _fit_window(points, distances, shift):
+    """Straight-line fit of one window (lap distances shifted by `shift`), or None unless it is a plausible straight
+    stretch: finite, strictly increasing distances, a believable speed and a small maximum residual."""
+    try:
+        ds = [d + shift for d in distances]
+        if len(ds) < 2 or any(not finite(d) for d in ds) or any(b <= a for a, b in zip(ds, ds[1:])):
+            return None
+        if any(len(p) != 2 or not finite(p[0]) or not finite(p[1]) for p in points):
+            return None
+        mean, centre = sum(ds) / len(ds), [sum(p[c] for p in points) / len(points) for c in (0, 1)]
+        spread = sum((d - mean) ** 2 for d in ds)
+        slope = [sum((d - mean) * (p[c] - centre[c]) for d, p in zip(ds, points)) / spread for c in (0, 1)]
+        speed = math.hypot(*slope)
+        if not SF_MIN_SPEED <= speed <= SF_MAX_SPEED:
+            return None
+        residual = max(math.hypot(p[0] - centre[0] - slope[0] * (d - mean), p[1] - centre[1] - slope[1] * (d - mean))
+                       for d, p in zip(ds, points))
+        return _Window(mean, centre, slope) if residual <= SF_MAX_RESIDUAL_M else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
 
 
 def normalize_lap_distance(lap_dist, length):
@@ -139,27 +186,48 @@ class TrackModel:
         """Start/finish line derived from the closed geometry and the lap distance, never from a position guess.
 
         Lap distance 0 (= the track length) lies on the closing arc between the last and the first stored point.
-        The point is interpolated linearly by lap distance on the chord between them and the direction is that
-        chord, i.e. the direction of travel. `arc_m` (length of the closing arc) bounds the position accuracy: the
-        marker is a line drawn through that gap, not a surveyed position. Returns None, never a guess, when the
-        geometry is not closed, the arc is missing or implausible, or the chord is degenerate or inconsistent
-        with the arc.
+        For each window size a straight line (position as a function of lap distance) is fitted to the last points
+        before (tail) and to the first points after (head) the wrap, and every fit is extrapolated to lap distance 0.
+        That gives eight directions and eight positions. The marker exists only if every window is a plausible
+        straight stretch AND all eight directions agree pairwise (not only head with tail of one size) AND all eight
+        positions agree pairwise. Only then are they combined: the point is the mean position, the direction the
+        normalised sum of directions that already agree. Contradictory evidence (windows of different size pointing
+        different ways, or the lap distance and the positions disagreeing at the line) gives no marker, and nothing is
+        estimated. The single closing chord is not used: it is as noisy as two samples. A stored geometry is never
+        re-learned or rewritten here.
+
+        Returned fields: `arc_m` is the length of the closing arc, i.e. how much lap distance lies between the last
+        and the first stored point. It is NOT an error bound. `evidence_spread_m` is the largest distance between
+        two of the eight extrapolations: how much the evidence disagrees with itself, an observation and not a
+        guaranteed accuracy. The real error of the line is not known here.
         """
-        if not self.complete or len(self.points) < 2:
+        if not self.complete or len(self.points) < 2 * max(SF_WINDOW_SIZES):
             return None
-        (x0, z0), (x1, z1) = self.points[-1], self.points[0]
         last, first = self.distances[-1], self.distances[0]
         arc = (self.length - last) + first
-        chord = math.hypot(x1 - x0, z1 - z0)
-        if not all(finite(v) for v in (x0, z0, x1, z1, last, first, arc, chord)):
+        if not finite(arc) or not 0 < arc <= arc_limit(self.length) or not 0 <= self.length - last <= arc:
             return None
-        if not 0 < arc <= arc_limit(self.length) or not 0 <= self.length - last <= arc:
+        fits = []
+        for size in SF_WINDOW_SIZES:
+            tail = _fit_window(self.points[-size:], self.distances[-size:], 0.0)
+            head = _fit_window(self.points[:size], self.distances[:size], self.length)
+            if tail is None or head is None:
+                return None
+            fits += [tail, head]
+        smallest_cosine = math.cos(math.radians(SF_MAX_DIRECTION_DEG))
+        if any(a.unit[0] * b.unit[0] + a.unit[1] * b.unit[1] < smallest_cosine for a, b in itertools.combinations(fits, 2)):
             return None
-        if chord < MIN_SF_CHORD_M or chord < arc * MIN_SF_CHORD_RATIO or chord > arc * STEP_FACTOR + STEP_SLACK_M:
+        positions = [fit.at(self.length) for fit in fits]
+        spread = max(math.dist(a, b) for a, b in itertools.combinations(positions, 2))
+        if not spread <= SF_MAX_POSITION_SPREAD_M:
             return None
-        t = (self.length - last) / arc
-        return dict(point=[x0 + (x1 - x0) * t, z0 + (z1 - z0) * t], direction=[(x1 - x0) / chord, (z1 - z0) / chord],
-                    arc_m=arc, basis="lap_distance")
+        dx, dz = sum(fit.unit[0] for fit in fits), sum(fit.unit[1] for fit in fits)
+        norm = math.hypot(dx, dz)
+        if not norm > 0:
+            return None
+        point = [sum(p[0] for p in positions) / len(positions), sum(p[1] for p in positions) / len(positions)]
+        return dict(point=point, direction=[dx / norm, dz / norm], arc_m=arc, evidence_spread_m=spread,
+                    basis="lap_distance")
 
     def point_sectors(self, distances=None, boundaries=None):
         boundaries = boundaries if boundaries is not None else self.sector_boundaries()
