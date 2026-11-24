@@ -1,4 +1,4 @@
-Stintara Agent (Windows, unsigned test build)
+Stintara Agent (Windows, unsigned build)
 
 Files
   StintaraAgent.exe             the agent
