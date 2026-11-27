@@ -142,3 +142,7 @@ The report retains up to 128 distinct type names plus overflow, 256 diagnostic f
 - Slot comparisons use source and integer local vehicle ID. Track/type changes delimit observed segments. Missing metadata cannot establish session identity. Disconnects and backwards source clocks discard comparison state. Rollbacks identify both segments where available; they do not establish a new official race.
 - A spatial step over 100 raw XYZ units is a diagnostic example. Sampling gaps or missing cars can cause large steps. A distance decrease paired with a lap advance is reported separately from a candidate crossing from the last 10% to the first 10% of known track length. Inspect the before/after samples for missing geometry. No interpolation or line closing the track is generated.
 - Sector/timing values, flag codes and explicit validity/cut/off-track fields remain observations. The inspector records pit state/counter changes with raw lap, session time and the latest available AllDrivers sample for that slot. A raw snapshot does not prove what was committed to a database. There is no inferred lap invalidity, grip state or strategy recommendation.
+
+## Crossing evidence (offline, diagnostic)
+
+`python -m tools.crossing <capture>` reads a v1 RAW capture and reports lap-counter transitions with their interpolated telemetry positions as diagnostic evidence only. It computes no start/finish anchor. See [CROSSING_EVIDENCE.md](CROSSING_EVIDENCE.md).
